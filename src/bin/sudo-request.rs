@@ -1,30 +1,12 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::process::{self, Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::process;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server::default_socket_path;
-
-const SSH_TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
-fn resolve_remote_socket(host: &str) -> String {
-    let output = Command::new("ssh")
-        .args([host, "id", "-u"])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let uid = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            format!("/run/user/{uid}/sudo-proxy.sock")
-        }
-        _ => {
-            eprintln!("warning: could not resolve remote UID, assuming 1000");
-            "/run/user/1000/sudo-proxy.sock".to_string()
-        }
-    }
-}
 
 fn main() {
     let opts = match parse_args() {
@@ -42,52 +24,7 @@ fn main() {
         process::exit(1);
     }
 
-    let mut ssh_child: Option<Child> = None;
-    let mut local_sock_cleanup: Option<String> = None;
-
-    let socket_path = if let Some(ref host) = opts.host {
-        let local_sock = format!("/tmp/sudo-request-{}.sock", process::id());
-        let remote_sock = opts
-            .socket
-            .as_ref()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| resolve_remote_socket(host));
-
-        // Start SSH: allocate PTY, set up tunnel, run sudo-proxy on remote
-        let tunnel_spec = format!("{local_sock}:{remote_sock}");
-        let ssh_args = vec!["-t", "-L", &tunnel_spec, host, "sudo-proxy"];
-
-        if opts.verbose {
-            eprintln!("+ ssh {}", ssh_args.join(" "));
-        }
-
-        let child = match Command::new("ssh")
-            .args(&ssh_args)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: failed to start ssh: {e}");
-                process::exit(1);
-            }
-        };
-
-        ssh_child = Some(child);
-        local_sock_cleanup = Some(local_sock.clone());
-
-        // Wait for the tunnel socket to appear
-        if !wait_for_socket(&local_sock, SSH_TUNNEL_TIMEOUT, ssh_child.as_mut().unwrap()) {
-            cleanup(&mut ssh_child, &local_sock_cleanup);
-            process::exit(1);
-        }
-
-        PathBuf::from(local_sock)
-    } else {
-        opts.socket.unwrap_or_else(default_socket_path)
-    };
+    let socket_path = opts.socket.unwrap_or_else(default_socket_path);
 
     let req = Request {
         id: uuid::Uuid::new_v4().to_string(),
@@ -105,7 +42,6 @@ fn main() {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: could not connect to {}: {e}", socket_path.display());
-            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
     };
@@ -113,7 +49,6 @@ fn main() {
     let json = serde_json::to_string(&req).expect("serialize request");
     if let Err(e) = writeln!(stream, "{json}") {
         eprintln!("error: write failed: {e}");
-        cleanup(&mut ssh_child, &local_sock_cleanup);
         process::exit(1);
     }
     let _ = stream.flush();
@@ -124,18 +59,14 @@ fn main() {
     match reader.take(10_485_760).read_line(&mut line) {
         Ok(0) => {
             eprintln!("error: server closed connection without response");
-            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
         Ok(_) => {}
         Err(e) => {
             eprintln!("error: read failed: {e}");
-            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
     }
-
-    cleanup(&mut ssh_child, &local_sock_cleanup);
 
     let resp: Response = match serde_json::from_str(line.trim()) {
         Ok(r) => r,
@@ -188,42 +119,11 @@ fn main() {
     }
 }
 
-/// Wait for a Unix socket file to appear, polling every 100ms.
-/// Returns false if timeout expires or SSH exits early.
-fn wait_for_socket(path: &str, timeout: Duration, child: &mut Child) -> bool {
-    let deadline = Instant::now() + timeout;
-    while !Path::new(path).exists() {
-        if Instant::now() > deadline {
-            eprintln!("error: timeout waiting for SSH tunnel socket");
-            return false;
-        }
-        // Check if SSH exited unexpectedly
-        if let Ok(Some(status)) = child.try_wait() {
-            eprintln!("error: ssh exited early with {status}");
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    true
-}
-
-fn cleanup(ssh_child: &mut Option<Child>, local_sock: &Option<String>) {
-    if let Some(ref mut child) = ssh_child {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    if let Some(ref path) = local_sock {
-        let _ = std::fs::remove_file(path);
-    }
-}
-
 struct Opts {
     socket: Option<PathBuf>,
-    host: Option<String>,
     reason: Option<String>,
     session: String,
     print: bool,
-    verbose: bool,
     privileged: bool,
     argv: Vec<String>,
 }
@@ -231,11 +131,9 @@ struct Opts {
 fn parse_args() -> Result<Opts, String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut socket = None;
-    let mut host = None;
     let mut reason = None;
     let mut session = String::from("sudo-request-cli");
     let mut print = false;
-    let mut verbose = false;
     let mut privileged = true;
     let mut argv = Vec::new();
     let mut i = 0;
@@ -252,12 +150,10 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("Debug client for sudo-proxy.");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --socket PATH    Unix socket path");
-                eprintln!("  --host HOST      Remote host (sets up SSH tunnel)");
+                eprintln!("  --socket PATH    Unix socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
                 eprintln!("  --reason TEXT    Reason for the request");
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
-                eprintln!("  --verbose        Echo the ssh command when using --host");
                 eprintln!("  --no-privilege   Run command without privilege escalation");
                 std::process::exit(0);
             }
@@ -266,14 +162,6 @@ fn parse_args() -> Result<Opts, String> {
                 socket = Some(PathBuf::from(
                     args.get(i).ok_or("--socket requires a value")?,
                 ));
-            }
-            "--host" => {
-                i += 1;
-                host = Some(
-                    args.get(i)
-                        .ok_or("--host requires a value")?
-                        .clone(),
-                );
             }
             "--reason" => {
                 i += 1;
@@ -293,9 +181,6 @@ fn parse_args() -> Result<Opts, String> {
             "--print" => {
                 print = true;
             }
-            "--verbose" | "-v" => {
-                verbose = true;
-            }
             "--no-privilege" => {
                 privileged = false;
             }
@@ -313,11 +198,9 @@ fn parse_args() -> Result<Opts, String> {
 
     Ok(Opts {
         socket,
-        host,
         reason,
         session,
         print,
-        verbose,
         privileged,
         argv,
     })

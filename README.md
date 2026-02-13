@@ -15,8 +15,7 @@ AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ─
                             local socket, or SSH tunnel
                         (start_server spawns sudo-proxy --host
                          which sets up the tunnel and remote
-                         server; sudo-request --host does the
-                         same for single-request CLI use)
+                         server)
 ```
 
 The TUI prompt asks for approval (single keypress), then `sudo` handles
@@ -63,7 +62,7 @@ fast.
 | Binary | Feature | Purpose |
 |---|---|---|
 | `sudo-proxy` | — | Server: socket listener, approval UI, execution |
-| `sudo-request` | — | Debug client / SSH tunnel helper |
+| `sudo-request` | — | Debug client (local socket only) |
 | `pkexec-cache` | — | Optional polkit rule manager |
 | `sudo-proxy-mcp` | `mcp` | MCP server (stdio, for AI agents) |
 
@@ -213,10 +212,6 @@ sudo-request --no-privilege ls /etc
 
 # Tag the request with a session name (default: sudo-request-cli)
 sudo-request --session my-project apt update
-
-# Remote: SSH in, start sudo-proxy, tunnel the socket, send request — all at once
-sudo-request --host remotehost id
-sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 ```
 
 `sudo-proxy --host HOST` resolves the remote UID (cached in
@@ -225,8 +220,16 @@ sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 The remote TUI prompt and sudo password prompt appear in your terminal.
 The MCP server uses this internally via `start_server(host=...)`.
 
-`sudo-request --host HOST` does the same but for a single request: starts SSH,
-waits for the tunnel, sends the request, then cleans up. Useful for debugging.
+The equivalent without `--host` (useful if only the remote has sudo-proxy
+installed, or for understanding what happens under the hood):
+
+```bash
+ssh -t -L /tmp/sudo-proxy-HOST.sock:/run/user/$(ssh HOST id -u)/sudo-proxy.sock HOST sudo-proxy
+```
+
+This allocates a PTY (`-t`), forwards the local socket to the remote
+`sudo-proxy.sock`, and runs `sudo-proxy` on the remote end. Clients then
+connect to `/tmp/sudo-proxy-HOST.sock` locally.
 
 ## Protocol
 
@@ -368,8 +371,8 @@ src/
   server.rs               Unix socket listener, validation, dispatch
   mcp.rs                  MCP server: tools, resources, socket client, response formatting
   bin/
-    sudo-proxy.rs         server entry point
-    sudo-request.rs       debug client
+    sudo-proxy.rs         server entry point (local and --host remote)
+    sudo-request.rs       debug client (local socket only)
     sudo-proxy-mcp.rs     MCP server entry point (stdio transport)
     pkexec-cache.rs       polkit rule manager
 ```
@@ -385,8 +388,6 @@ Functional but minimal.
 - `--confirm-unprivileged` on server: prompt before non-privileged commands
 - `--no-privilege` on client: sends request with `privileged: false`
 - `--host` flag on server: SSHs into remote, starts sudo-proxy, tunnels socket (used by MCP `start_server`)
-- `--host` flag on client: same setup for a single request, then cleans up
-- `--verbose` / `-v` on client: echoes the SSH command
 - `--print` mode for human-readable output on stdout
 - JSON-line protocol with base64-encoded output and `timeout` status
 - Environment sanitization (blocklist + allowlist)
