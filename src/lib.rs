@@ -1,5 +1,6 @@
 pub mod executor;
 pub mod gui;
+pub mod hosts;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mode;

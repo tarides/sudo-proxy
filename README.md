@@ -108,9 +108,10 @@ src/
   mode.rs                 Local / Remote detection (TUI + pkexec or TUI + sudo)
   executor.rs             pkexec/sudo/direct dispatch, which(), env sanitization
   gui.rs                  zenity/kdialog/tui auto-detect confirmation dialog
+  hosts.rs                Known hosts config (~/.config/sudo-proxy/hosts.json)
   tui.rs                  /dev/tty Y/N prompt, result display
   server.rs               Unix socket listener, validation, dispatch
-  mcp.rs                  MCP server: tools, socket client, response formatting
+  mcp.rs                  MCP server: tools, resources, socket client, response formatting
   bin/
     sudo-proxy.rs         server entry point
     sudo-request.rs       debug client
@@ -143,7 +144,9 @@ This is v0.1 — functional but minimal.
 - TUI result echo (stdout/stderr/exit code, truncated to 3 lines)
 - Signal handler for socket cleanup on SIGINT/SIGTERM
 - `pkexec-cache` tool for optional polkit auth caching
-- MCP server (`sudo-proxy-mcp`) with `execute` and `start_server` tools
+- MCP server (`sudo-proxy-mcp`) with `execute`, `start_server`, and `update_host` tools
+- MCP resources: known hosts list (`sudo-proxy://hosts`)
+- Dynamic MCP instructions with known hosts and install guidance
 
 **Not yet implemented:**
 - Command/argument allowlisting (needs policy framework)
@@ -249,6 +252,11 @@ sudo-proxy as two tools over stdio JSON-RPC. Any MCP-capable AI client
 - `privileged`: whether to escalate privileges (default `true`).
 - `env`: environment variables to pass.
 
+**`update_host`** — record metadata about a known host.
+- `host` (required): hostname to update.
+- `description`: human-readable description (e.g. "CI server").
+- `os`: operating system info (e.g. "Ubuntu 24.04").
+
 ### Claude Code configuration
 
 Add to `~/.claude/claude_desktop_config.json` or the project's
@@ -266,6 +274,28 @@ Add to `~/.claude/claude_desktop_config.json` or the project's
 
 Or if the binary is not in `$PATH`, use the full path to
 `target/release/sudo-proxy-mcp`.
+
+### Known hosts
+
+The MCP server remembers hosts you connect to in
+`~/.config/sudo-proxy/hosts.json`. Each `start_server` or `execute` call
+updates the `last_connected` timestamp for the relevant host.
+
+This data is used in two ways:
+
+1. **Dynamic instructions** — when a new MCP session starts, the server's
+   instructions include a "Known hosts" section listing all previously
+   connected hosts with their description and last connection time. The model
+   sees this automatically without the user having to re-specify hostnames.
+
+2. **MCP resource** — the host list is exposed as the `sudo-proxy://hosts`
+   resource, readable via `ListMcpResourcesTool` / `ReadMcpResourceTool`.
+
+The model can call `update_host` to record a host's description and OS info
+after learning them during a session.
+
+If the `sudo-proxy` binary is not found in PATH or next to the MCP server
+binary, the instructions include a link to the installation section.
 
 ### Why not just use the Bash tool?
 

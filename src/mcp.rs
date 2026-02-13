@@ -6,11 +6,19 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
-use rmcp::{schemars, tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler};
+use rmcp::model::{
+    AnnotateAble, CallToolResult, Content, ListResourcesResult, PaginatedRequestParams,
+    RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+    ServerCapabilities, ServerInfo,
+};
+use rmcp::service::RequestContext;
+use rmcp::{
+    schemars, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
+};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
+use crate::hosts::HostsConfig;
 use crate::protocol::{Request, Response, Status};
 use crate::server::default_socket_path;
 
@@ -60,6 +68,20 @@ pub struct StartServerParams {
     pub host: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct UpdateHostParams {
+    /// Hostname to update
+    pub host: String,
+
+    /// Human-readable description of the host (e.g. "CI server")
+    #[serde(default)]
+    pub description: Option<String>,
+
+    /// Operating system info (e.g. "Ubuntu 24.04")
+    #[serde(default)]
+    pub os: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // McpProxy — the MCP server
 // ---------------------------------------------------------------------------
@@ -94,6 +116,8 @@ impl McpProxy {
             )));
         }
 
+        let host_name = params.host.clone().unwrap_or_else(|| "localhost".into());
+
         let req = Request {
             id: uuid::Uuid::new_v4().to_string(),
             host: params.host.unwrap_or_default(),
@@ -111,6 +135,10 @@ impl McpProxy {
         )
         .await;
 
+        if let Ok(Ok(_)) = &result {
+            touch_host(&host_name);
+        }
+
         match result {
             Ok(Ok(resp)) => Ok(format_response(resp)),
             Ok(Err(e)) => Ok(error_result(e)),
@@ -125,26 +153,143 @@ impl McpProxy {
         &self,
         Parameters(params): Parameters<StartServerParams>,
     ) -> Result<CallToolResult, McpError> {
-        match params.host {
+        let result = match &params.host {
             None => start_local().await,
-            Some(host) => start_remote(&host).await,
+            Some(host) => start_remote(host).await,
+        };
+
+        if let Ok(ref r) = result {
+            if r.is_error != Some(true) {
+                let host_name = params.host.unwrap_or_else(|| "localhost".into());
+                touch_host(&host_name);
+            }
         }
+
+        result
+    }
+
+    #[tool(
+        description = "Update metadata for a known host. Use this to record a host's description or OS after learning it during a session."
+    )]
+    async fn update_host(
+        &self,
+        Parameters(params): Parameters<UpdateHostParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut config = HostsConfig::load();
+        let info = config
+            .hosts
+            .entry(params.host.clone())
+            .or_insert_with(|| crate::hosts::HostInfo {
+                description: String::new(),
+                os: String::new(),
+                last_connected: String::new(),
+            });
+        if let Some(desc) = params.description {
+            info.description = desc;
+        }
+        if let Some(os) = params.os {
+            info.os = os;
+        }
+        config.save();
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "Updated host {}",
+            params.host
+        ))]))
     }
 }
 
 #[tool_handler]
 impl ServerHandler for McpProxy {
     fn get_info(&self) -> ServerInfo {
+        let mut instructions = String::from(
+            "Execute commands through sudo-proxy with human approval. \
+             Call start_server first if sudo-proxy is not running, \
+             then use execute to run commands.",
+        );
+
+        let config = HostsConfig::load();
+        if !config.hosts.is_empty() {
+            instructions.push_str("\n\nKnown hosts:");
+            for (name, info) in &config.hosts {
+                instructions.push_str(&format!("\n- {name}"));
+                if !info.description.is_empty() {
+                    instructions.push_str(&format!(": {}", info.description));
+                }
+                if !info.os.is_empty() {
+                    instructions.push_str(&format!(" ({})", info.os));
+                }
+                if !info.last_connected.is_empty() {
+                    instructions.push_str(&format!(" [last: {}]", info.last_connected));
+                }
+            }
+        }
+
+        let has_binary = find_sibling_binary("sudo-proxy").is_some()
+            || which("sudo-proxy").is_some();
+        if !has_binary {
+            instructions.push_str(
+                "\n\nThe sudo-proxy binary is not installed. \
+                 See https://github.com/tarides/sudo-proxy#installation for setup instructions.",
+            );
+        }
+
         ServerInfo {
-            instructions: Some(
-                "Execute commands through sudo-proxy with human approval. \
-                 Call start_server first if sudo-proxy is not running, \
-                 then use execute to run commands."
-                    .into(),
-            ),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(instructions.into()),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             ..Default::default()
         }
+    }
+
+    fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourcesResult, McpError>> + Send + '_ {
+        std::future::ready(Ok(ListResourcesResult {
+            meta: None,
+            next_cursor: None,
+            resources: vec![RawResource {
+                uri: "sudo-proxy://hosts".into(),
+                name: "known-hosts".into(),
+                title: None,
+                description: Some(
+                    "Known sudo-proxy hosts with system info and last connection time".into(),
+                ),
+                mime_type: Some("application/json".into()),
+                size: None,
+                icons: None,
+                meta: None,
+            }
+            .no_annotation()],
+        }))
+    }
+
+    fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
+        std::future::ready(if request.uri == "sudo-proxy://hosts" {
+            let config = HostsConfig::load();
+            let json =
+                serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into());
+            Ok(ReadResourceResult {
+                contents: vec![ResourceContents::TextResourceContents {
+                    uri: "sudo-proxy://hosts".into(),
+                    mime_type: Some("application/json".into()),
+                    text: json,
+                    meta: None,
+                }],
+            })
+        } else {
+            Err(McpError::resource_not_found(
+                format!("Unknown resource: {}", request.uri),
+                None,
+            ))
+        })
     }
 }
 
@@ -400,6 +545,12 @@ fn which(name: &str) -> Option<PathBuf> {
             None
         }
     })
+}
+
+fn touch_host(host: &str) {
+    let mut config = HostsConfig::load();
+    config.touch(host);
+    config.save();
 }
 
 fn now_iso8601() -> String {
