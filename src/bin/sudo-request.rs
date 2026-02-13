@@ -10,7 +10,21 @@ use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server::default_socket_path;
 
 const SSH_TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
-const DEFAULT_REMOTE_SOCKET: &str = "/run/user/1000/sudo-proxy.sock";
+fn resolve_remote_socket(host: &str) -> String {
+    let output = Command::new("ssh")
+        .args([host, "id", "-u"])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let uid = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            format!("/run/user/{uid}/sudo-proxy.sock")
+        }
+        _ => {
+            eprintln!("warning: could not resolve remote UID, assuming 1000");
+            "/run/user/1000/sudo-proxy.sock".to_string()
+        }
+    }
+}
 
 fn main() {
     let opts = match parse_args() {
@@ -37,7 +51,7 @@ fn main() {
             .socket
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| DEFAULT_REMOTE_SOCKET.to_string());
+            .unwrap_or_else(|| resolve_remote_socket(host));
 
         // Start SSH: allocate PTY, set up tunnel, run sudo-proxy on remote
         let tunnel_spec = format!("{local_sock}:{remote_sock}");

@@ -57,9 +57,7 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     if let Some(resolved) = which(&req.argv[0]) {
         let resolved_str = resolved.display().to_string();
         if resolved_str != req.argv[0] {
-            let mut full = vec![resolved_str];
-            full.extend_from_slice(&req.argv[1..]);
-            writeln!(tty_w, "Resolves: {}", shell_join(&full))?;
+            writeln!(tty_w, "Resolves: {}", resolved_str)?;
         }
     } else {
         writeln!(tty_w, "Resolves: {bold}(not found in PATH){reset}")?;

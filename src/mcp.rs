@@ -16,7 +16,8 @@ use crate::server::default_socket_path;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-const DEFAULT_REMOTE_SOCKET: &str = "/run/user/1000/sudo-proxy.sock";
+/// Default remote socket path — uses /run/user/<uid>/sudo-proxy.sock.
+/// The UID is resolved at connection time via `ssh host id -u`.
 
 // ---------------------------------------------------------------------------
 // Tool parameter schemas
@@ -118,7 +119,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Start a sudo-proxy server. Local (no host): spawns a background sudo-proxy process. Remote (host given): opens a terminal window with SSH running sudo-proxy, with a socket tunnel so execute calls reach the remote host."
+        description = "Start a sudo-proxy server. Local (no host): opens a terminal window with sudo-proxy's TUI for command approval. Remote (host given): opens a terminal window with SSH running sudo-proxy, with a socket tunnel so execute calls reach the remote host."
     )]
     async fn start_server(
         &self,
@@ -168,20 +169,29 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     // Find the sudo-proxy binary next to our own executable, or in PATH
     let proxy_bin = find_sibling_binary("sudo-proxy").unwrap_or_else(|| "sudo-proxy".into());
 
-    let child = std::process::Command::new(&proxy_bin)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| McpError::internal_error(format!("spawn sudo-proxy: {e}"), None))?;
+    let terminal = find_terminal()
+        .map_err(|e| McpError::internal_error(e, None))?;
 
-    let pid = child.id();
+    let proxy_cmd = format!("{} -v", proxy_bin.display());
+
+    let mut cmd = std::process::Command::new(&terminal);
+    match terminal.as_str() {
+        "gnome-terminal" => {
+            cmd.args(["--", "sh", "-c", &proxy_cmd]);
+        }
+        _ => {
+            cmd.args(["-e", "sh", "-c", &proxy_cmd]);
+        }
+    }
+
+    cmd.spawn()
+        .map_err(|e| McpError::internal_error(format!("spawn terminal: {e}"), None))?;
 
     // Wait for socket to appear (up to 5s)
     for _ in 0..50 {
         if socket_path.exists() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "sudo-proxy started (pid {pid}) at {}",
+                "sudo-proxy started in terminal at {}",
                 socket_path.display()
             ))]));
         }
@@ -189,14 +199,13 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     }
 
     Ok(error_result(format!(
-        "sudo-proxy spawned (pid {pid}) but socket not ready after 5s at {}",
+        "Terminal opened but socket not ready after 5s at {}",
         socket_path.display()
     )))
 }
 
 async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
     let local_sock = format!("/tmp/sudo-proxy-{host}.sock");
-    let remote_sock = DEFAULT_REMOTE_SOCKET;
 
     // Check if tunnel already exists
     if Path::new(&local_sock).exists() {
@@ -208,12 +217,25 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
         let _ = std::fs::remove_file(&local_sock);
     }
 
+    // Resolve remote UID so we tunnel to the right XDG_RUNTIME_DIR
+    let uid_output = std::process::Command::new("ssh")
+        .args([host, "id", "-u"])
+        .output()
+        .map_err(|e| McpError::internal_error(format!("ssh id -u: {e}"), None))?;
+    if !uid_output.status.success() {
+        return Ok(error_result(format!(
+            "Failed to get remote UID via ssh {host} id -u"
+        )));
+    }
+    let remote_uid = String::from_utf8_lossy(&uid_output.stdout).trim().to_string();
+    let remote_sock = format!("/run/user/{remote_uid}/sudo-proxy.sock");
+
     let tunnel = format!("{local_sock}:{remote_sock}");
 
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy --tui -v");
+    let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy -v");
 
     let mut cmd = std::process::Command::new(&terminal);
     match terminal.as_str() {

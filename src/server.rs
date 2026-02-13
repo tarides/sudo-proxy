@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
-use crate::gui;
 use crate::mode::Mode;
 use crate::protocol::{Request, Response};
 use crate::tui;
@@ -131,6 +130,7 @@ pub fn default_socket_path() -> PathBuf {
 pub fn run(
     socket_path: &Path,
     mode: Mode,
+    pkexec_only: bool,
     verbose: bool,
     confirm_unprivileged: bool,
 ) -> std::io::Result<()> {
@@ -217,25 +217,24 @@ pub fn run(
         }
 
         let resp = if req.privileged {
-            // Privileged: existing behavior
-            match mode {
-                Mode::Local => exec_pkexec(&req, &env),
-                Mode::Remote => {
-                    match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                        Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
-                        Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
-                        Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
-                        Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
-                    }
+            if pkexec_only && mode == Mode::Local {
+                // --pkexec: old behavior — pkexec handles both auth and approval
+                exec_pkexec(&req, &env)
+            } else {
+                // Default: TUI prompt first, then escalate
+                match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
+                    Ok(tui::PromptResult::Approved) => match mode {
+                        Mode::Local => exec_pkexec(&req, &env),
+                        Mode::Remote => exec_sudo(&req, &env),
+                    },
+                    Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+                    Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+                    Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
                 }
             }
         } else if confirm_unprivileged {
-            // Non-privileged with confirmation
-            let prompt_result = match mode {
-                Mode::Local => gui::prompt_gui(&req),
-                Mode::Remote => tui::prompt_tty(&req, PROMPT_TIMEOUT),
-            };
-            match prompt_result {
+            // Non-privileged with confirmation: always TUI
+            match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
                 Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
                 Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                 Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
@@ -246,8 +245,8 @@ pub fn run(
             exec_direct(&req, &env)
         };
 
-        // Echo result on /dev/tty only for privileged commands in remote mode
-        if req.privileged && mode == Mode::Remote {
+        // Echo result on /dev/tty for all privileged commands
+        if req.privileged && !pkexec_only {
             let _ = tui::display_result(&resp);
         }
 

@@ -24,8 +24,8 @@ impl Mode {
 
     pub fn label(self) -> &'static str {
         match self {
-            Mode::Local => "local (pkexec)",
-            Mode::Remote => "remote (sudo + TUI)",
+            Mode::Local => "local (TUI + pkexec)",
+            Mode::Remote => "remote (TUI + sudo)",
         }
     }
 }

@@ -28,13 +28,27 @@ fn get_login_username() -> Result<String, String> {
             return Ok(user);
         }
     }
+    // PKEXEC_UID is set when running under pkexec — resolve to username
+    if let Ok(uid_str) = std::env::var("PKEXEC_UID") {
+        if let Ok(uid) = uid_str.parse::<u32>() {
+            if uid != 0 {
+                let pw = unsafe { libc::getpwuid(uid) };
+                if !pw.is_null() {
+                    let name = unsafe { std::ffi::CStr::from_ptr((*pw).pw_name) };
+                    if let Ok(s) = name.to_str() {
+                        return Ok(s.to_string());
+                    }
+                }
+            }
+        }
+    }
     // Fallback: LOGNAME or USER
     if let Ok(user) = std::env::var("LOGNAME").or_else(|_| std::env::var("USER")) {
         if !user.is_empty() && user != "root" {
             return Ok(user);
         }
     }
-    Err("could not determine non-root username (run with sudo)".to_string())
+    Err("could not determine non-root username (run with sudo or pkexec)".to_string())
 }
 
 enum Action {

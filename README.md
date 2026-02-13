@@ -1,15 +1,16 @@
 # sudo-proxy
 
-Privileged command execution proxy. Receives requests over a Unix socket and
-delegates to **pkexec** (local, graphical) or **sudo** (remote, terminal TUI).
-Designed for integration with an MCP server so that an AI agent can request
-root commands with explicit human approval.
+Privileged command execution proxy. Receives requests over a Unix socket,
+shows a **TUI prompt** for human approval, then delegates to **pkexec** (local)
+or **sudo** (remote) for privilege escalation. Designed for integration with an
+MCP server so that an AI agent can request root commands with explicit human
+approval.
 
 ## Architecture
 
 ```
-AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ──► pkexec  (local)
-             (MCP server)       │                               sudo    (remote)
+AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ──► TUI Y/N ──► pkexec  (local)
+             (MCP server)       │                                           sudo    (remote)
                                 │
                                 └── local socket, or SSH tunnel
                                     (sudo-request --host sets up both
@@ -17,29 +18,33 @@ AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ─
 ```
 
 **Local mode** (graphical session detected via `$DISPLAY` / `$WAYLAND_DISPLAY`):
-passthrough to `pkexec`, which shows its own auth dialog.
+TUI prompt for approval, then `pkexec` for privilege escalation.
 
-**Remote mode** (no display, or `--tui` flag):
-displays the request on the terminal, asks `[y/N]` with a 60-second timeout,
-then runs via `sudo` if approved. stdout, stderr and exit code are echoed
-locally after execution.
+**Remote mode** (no display):
+TUI prompt for approval, then `sudo` for privilege escalation. stdout, stderr
+and exit code are echoed locally after execution.
+
+**`--pkexec` mode**: passthrough to `pkexec`, which handles both authentication
+and approval in its own dialog. No TUI prompt. See the
+[polkit note](#polkit-authentication-caching-local-mode) for why this is not
+the default.
 
 **Non-privileged mode** (`privileged: false` in the request):
 runs the command directly as the current user, without sudo or pkexec.
 By default, no confirmation is needed. Pass `--confirm-unprivileged` to the
-server to require a Y/N prompt (graphical in local mode, TUI in remote mode).
+server to require a TUI Y/N prompt.
 
 ## Usage
 
 ```bash
-# Start in auto-detected mode
+# Start in auto-detected mode (TUI prompt + pkexec or sudo)
 sudo-proxy
 
-# Force TUI mode even with a display
-sudo-proxy --tui
+# Use pkexec directly (no TUI, pkexec handles auth and approval)
+sudo-proxy --pkexec
 
 # Quiet by default; verbose prints startup info and logs each request
-sudo-proxy --tui -v
+sudo-proxy -v
 
 # Require confirmation for non-privileged commands too
 sudo-proxy --confirm-unprivileged
@@ -59,7 +64,7 @@ sudo-request --host remotehost id
 sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 ```
 
-`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy`, waits for the tunnel
+`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy -v`, waits for the tunnel
 socket to appear, sends the request, then cleans up. The remote sudo-proxy's
 TUI prompt and sudo password prompt appear in your terminal via SSH's PTY.
 No prior SSH session or manual server start needed — just an account with SSH
@@ -100,7 +105,7 @@ as the current user without sudo/pkexec.
 src/
   lib.rs                  re-exports shared modules
   protocol.rs             Request, Response, Status (serde)
-  mode.rs                 Local / Remote detection
+  mode.rs                 Local / Remote detection (TUI + pkexec or TUI + sudo)
   executor.rs             pkexec/sudo/direct dispatch, which(), env sanitization
   gui.rs                  zenity/kdialog/tui auto-detect confirmation dialog
   tui.rs                  /dev/tty Y/N prompt, result display
@@ -118,9 +123,9 @@ src/
 This is v0.1 — functional but minimal.
 
 **Implemented:**
-- Local mode (pkexec) and remote mode (sudo + TUI)
+- Local mode (TUI + pkexec) and remote mode (TUI + sudo)
 - Non-privileged mode (direct execution, no escalation)
-- `--tui` flag to force terminal prompt mode
+- `--pkexec` flag to bypass TUI and use pkexec directly
 - `--verbose` / `-v` on server: prints startup info, logs each request
 - `--confirm-unprivileged` on server: prompt before non-privileged commands
 - `--no-privilege` on client: sends request with `privileged: false`
@@ -177,6 +182,15 @@ so symlink tricks are visible.
 
 ## Polkit authentication caching (local mode)
 
+**Why TUI is the default:** polkit conflates authentication (proving who you
+are) and authorization (approving what to do). With auth caching enabled,
+`pkexec` skips its dialog entirely — commands run silently with no approval
+prompt. This defeats sudo-proxy's human-in-the-loop design. The TUI separates
+concerns: it always shows the command for Y/N approval, while pkexec/sudo
+handles only password authentication.
+
+Use `--pkexec` if you prefer the old behavior where pkexec handles both.
+
 By default, `pkexec` asks for a password on every request. You can optionally
 configure polkit to cache authentication for a few minutes, similar to `sudo`'s
 default behavior. This is done by creating a polkit rule file.
@@ -222,7 +236,8 @@ sudo-proxy as two tools over stdio JSON-RPC. Any MCP-capable AI client
 ### Tools
 
 **`start_server`** — start a sudo-proxy instance.
-- No arguments: spawns `sudo-proxy` as a background process on localhost.
+- No arguments: opens a terminal window with `sudo-proxy` and its TUI for
+  command approval.
 - `host`: opens a terminal window with `ssh -t HOST sudo-proxy` and an SSH
   tunnel so that subsequent `execute` calls reach the remote host.
 
@@ -307,8 +322,8 @@ scp sudo-proxy remote:/usr/local/bin/
 ```
 
 When an AI agent calls `start_server(host="remote")`, the MCP server SSHs
-in and runs `sudo-proxy --tui -v` on the remote. The only prerequisites
-on the remote side are SSH access and the `sudo-proxy` binary in `$PATH`.
+in and runs `sudo-proxy -v` on the remote. The only prerequisites on the
+remote side are SSH access and the `sudo-proxy` binary in `$PATH`.
 
 ### Local workstation setup
 
