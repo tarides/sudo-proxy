@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::Stdio;
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -320,6 +321,9 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     let proxy_cmd = format!("{}", proxy_bin.display());
 
     let mut cmd = std::process::Command::new(&terminal);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     match terminal.as_str() {
         "gnome-terminal" => {
             cmd.args(["--", "sh", "-c", &proxy_cmd]);
@@ -383,6 +387,9 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
     let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy");
 
     let mut cmd = std::process::Command::new(&terminal);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     match terminal.as_str() {
         "gnome-terminal" => {
             cmd.args(["--", "sh", "-c", &ssh_cmd]);
