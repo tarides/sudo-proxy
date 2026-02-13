@@ -66,6 +66,7 @@ JSON lines over Unix socket. One request per connection, processed sequentially.
 ```json
 {"id":"550e...","status":"ok","exit_code":0,"stdout":"<base64>","stderr":"<base64>"}
 {"id":"550e...","status":"denied"}
+{"id":"550e...","status":"timeout"}
 {"id":"550e...","status":"error","message":"..."}
 ```
 
@@ -73,15 +74,16 @@ JSON lines over Unix socket. One request per connection, processed sequentially.
 
 ```
 src/
-  lib.rs               re-exports shared modules
-  protocol.rs          Request, Response, Status (serde)
-  mode.rs              Local / Remote detection
-  executor.rs          pkexec/sudo dispatch, which(), env sanitization
-  tui.rs               /dev/tty Y/N prompt, result display
-  server.rs            Unix socket listener, validation, dispatch
+  lib.rs                  re-exports shared modules
+  protocol.rs             Request, Response, Status (serde)
+  mode.rs                 Local / Remote detection
+  executor.rs             pkexec/sudo dispatch, which(), env sanitization
+  tui.rs                  /dev/tty Y/N prompt, result display
+  server.rs               Unix socket listener, validation, dispatch
   bin/
-    sudo-proxy.rs      server entry point
-    sudo-request.rs    debug client
+    sudo-proxy.rs         server entry point
+    sudo-request.rs       debug client
+    pkexec-cache.rs  polkit rule manager
 ```
 
 ## Implementation status
@@ -136,6 +138,44 @@ null, and stdout/stderr piped — they do not inherit the socket file descriptor
 **TUI hardening:** the Y/N prompt times out after 60 seconds (default deny).
 The resolved absolute path of argv[0] is displayed alongside the requested name
 so symlink tricks are visible.
+
+## Polkit authentication caching (local mode)
+
+By default, `pkexec` asks for a password on every request. You can optionally
+configure polkit to cache authentication for a few minutes, similar to `sudo`'s
+default behavior. This is done by creating a polkit rule file.
+
+**This is a user decision.** The rule applies to all `pkexec` calls from your
+user, not just those from sudo-proxy — polkit has no way to distinguish the
+calling program. Evaluate whether this trade-off is acceptable for your setup.
+
+The `pkexec-cache` tool manages this rule:
+
+```bash
+# Check if the rule is installed
+pkexec-cache
+
+# Install the rule (detects your username from SUDO_USER)
+sudo pkexec-cache --create
+
+# Remove the rule
+sudo pkexec-cache --delete
+```
+
+The rule is written to `/etc/polkit-1/rules.d/50-pkexec-cache.rules`
+and caches authentication for the calling user with these conditions:
+- `subject.active` — only the foreground session (not background terminals)
+- `subject.local` — only local sessions (not SSH)
+- `AUTH_ADMIN_KEEP` — cache the admin password for ~5 minutes
+
+polkitd monitors its rules directory and reloads automatically — no service
+restart is needed.
+
+There is no GUI tool to manage polkit rules on any distribution. On current
+Ubuntu and Debian, polkit uses the JavaScript `.rules` format — the older
+`.pkla` format is deprecated. The
+[Arch Wiki polkit page](https://wiki.archlinux.org/title/Polkit) is the most
+comprehensive reference.
 
 ## Building
 

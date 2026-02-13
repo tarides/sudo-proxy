@@ -47,6 +47,7 @@ pub struct Response {
 pub enum Status {
     Ok,
     Denied,
+    Timeout,
     Error,
 }
 
@@ -66,6 +67,17 @@ impl Response {
         Self {
             id: id.to_string(),
             status: Status::Denied,
+            exit_code: None,
+            stdout: None,
+            stderr: None,
+            message: None,
+        }
+    }
+
+    pub fn timeout(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            status: Status::Timeout,
             exit_code: None,
             stdout: None,
             stderr: None,

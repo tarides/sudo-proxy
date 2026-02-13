@@ -207,8 +207,9 @@ pub fn run(socket_path: &Path, mode: Mode) -> std::io::Result<()> {
             Mode::Local => exec_pkexec(&req, &env),
             Mode::Remote => {
                 match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                    Ok(true) => exec_sudo(&req, &env),
-                    Ok(false) => Response::denied(&req.id),
+                    Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
+                    Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+                    Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
                     Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
                 }
             }

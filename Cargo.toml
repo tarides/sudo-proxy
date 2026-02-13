@@ -11,6 +11,10 @@ path = "src/bin/sudo-proxy.rs"
 name = "sudo-request"
 path = "src/bin/sudo-request.rs"
 
+[[bin]]
+name = "pkexec-cache"
+path = "src/bin/pkexec-cache.rs"
+
 [lib]
 name = "sudo_proxy"
 path = "src/lib.rs"

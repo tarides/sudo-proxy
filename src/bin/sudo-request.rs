@@ -129,34 +129,43 @@ fn main() {
     };
 
     // Display response
-    match resp.status {
-        Status::Ok => {
-            if let Some(ref stdout_b64) = resp.stdout {
-                if let Ok(bytes) = B64.decode(stdout_b64) {
-                    let _ = std::io::stdout().write_all(&bytes);
+    if opts.print {
+        let mut out = std::io::stdout();
+        let _ = sudo_proxy::tui::write_result(&mut out, &resp);
+    } else {
+        match resp.status {
+            Status::Ok => {
+                if let Some(ref stdout_b64) = resp.stdout {
+                    if let Ok(bytes) = B64.decode(stdout_b64) {
+                        let _ = std::io::stdout().write_all(&bytes);
+                    }
                 }
-            }
-            if let Some(ref stderr_b64) = resp.stderr {
-                if let Ok(bytes) = B64.decode(stderr_b64) {
-                    let _ = std::io::stderr().write_all(&bytes);
+                if let Some(ref stderr_b64) = resp.stderr {
+                    if let Ok(bytes) = B64.decode(stderr_b64) {
+                        let _ = std::io::stderr().write_all(&bytes);
+                    }
                 }
+                let code = resp.exit_code.unwrap_or(0);
+                if code != 0 {
+                    eprintln!("(exit code: {code})");
+                }
+                process::exit(code);
             }
-            let code = resp.exit_code.unwrap_or(0);
-            if code != 0 {
-                eprintln!("(exit code: {code})");
+            Status::Denied => {
+                eprintln!("Request denied.");
+                process::exit(1);
             }
-            process::exit(code);
-        }
-        Status::Denied => {
-            eprintln!("Request denied.");
-            process::exit(1);
-        }
-        Status::Error => {
-            eprintln!(
-                "Error: {}",
-                resp.message.as_deref().unwrap_or("unknown error")
-            );
-            process::exit(1);
+            Status::Timeout => {
+                eprintln!("Request timed out.");
+                process::exit(1);
+            }
+            Status::Error => {
+                eprintln!(
+                    "Error: {}",
+                    resp.message.as_deref().unwrap_or("unknown error")
+                );
+                process::exit(1);
+            }
         }
     }
 }
@@ -166,6 +175,7 @@ struct Opts {
     host: Option<String>,
     reason: Option<String>,
     session: String,
+    print: bool,
     argv: Vec<String>,
 }
 
@@ -175,6 +185,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut host = None;
     let mut reason = None;
     let mut session = String::from("sudo-request-cli");
+    let mut print = false;
     let mut argv = Vec::new();
     let mut i = 0;
 
@@ -190,6 +201,7 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --host HOST      Remote host (sets up SSH tunnel)");
                 eprintln!("  --reason TEXT    Reason for the request");
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
+                eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
                 std::process::exit(0);
             }
             "--socket" => {
@@ -221,6 +233,9 @@ fn parse_args() -> Result<Opts, String> {
                     .ok_or("--session requires a value")?
                     .clone();
             }
+            "--print" => {
+                print = true;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option: {other}"));
             }
@@ -238,6 +253,7 @@ fn parse_args() -> Result<Opts, String> {
         host,
         reason,
         session,
+        print,
         argv,
     })
 }

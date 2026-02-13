@@ -22,9 +22,15 @@ pub fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+#[derive(Debug, PartialEq)]
+pub enum PromptResult {
+    Approved,
+    Denied,
+    Timeout,
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
-/// Returns true if the user approves.
-pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<bool> {
+pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> {
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;
     let tty_r = File::open("/dev/tty")?;
 
@@ -41,7 +47,7 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<bool> {
     if !req.time.is_empty() {
         writeln!(tty_w, "Time:    {}", req.time)?;
     }
-    writeln!(tty_w, "ID:      {}", abbreviate_id(&req.id))?;
+    writeln!(tty_w, "ID:      {}", req.id)?;
     if !req.reason.is_empty() {
         writeln!(tty_w, "Reason:  {bold}{}{reset}", req.reason)?;
     }
@@ -72,25 +78,23 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<bool> {
     tty_w.flush()?;
 
     // Read with timeout using poll
-    let answer = read_line_timeout(&tty_r, timeout)?;
-
-    let approved = matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes");
-    if approved {
-        writeln!(tty_w, "→ Approved")?;
-    } else {
-        writeln!(tty_w, "→ Denied")?;
-    }
+    let result = match read_line_timeout(&tty_r, timeout)? {
+        None => {
+            writeln!(tty_w, "\n→ Timeout")?;
+            PromptResult::Timeout
+        }
+        Some(answer) if matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") => {
+            writeln!(tty_w, "→ Approved")?;
+            PromptResult::Approved
+        }
+        Some(_) => {
+            writeln!(tty_w, "→ Denied")?;
+            PromptResult::Denied
+        }
+    };
     writeln!(tty_w, "{bold}━━━━━━━━━━━━━━━━━━━━━━━━━{reset}")?;
 
-    Ok(approved)
-}
-
-fn abbreviate_id(id: &str) -> String {
-    if id.len() > 13 {
-        format!("{}...{}", &id[..8], &id[id.len() - 6..])
-    } else {
-        id.to_string()
-    }
+    Ok(result)
 }
 
 const MAX_DISPLAY_LINES: usize = 3;
@@ -98,7 +102,11 @@ const MAX_DISPLAY_LINES: usize = 3;
 /// Display the command result on /dev/tty. Truncate stdout/stderr to 3 lines.
 pub fn display_result(resp: &Response) -> io::Result<()> {
     let mut tty = OpenOptions::new().write(true).open("/dev/tty")?;
+    write_result(&mut tty, resp)
+}
 
+/// Write the command result to any writer. Truncate stdout/stderr to 3 lines.
+pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
     let dim = "\x1b[2m";
     let bold = "\x1b[1m";
     let reset = "\x1b[0m";
@@ -107,27 +115,30 @@ pub fn display_result(resp: &Response) -> io::Result<()> {
         Status::Ok => {
             let code = resp.exit_code.unwrap_or(0);
             if code == 0 {
-                writeln!(tty, "{dim}exit 0{reset}")?;
+                writeln!(w, "{dim}exit 0{reset}")?;
             } else {
-                writeln!(tty, "{bold}exit {code}{reset}")?;
+                writeln!(w, "{bold}exit {code}{reset}")?;
             }
             if let Some(ref b64) = resp.stdout {
                 if let Ok(bytes) = B64.decode(b64) {
-                    print_truncated(&mut tty, &bytes, "stdout")?;
+                    print_truncated(w, &bytes, "stdout")?;
                 }
             }
             if let Some(ref b64) = resp.stderr {
                 if let Ok(bytes) = B64.decode(b64) {
-                    print_truncated(&mut tty, &bytes, "stderr")?;
+                    print_truncated(w, &bytes, "stderr")?;
                 }
             }
         }
         Status::Denied => {
-            writeln!(tty, "{dim}denied{reset}")?;
+            writeln!(w, "{dim}denied{reset}")?;
+        }
+        Status::Timeout => {
+            writeln!(w, "{dim}timeout{reset}")?;
         }
         Status::Error => {
             let msg = resp.message.as_deref().unwrap_or("unknown error");
-            writeln!(tty, "{bold}error: {msg}{reset}")?;
+            writeln!(w, "{bold}error: {msg}{reset}")?;
         }
     }
     Ok(())
@@ -157,7 +168,8 @@ fn print_truncated(tty: &mut impl Write, bytes: &[u8], label: &str) -> io::Resul
 }
 
 /// Read a line from a file descriptor with a timeout using poll(2).
-fn read_line_timeout(file: &File, timeout: Duration) -> io::Result<String> {
+/// Returns None on timeout, Some(line) otherwise.
+fn read_line_timeout(file: &File, timeout: Duration) -> io::Result<Option<String>> {
     use std::os::unix::io::AsRawFd;
 
     let fd = file.as_raw_fd();
@@ -175,12 +187,11 @@ fn read_line_timeout(file: &File, timeout: Duration) -> io::Result<String> {
         return Err(io::Error::last_os_error());
     }
     if ret == 0 {
-        // Timeout — default deny
-        return Ok(String::new());
+        return Ok(None);
     }
 
     let mut reader = BufReader::new(file);
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    Ok(line)
+    Ok(Some(line))
 }
