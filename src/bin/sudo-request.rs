@@ -1,13 +1,16 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::process::{self, Command, Stdio};
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::process::{self, Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server::default_socket_path;
+
+const SSH_TUNNEL_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_REMOTE_SOCKET: &str = "/run/user/1000/sudo-proxy.sock";
 
 fn main() {
     let opts = match parse_args() {
@@ -25,48 +28,51 @@ fn main() {
         process::exit(1);
     }
 
-    let (socket_path, _tunnel) = if let Some(ref host) = opts.host {
-        // Set up SSH tunnel
-        let local_sock = format!("/tmp/sudo-request-{}.sock", std::process::id());
+    let mut ssh_child: Option<Child> = None;
+    let mut local_sock_cleanup: Option<String> = None;
+
+    let socket_path = if let Some(ref host) = opts.host {
+        let local_sock = format!("/tmp/sudo-request-{}.sock", process::id());
         let remote_sock = opts
             .socket
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                // Guess the remote socket path
-                format!("/run/user/1000/sudo-proxy.sock")
-            });
+            .unwrap_or_else(|| DEFAULT_REMOTE_SOCKET.to_string());
 
-        eprintln!("Setting up SSH tunnel to {host}...");
-        let tunnel = Command::new("ssh")
-            .args([
-                "-f",
-                "-N",
-                "-L",
-                &format!("{local_sock}:{remote_sock}"),
-                host,
-            ])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
+        // Start SSH: allocate PTY, set up tunnel, run sudo-proxy on remote
+        let tunnel_spec = format!("{local_sock}:{remote_sock}");
+        let ssh_args = vec!["-t", "-L", &tunnel_spec, host, "sudo-proxy"];
+
+        if opts.verbose {
+            eprintln!("+ ssh {}", ssh_args.join(" "));
+        }
+
+        let child = match Command::new("ssh")
+            .args(&ssh_args)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
-            .spawn();
-
-        match tunnel {
-            Ok(_child) => {
-                // Give the tunnel a moment to establish
-                std::thread::sleep(Duration::from_millis(500));
-                (PathBuf::from(&local_sock), Some(local_sock))
-            }
+            .spawn()
+        {
+            Ok(c) => c,
             Err(e) => {
-                eprintln!("error: failed to start SSH tunnel: {e}");
+                eprintln!("error: failed to start ssh: {e}");
                 process::exit(1);
             }
+        };
+
+        ssh_child = Some(child);
+        local_sock_cleanup = Some(local_sock.clone());
+
+        // Wait for the tunnel socket to appear
+        if !wait_for_socket(&local_sock, SSH_TUNNEL_TIMEOUT, ssh_child.as_mut().unwrap()) {
+            cleanup(&mut ssh_child, &local_sock_cleanup);
+            process::exit(1);
         }
+
+        PathBuf::from(local_sock)
     } else {
-        let path = opts
-            .socket
-            .unwrap_or_else(default_socket_path);
-        (path, None)
+        opts.socket.unwrap_or_else(default_socket_path)
     };
 
     let req = Request {
@@ -77,17 +83,15 @@ fn main() {
         argv: opts.argv,
         env: std::collections::HashMap::new(),
         reason: opts.reason.unwrap_or_default(),
+        privileged: opts.privileged,
     };
 
     // Connect and send
     let mut stream = match UnixStream::connect(&socket_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!(
-                "error: could not connect to {}: {e}",
-                socket_path.display()
-            );
-            cleanup_tunnel(&_tunnel);
+            eprintln!("error: could not connect to {}: {e}", socket_path.display());
+            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
     };
@@ -95,7 +99,7 @@ fn main() {
     let json = serde_json::to_string(&req).expect("serialize request");
     if let Err(e) = writeln!(stream, "{json}") {
         eprintln!("error: write failed: {e}");
-        cleanup_tunnel(&_tunnel);
+        cleanup(&mut ssh_child, &local_sock_cleanup);
         process::exit(1);
     }
     let _ = stream.flush();
@@ -106,18 +110,18 @@ fn main() {
     match reader.take(10_485_760).read_line(&mut line) {
         Ok(0) => {
             eprintln!("error: server closed connection without response");
-            cleanup_tunnel(&_tunnel);
+            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
         Ok(_) => {}
         Err(e) => {
             eprintln!("error: read failed: {e}");
-            cleanup_tunnel(&_tunnel);
+            cleanup(&mut ssh_child, &local_sock_cleanup);
             process::exit(1);
         }
     }
 
-    cleanup_tunnel(&_tunnel);
+    cleanup(&mut ssh_child, &local_sock_cleanup);
 
     let resp: Response = match serde_json::from_str(line.trim()) {
         Ok(r) => r,
@@ -170,12 +174,43 @@ fn main() {
     }
 }
 
+/// Wait for a Unix socket file to appear, polling every 100ms.
+/// Returns false if timeout expires or SSH exits early.
+fn wait_for_socket(path: &str, timeout: Duration, child: &mut Child) -> bool {
+    let deadline = Instant::now() + timeout;
+    while !Path::new(path).exists() {
+        if Instant::now() > deadline {
+            eprintln!("error: timeout waiting for SSH tunnel socket");
+            return false;
+        }
+        // Check if SSH exited unexpectedly
+        if let Ok(Some(status)) = child.try_wait() {
+            eprintln!("error: ssh exited early with {status}");
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+fn cleanup(ssh_child: &mut Option<Child>, local_sock: &Option<String>) {
+    if let Some(ref mut child) = ssh_child {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    if let Some(ref path) = local_sock {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 struct Opts {
     socket: Option<PathBuf>,
     host: Option<String>,
     reason: Option<String>,
     session: String,
     print: bool,
+    verbose: bool,
+    privileged: bool,
     argv: Vec<String>,
 }
 
@@ -186,6 +221,8 @@ fn parse_args() -> Result<Opts, String> {
     let mut reason = None;
     let mut session = String::from("sudo-request-cli");
     let mut print = false;
+    let mut verbose = false;
+    let mut privileged = true;
     let mut argv = Vec::new();
     let mut i = 0;
 
@@ -202,6 +239,8 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --reason TEXT    Reason for the request");
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
+                eprintln!("  --verbose        Echo the ssh command when using --host");
+                eprintln!("  --no-privilege   Run command without privilege escalation");
                 std::process::exit(0);
             }
             "--socket" => {
@@ -236,6 +275,12 @@ fn parse_args() -> Result<Opts, String> {
             "--print" => {
                 print = true;
             }
+            "--verbose" | "-v" => {
+                verbose = true;
+            }
+            "--no-privilege" => {
+                privileged = false;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option: {other}"));
             }
@@ -254,6 +299,8 @@ fn parse_args() -> Result<Opts, String> {
         reason,
         session,
         print,
+        verbose,
+        privileged,
         argv,
     })
 }
@@ -314,8 +361,3 @@ fn is_leap(year: u64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
-fn cleanup_tunnel(local_sock: &Option<String>) {
-    if let Some(ref path) = local_sock {
-        let _ = std::fs::remove_file(path);
-    }
-}

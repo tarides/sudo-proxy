@@ -6,7 +6,8 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::executor::{exec_pkexec, exec_sudo, sanitize_env};
+use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
+use crate::gui;
 use crate::mode::Mode;
 use crate::protocol::{Request, Response};
 use crate::tui;
@@ -127,7 +128,12 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(runtime_dir).join("sudo-proxy.sock")
 }
 
-pub fn run(socket_path: &Path, mode: Mode) -> std::io::Result<()> {
+pub fn run(
+    socket_path: &Path,
+    mode: Mode,
+    verbose: bool,
+    confirm_unprivileged: bool,
+) -> std::io::Result<()> {
     // Remove stale socket
     if socket_path.exists() {
         fs::remove_file(socket_path)?;
@@ -138,8 +144,10 @@ pub fn run(socket_path: &Path, mode: Mode) -> std::io::Result<()> {
     // Set socket permissions to 0600
     fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
 
-    eprintln!("sudo-proxy listening on {}", socket_path.display());
-    eprintln!("mode: {}", mode.label());
+    if verbose {
+        eprintln!("sudo-proxy listening on {}", socket_path.display());
+        eprintln!("mode: {}", mode.label());
+    }
 
     let mut seen_ids: HashSet<String> = HashSet::new();
 
@@ -203,19 +211,43 @@ pub fn run(socket_path: &Path, mode: Mode) -> std::io::Result<()> {
         }
         seen_ids.insert(req.id.clone());
 
-        let resp = match mode {
-            Mode::Local => exec_pkexec(&req, &env),
-            Mode::Remote => {
-                match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                    Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
-                    Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
-                    Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
-                    Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
+        if verbose {
+            let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
+            eprintln!("[{}] [{}] {:?}", req.id, priv_label, req.argv);
+        }
+
+        let resp = if req.privileged {
+            // Privileged: existing behavior
+            match mode {
+                Mode::Local => exec_pkexec(&req, &env),
+                Mode::Remote => {
+                    match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
+                        Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
+                        Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+                        Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+                        Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
+                    }
                 }
             }
+        } else if confirm_unprivileged {
+            // Non-privileged with confirmation
+            let prompt_result = match mode {
+                Mode::Local => gui::prompt_gui(&req),
+                Mode::Remote => tui::prompt_tty(&req, PROMPT_TIMEOUT),
+            };
+            match prompt_result {
+                Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
+                Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+                Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+                Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
+            }
+        } else {
+            // Non-privileged, no confirmation: run directly
+            exec_direct(&req, &env)
         };
 
-        if mode == Mode::Remote {
+        // Echo result on /dev/tty only for privileged commands in remote mode
+        if req.privileged && mode == Mode::Remote {
             let _ = tui::display_result(&resp);
         }
 

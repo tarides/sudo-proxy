@@ -8,9 +8,12 @@ root commands with explicit human approval.
 ## Architecture
 
 ```
-MCP Server ──► Unix socket ──► sudo-proxy ──► pkexec / sudo
-              (local or SSH                    (local)  (remote)
-               tunnel)
+AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ──► pkexec  (local)
+             (MCP server)       │                               sudo    (remote)
+                                │
+                                └── local socket, or SSH tunnel
+                                    (sudo-request --host sets up both
+                                     the tunnel and the remote server)
 ```
 
 **Local mode** (graphical session detected via `$DISPLAY` / `$WAYLAND_DISPLAY`):
@@ -21,6 +24,11 @@ displays the request on the terminal, asks `[y/N]` with a 60-second timeout,
 then runs via `sudo` if approved. stdout, stderr and exit code are echoed
 locally after execution.
 
+**Non-privileged mode** (`privileged: false` in the request):
+runs the command directly as the current user, without sudo or pkexec.
+By default, no confirmation is needed. Pass `--confirm-unprivileged` to the
+server to require a Y/N prompt (graphical in local mode, TUI in remote mode).
+
 ## Usage
 
 ```bash
@@ -30,20 +38,32 @@ sudo-proxy
 # Force TUI mode even with a display
 sudo-proxy --tui
 
+# Quiet by default; verbose prints startup info and logs each request
+sudo-proxy --tui -v
+
+# Require confirmation for non-privileged commands too
+sudo-proxy --confirm-unprivileged
+
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock
 
 # Send a request (debug client)
 sudo-request id
 sudo-request --reason "install web server" apt install nginx
-sudo-request --host remotehost id        # sets up an SSH tunnel
+
+# Run without privilege escalation
+sudo-request --no-privilege ls /etc
+
+# Remote: SSH in, start sudo-proxy, tunnel the socket, send request — all at once
+sudo-request --host remotehost id
+sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 ```
 
-### SSH tunnel for remote access
-
-```bash
-ssh -L /tmp/sudo-proxy.sock:/run/user/1000/sudo-proxy.sock remotehost
-```
+`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy`, waits for the tunnel
+socket to appear, sends the request, then cleans up. The remote sudo-proxy's
+TUI prompt and sudo password prompt appear in your terminal via SSH's PTY.
+No prior SSH session or manual server start needed — just an account with SSH
+access and sudo-proxy installed on the remote host.
 
 ## Protocol
 
@@ -58,9 +78,13 @@ JSON lines over Unix socket. One request per connection, processed sequentially.
   "time": "2026-02-13T14:30:00Z",
   "argv": ["apt", "install", "nginx"],
   "env": {"DEBIAN_FRONTEND": "noninteractive"},
-  "reason": "Install nginx to set up a web server"
+  "reason": "Install nginx to set up a web server",
+  "privileged": true
 }
 ```
+
+`privileged` defaults to `true` if omitted. Set to `false` to run the command
+as the current user without sudo/pkexec.
 
 **Response:**
 ```json
@@ -77,13 +101,16 @@ src/
   lib.rs                  re-exports shared modules
   protocol.rs             Request, Response, Status (serde)
   mode.rs                 Local / Remote detection
-  executor.rs             pkexec/sudo dispatch, which(), env sanitization
+  executor.rs             pkexec/sudo/direct dispatch, which(), env sanitization
+  gui.rs                  zenity/kdialog/tui auto-detect confirmation dialog
   tui.rs                  /dev/tty Y/N prompt, result display
   server.rs               Unix socket listener, validation, dispatch
+  mcp.rs                  MCP server: tools, socket client, response formatting
   bin/
     sudo-proxy.rs         server entry point
     sudo-request.rs       debug client
-    pkexec-cache.rs  polkit rule manager
+    sudo-proxy-mcp.rs     MCP server entry point (stdio transport)
+    pkexec-cache.rs       polkit rule manager
 ```
 
 ## Implementation status
@@ -92,8 +119,16 @@ This is v0.1 — functional but minimal.
 
 **Implemented:**
 - Local mode (pkexec) and remote mode (sudo + TUI)
+- Non-privileged mode (direct execution, no escalation)
 - `--tui` flag to force terminal prompt mode
-- JSON-line protocol with base64-encoded output
+- `--verbose` / `-v` on server: prints startup info, logs each request
+- `--confirm-unprivileged` on server: prompt before non-privileged commands
+- `--no-privilege` on client: sends request with `privileged: false`
+- Graphical confirmation dialogs (zenity → kdialog → TUI fallback)
+- `--host` flag: SSHs into remote, starts sudo-proxy, tunnels socket, sends request
+- `--verbose` / `-v` on client: echoes the SSH command
+- `--print` mode for human-readable output on stdout
+- JSON-line protocol with base64-encoded output and `timeout` status
 - Environment sanitization (blocklist + allowlist)
 - Input validation (control chars, bidi overrides, zero-width chars)
 - Replay protection (UUID dedup, 60s request age)
@@ -102,7 +137,8 @@ This is v0.1 — functional but minimal.
 - TUI prompt with 60s timeout (poll-based), resolved path display
 - TUI result echo (stdout/stderr/exit code, truncated to 3 lines)
 - Signal handler for socket cleanup on SIGINT/SIGTERM
-- Debug client with SSH tunnel support
+- `pkexec-cache` tool for optional polkit auth caching
+- MCP server (`sudo-proxy-mcp`) with `execute` and `start_server` tools
 
 **Not yet implemented:**
 - Command/argument allowlisting (needs policy framework)
@@ -177,13 +213,68 @@ Ubuntu and Debian, polkit uses the JavaScript `.rules` format — the older
 [Arch Wiki polkit page](https://wiki.archlinux.org/title/Polkit) is the most
 comprehensive reference.
 
+## MCP server
+
+`sudo-proxy-mcp` is an MCP (Model Context Protocol) server that exposes
+sudo-proxy as two tools over stdio JSON-RPC. Any MCP-capable AI client
+(Claude Code, Claude Desktop, etc.) can call these tools.
+
+### Tools
+
+**`start_server`** — start a sudo-proxy instance.
+- No arguments: spawns `sudo-proxy` as a background process on localhost.
+- `host`: opens a terminal window with `ssh -t HOST sudo-proxy` and an SSH
+  tunnel so that subsequent `execute` calls reach the remote host.
+
+**`execute`** — run a command through sudo-proxy with human approval.
+- `argv` (required): command as an argument array.
+- `host`: target host (omit for localhost; must match a prior `start_server`).
+- `timeout`: timeout in ms (default 120 000, max 600 000).
+- `description`: what this command does (shown in the TUI approval prompt).
+- `privileged`: whether to escalate privileges (default `true`).
+- `env`: environment variables to pass.
+
+### Claude Code configuration
+
+Add to `~/.claude/claude_desktop_config.json` or the project's
+`.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "sudo-proxy": {
+      "command": "sudo-proxy-mcp"
+    }
+  }
+}
+```
+
+Or if the binary is not in `$PATH`, use the full path to
+`target/release/sudo-proxy-mcp`.
+
+### Why not just use the Bash tool?
+
+| | Bash tool | sudo-proxy MCP |
+|---|---|---|
+| Privilege escalation | Not possible | pkexec / sudo with human approval |
+| Human review | None — executes immediately | Every privileged command shown in TUI |
+| Timeout | Up to 10 min, no user prompt | 60 s TUI prompt + configurable overall timeout |
+| Remote hosts | Not supported | SSH tunnel with TUI on remote terminal |
+| Environment | Inherits shell env | Sanitized allowlist only |
+| Audit trail | None | Server logs each request (with `-v`) |
+
+The Bash tool is fine for non-privileged commands. sudo-proxy fills the gap
+when a model needs to install packages, edit system files, or manage
+services — with the human always in the loop.
+
 ## Building
 
 ```bash
 cargo build
 ```
 
-Dependencies: `serde`, `serde_json`, `base64`, `uuid`, `libc`.
+Dependencies: `serde`, `serde_json`, `base64`, `uuid`, `libc`, `rmcp`,
+`tokio`, `schemars`.
 
 ## License
 

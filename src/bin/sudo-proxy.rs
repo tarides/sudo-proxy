@@ -7,6 +7,8 @@ use sudo_proxy::server;
 struct Opts {
     socket: PathBuf,
     tui: bool,
+    verbose: bool,
+    confirm_unprivileged: bool,
 }
 
 fn main() {
@@ -22,7 +24,7 @@ fn main() {
         eprintln!("warning: could not set signal handler: {e}");
     }
 
-    if let Err(e) = server::run(&socket_path, mode) {
+    if let Err(e) = server::run(&socket_path, mode, opts.verbose, opts.confirm_unprivileged) {
         eprintln!("error: {e}");
         let _ = std::fs::remove_file(&socket_path);
         process::exit(1);
@@ -32,6 +34,8 @@ fn main() {
 fn parse_args(args: &[String]) -> Opts {
     let mut socket = None;
     let mut tui = false;
+    let mut verbose = false;
+    let mut confirm_unprivileged = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -40,15 +44,19 @@ fn parse_args(args: &[String]) -> Opts {
                 socket = s.strip_prefix("--socket=").map(PathBuf::from);
             }
             "--tui" => tui = true,
+            "--verbose" | "-v" => verbose = true,
+            "--confirm-unprivileged" => confirm_unprivileged = true,
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--tui]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--tui] [-v] [--confirm-unprivileged]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --socket PATH  Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
-                eprintln!("  --tui          Force TUI mode (sudo + terminal prompt) even with a display");
+                eprintln!("  --socket PATH            Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
+                eprintln!("  --tui                    Force TUI mode (sudo + terminal prompt) even with a display");
+                eprintln!("  --verbose, -v            Print startup info and log each request to stderr");
+                eprintln!("  --confirm-unprivileged   Prompt for confirmation before running non-privileged commands");
                 std::process::exit(0);
             }
             _ => {
@@ -60,6 +68,8 @@ fn parse_args(args: &[String]) -> Opts {
     Opts {
         socket: socket.unwrap_or_else(server::default_socket_path),
         tui,
+        verbose,
+        confirm_unprivileged,
     }
 }
 

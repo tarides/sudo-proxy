@@ -110,6 +110,22 @@ pub fn exec_sudo(req: &Request, env: &HashMap<String, String>) -> Response {
     run_command(&mut cmd, &req.id)
 }
 
+/// Execute a command directly as the current user (no privilege escalation).
+pub fn exec_direct(req: &Request, env: &HashMap<String, String>) -> Response {
+    let mut cmd = Command::new(&req.argv[0]);
+    cmd.args(&req.argv[1..]);
+    cmd.current_dir("/");
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    cmd.env_clear();
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+
+    run_command(&mut cmd, &req.id)
+}
+
 fn run_command(cmd: &mut Command, id: &str) -> Response {
     // Set umask before exec
     unsafe {

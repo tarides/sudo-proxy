@@ -18,6 +18,12 @@ pub struct Request {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub reason: String,
+    #[serde(default = "default_true")]
+    pub privileged: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_id() -> String {
