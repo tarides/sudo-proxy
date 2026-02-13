@@ -317,7 +317,7 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let proxy_cmd = format!("{} -v", proxy_bin.display());
+    let proxy_cmd = format!("{}", proxy_bin.display());
 
     let mut cmd = std::process::Command::new(&terminal);
     match terminal.as_str() {
@@ -380,7 +380,7 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy -v");
+    let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy");
 
     let mut cmd = std::process::Command::new(&terminal);
     match terminal.as_str() {

@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -75,18 +75,18 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     )?;
     tty_w.flush()?;
 
-    // Read with timeout using poll
-    let result = match read_line_timeout(&tty_r, timeout)? {
+    // Read single keypress with timeout (no Enter needed)
+    let result = match read_key_timeout(&tty_r, timeout)? {
         None => {
             writeln!(tty_w, "\n→ Timeout")?;
             PromptResult::Timeout
         }
-        Some(answer) if matches!(answer.trim(), "y" | "Y" | "yes" | "YES" | "Yes") => {
-            writeln!(tty_w, "→ Approved")?;
+        Some(b'y' | b'Y') => {
+            writeln!(tty_w, "\n→ Approved")?;
             PromptResult::Approved
         }
         Some(_) => {
-            writeln!(tty_w, "→ Denied")?;
+            writeln!(tty_w, "\n→ Denied")?;
             PromptResult::Denied
         }
     };
@@ -165,31 +165,56 @@ fn print_truncated(tty: &mut impl Write, bytes: &[u8], label: &str) -> io::Resul
     Ok(())
 }
 
-/// Read a line from a file descriptor with a timeout using poll(2).
-/// Returns None on timeout, Some(line) otherwise.
-fn read_line_timeout(file: &File, timeout: Duration) -> io::Result<Option<String>> {
+/// Read a single keypress from a file descriptor with a timeout using poll(2).
+/// Switches the terminal to non-canonical mode so Enter is not required.
+/// Returns None on timeout, Some(char) otherwise.
+fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
     use std::os::unix::io::AsRawFd;
 
     let fd = file.as_raw_fd();
-    let timeout_ms = timeout.as_millis() as i32;
 
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
-
-    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-
-    if ret < 0 {
+    // Save terminal state and switch to non-canonical mode
+    let mut orig: libc::termios = unsafe { std::mem::zeroed() };
+    if unsafe { libc::tcgetattr(fd, &mut orig) } < 0 {
         return Err(io::Error::last_os_error());
     }
-    if ret == 0 {
-        return Ok(None);
+    let mut raw = orig;
+    raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+    raw.c_cc[libc::VMIN] = 1;
+    raw.c_cc[libc::VTIME] = 0;
+    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
+        return Err(io::Error::last_os_error());
     }
 
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    Ok(Some(line))
+    let result = (|| {
+        let timeout_ms = timeout.as_millis() as i32;
+        let mut pfd = libc::pollfd {
+            fd,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+
+        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+        if ret < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if ret == 0 {
+            return Ok(None);
+        }
+
+        let mut buf = [0u8; 1];
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+        if n < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Ok(None);
+        }
+        Ok(Some(buf[0]))
+    })();
+
+    // Restore terminal state
+    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
+
+    result
 }
