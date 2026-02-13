@@ -1,36 +1,26 @@
 # sudo-proxy
 
 Privileged command execution proxy. Receives requests over a Unix socket,
-shows a **TUI prompt** for human approval, then delegates to **pkexec** (local)
-or **sudo** (remote) for privilege escalation. Designed for integration with an
-MCP server so that an AI agent can request root commands with explicit human
-approval.
+shows a **single-keypress TUI prompt** for human approval, then escalates
+via **sudo**. Designed for integration with an MCP server so that an AI
+agent can request root commands with explicit human approval.
 
 ## Architecture
 
 ```
-AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ──► TUI Y/N ──► pkexec  (local)
-             (MCP server)       │                                           sudo    (remote)
-                                │
+AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ──► TUI Y/N ──► sudo
+             (MCP server)       │
                                 └── local socket, or SSH tunnel
                                     (sudo-request --host sets up both
                                      the tunnel and the remote server)
 ```
 
-**Local mode** (graphical session detected via `$DISPLAY` / `$WAYLAND_DISPLAY`):
-TUI prompt for approval, then `pkexec` for privilege escalation.
-
-**Remote mode** (no display):
-TUI prompt for approval, then `sudo` for privilege escalation. stdout, stderr
-and exit code are echoed locally after execution.
-
-**`--pkexec` mode**: passthrough to `pkexec`, which handles both authentication
-and approval in its own dialog. No TUI prompt. See the
-[polkit note](#polkit-authentication-caching-local-mode) for why this is not
-the default.
+The TUI prompt asks for approval (single keypress), then `sudo` handles
+privilege escalation. The password prompt appears in the same terminal.
+This flow is identical for local and remote hosts.
 
 **Non-privileged mode** (`privileged: false` in the request):
-runs the command directly as the current user, without sudo or pkexec.
+runs the command directly as the current user, without sudo.
 By default, no confirmation is needed. Pass `--confirm-unprivileged` to the
 server to require a TUI Y/N prompt.
 
@@ -39,9 +29,6 @@ server to require a TUI Y/N prompt.
 ```bash
 # Start in auto-detected mode (TUI prompt + pkexec or sudo)
 sudo-proxy
-
-# Use pkexec directly (no TUI, pkexec handles auth and approval)
-sudo-proxy --pkexec
 
 # Quiet by default; verbose prints startup info and logs each request
 sudo-proxy -v
@@ -64,7 +51,7 @@ sudo-request --host remotehost id
 sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 ```
 
-`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy -v`, waits for the tunnel
+`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy`, waits for the tunnel
 socket to appear, sends the request, then cleans up. The remote sudo-proxy's
 TUI prompt and sudo password prompt appear in your terminal via SSH's PTY.
 No prior SSH session or manual server start needed — just an account with SSH
@@ -105,7 +92,7 @@ as the current user without sudo/pkexec.
 src/
   lib.rs                  re-exports shared modules
   protocol.rs             Request, Response, Status (serde)
-  mode.rs                 Local / Remote detection (TUI + pkexec or TUI + sudo)
+  mode.rs                 Local / Remote detection
   executor.rs             pkexec/sudo/direct dispatch, which(), env sanitization
   gui.rs                  zenity/kdialog/tui auto-detect confirmation dialog
   hosts.rs                Known hosts config (~/.config/sudo-proxy/hosts.json)
@@ -121,16 +108,14 @@ src/
 
 ## Implementation status
 
-This is v0.1 — functional but minimal.
+Functional but minimal.
 
 **Implemented:**
-- Local mode (TUI + pkexec) and remote mode (TUI + sudo)
+- TUI approval prompt + sudo for privilege escalation (local and remote)
 - Non-privileged mode (direct execution, no escalation)
-- `--pkexec` flag to bypass TUI and use pkexec directly
 - `--verbose` / `-v` on server: prints startup info, logs each request
 - `--confirm-unprivileged` on server: prompt before non-privileged commands
 - `--no-privilege` on client: sends request with `privileged: false`
-- Graphical confirmation dialogs (zenity → kdialog → TUI fallback)
 - `--host` flag: SSHs into remote, starts sudo-proxy, tunnels socket, sends request
 - `--verbose` / `-v` on client: echoes the SSH command
 - `--print` mode for human-readable output on stdout
@@ -140,13 +125,13 @@ This is v0.1 — functional but minimal.
 - Replay protection (UUID dedup, 60s request age)
 - Socket permissions (0600)
 - Execution isolation (cwd `/`, umask 0077, stdin null)
-- TUI prompt with 60s timeout (poll-based), resolved path display
+- Single-keypress TUI prompt with 60s timeout, resolved path display
 - TUI result echo (stdout/stderr/exit code, truncated to 3 lines)
 - Signal handler for socket cleanup on SIGINT/SIGTERM
-- `pkexec-cache` tool for optional polkit auth caching
 - MCP server (`sudo-proxy-mcp`) with `execute`, `start_server`, and `update_host` tools
 - MCP resources: known hosts list (`sudo-proxy://hosts`)
 - Dynamic MCP instructions with known hosts and install guidance
+- `--pkexec` mode and `pkexec-cache` tool (see [pkexec section](#pkexec-mode))
 
 **Not yet implemented:**
 - Command/argument allowlisting (needs policy framework)
@@ -179,24 +164,39 @@ rejected.
 **Execution isolation:** child processes run with cwd `/`, umask 0077, stdin
 null, and stdout/stderr piped — they do not inherit the socket file descriptor.
 
-**TUI hardening:** the Y/N prompt times out after 60 seconds (default deny).
+**TUI hardening:** the Y/N prompt reads a single keypress in non-canonical
+terminal mode (no Enter required) and times out after 60 seconds (default deny).
 The resolved absolute path of argv[0] is displayed alongside the requested name
 so symlink tricks are visible.
 
-## Polkit authentication caching (local mode)
+## pkexec mode
 
-**Why TUI is the default:** polkit conflates authentication (proving who you
-are) and authorization (approving what to do). With auth caching enabled,
-`pkexec` skips its dialog entirely — commands run silently with no approval
-prompt. This defeats sudo-proxy's human-in-the-loop design. The TUI separates
-concerns: it always shows the command for Y/N approval, while pkexec/sudo
-handles only password authentication.
+By default, sudo-proxy separates approval (TUI prompt) from privilege
+escalation (sudo). The TUI shows the command for single-keypress Y/N
+approval, then sudo handles password authentication — both in the same
+terminal window.
 
-Use `--pkexec` if you prefer the old behavior where pkexec handles both.
+The `--pkexec` flag bypasses the TUI entirely and lets pkexec handle both
+authentication and approval in its own dialog. This mode exists but is not
+recommended because polkit conflates authentication (proving who you are) and
+authorization (approving what to do):
 
-By default, `pkexec` asks for a password on every request. You can optionally
-configure polkit to cache authentication for a few minutes, similar to `sudo`'s
-default behavior. This is done by creating a polkit rule file.
+- **Without auth caching**: pkexec asks for a password on every single
+  request. This is safe but impractical for an AI agent workflow that may
+  run dozens of commands.
+
+- **With auth caching**: pkexec skips its dialog entirely for the cache
+  duration — commands run silently with no approval prompt. This is unsafe
+  and defeats sudo-proxy's human-in-the-loop design.
+
+There is no middle ground in polkit. The TUI mode solves this by always
+prompting for approval (one keypress, no password) while letting the OS
+handle password authentication separately.
+
+### pkexec authentication caching
+
+If you do use `--pkexec` mode, you can optionally configure polkit to cache
+authentication for a few minutes, similar to `sudo`'s default behavior.
 
 **This is a user decision.** The rule applies to all `pkexec` calls from your
 user, not just those from sudo-proxy — polkit has no way to distinguish the
@@ -233,7 +233,7 @@ comprehensive reference.
 ## MCP server
 
 `sudo-proxy-mcp` is an MCP (Model Context Protocol) server that exposes
-sudo-proxy as two tools over stdio JSON-RPC. Any MCP-capable AI client
+sudo-proxy as tools over stdio JSON-RPC. Any MCP-capable AI client
 (Claude Code, Claude Desktop, etc.) can call these tools.
 
 ### Tools
@@ -352,7 +352,7 @@ scp sudo-proxy remote:/usr/local/bin/
 ```
 
 When an AI agent calls `start_server(host="remote")`, the MCP server SSHs
-in and runs `sudo-proxy -v` on the remote. The only prerequisites on the
+in and runs `sudo-proxy` on the remote. The only prerequisites on the
 remote side are SSH access and the `sudo-proxy` binary in `$PATH`.
 
 ### Local workstation setup

@@ -221,12 +221,9 @@ pub fn run(
                 // --pkexec: old behavior — pkexec handles both auth and approval
                 exec_pkexec(&req, &env)
             } else {
-                // Default: TUI prompt first, then escalate
+                // Default: TUI prompt first, then sudo for escalation
                 match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                    Ok(tui::PromptResult::Approved) => match mode {
-                        Mode::Local => exec_pkexec(&req, &env),
-                        Mode::Remote => exec_sudo(&req, &env),
-                    },
+                    Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
                     Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                     Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
                     Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
