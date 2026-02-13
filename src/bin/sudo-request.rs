@@ -242,6 +242,10 @@ fn parse_args() -> Result<Opts, String> {
 
     while i < args.len() {
         match args[i].as_str() {
+            "--version" | "-V" => {
+                println!("sudo-request {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "--help" | "-h" => {
                 eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...]");
                 eprintln!();

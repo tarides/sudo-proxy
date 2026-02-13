@@ -10,6 +10,8 @@ pub struct HostInfo {
     pub os: String,
     #[serde(default)]
     pub last_connected: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -55,7 +57,46 @@ impl HostsConfig {
                 description: String::new(),
                 os: String::new(),
                 last_connected: now,
+                uid: String::new(),
             });
+    }
+
+    /// Return the remote UID for `host`, using the cached value if available,
+    /// otherwise resolving via `ssh HOST id -u` and persisting the result.
+    pub fn resolve_uid(&mut self, host: &str) -> Result<String, String> {
+        if let Some(info) = self.hosts.get(host) {
+            if !info.uid.is_empty() {
+                return Ok(info.uid.clone());
+            }
+        }
+
+        let output = std::process::Command::new("ssh")
+            .args([host, "id", "-u"])
+            .output()
+            .map_err(|e| format!("ssh id -u: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to get remote UID via ssh {host} id -u"
+            ));
+        }
+        let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if uid.is_empty() {
+            return Err("ssh id -u returned empty output".to_string());
+        }
+
+        let info = self
+            .hosts
+            .entry(host.to_string())
+            .or_insert_with(|| HostInfo {
+                description: String::new(),
+                os: String::new(),
+                last_connected: String::new(),
+                uid: String::new(),
+            });
+        info.uid = uid.clone();
+        self.save();
+
+        Ok(uid)
     }
 }
 

@@ -184,6 +184,7 @@ impl McpProxy {
                 description: String::new(),
                 os: String::new(),
                 last_connected: String::new(),
+                uid: String::new(),
             });
         if let Some(desc) = params.description {
             info.description = desc;
@@ -354,37 +355,26 @@ async fn start_local() -> Result<CallToolResult, McpError> {
 }
 
 async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
-    let local_sock = format!("/tmp/sudo-proxy-{host}.sock");
+    let local_sock = crate::server::remote_socket_path(host);
 
     // Check if tunnel already exists
-    if Path::new(&local_sock).exists() {
+    if local_sock.exists() {
         if UnixStream::connect(&local_sock).await.is_ok() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "SSH tunnel to {host} is already active at {local_sock}"
+                "SSH tunnel to {host} is already active at {}",
+                local_sock.display()
             ))]));
         }
         let _ = std::fs::remove_file(&local_sock);
     }
 
-    // Resolve remote UID so we tunnel to the right XDG_RUNTIME_DIR
-    let uid_output = std::process::Command::new("ssh")
-        .args([host, "id", "-u"])
-        .output()
-        .map_err(|e| McpError::internal_error(format!("ssh id -u: {e}"), None))?;
-    if !uid_output.status.success() {
-        return Ok(error_result(format!(
-            "Failed to get remote UID via ssh {host} id -u"
-        )));
-    }
-    let remote_uid = String::from_utf8_lossy(&uid_output.stdout).trim().to_string();
-    let remote_sock = format!("/run/user/{remote_uid}/sudo-proxy.sock");
-
-    let tunnel = format!("{local_sock}:{remote_sock}");
+    // Find the sudo-proxy binary next to our own executable, or in PATH
+    let proxy_bin = find_sibling_binary("sudo-proxy").unwrap_or_else(|| "sudo-proxy".into());
 
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let ssh_cmd = format!("ssh -t -L {tunnel} {host} sudo-proxy");
+    let proxy_cmd = format!("{} --host {}", proxy_bin.display(), host);
 
     let mut cmd = std::process::Command::new(&terminal);
     cmd.stdin(Stdio::null())
@@ -392,10 +382,10 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
         .stderr(Stdio::null());
     match terminal.as_str() {
         "gnome-terminal" => {
-            cmd.args(["--", "sh", "-c", &ssh_cmd]);
+            cmd.args(["--", "sh", "-c", &proxy_cmd]);
         }
         _ => {
-            cmd.args(["-e", "sh", "-c", &ssh_cmd]);
+            cmd.args(["-e", "sh", "-c", &proxy_cmd]);
         }
     }
 
@@ -404,9 +394,10 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
 
     // Wait for tunnel socket (up to 30s)
     for _ in 0..300 {
-        if Path::new(&local_sock).exists() {
+        if local_sock.exists() {
             return Ok(CallToolResult::success(vec![Content::text(format!(
-                "SSH tunnel to {host} established at {local_sock}"
+                "SSH tunnel to {host} established at {}",
+                local_sock.display()
             ))]));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -513,7 +504,7 @@ fn decode_b64(s: Option<&str>) -> String {
 fn socket_for_host(host: Option<&str>) -> PathBuf {
     match host {
         None => default_socket_path(),
-        Some(h) => PathBuf::from(format!("/tmp/sudo-proxy-{h}.sock")),
+        Some(h) => crate::server::remote_socket_path(h),
     }
 }
 

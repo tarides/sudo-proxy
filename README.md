@@ -13,9 +13,10 @@ AI model ──► sudo-proxy-mcp ──► Unix socket ──► sudo-proxy ─
              (MCP server)         │
                                   │
                             local socket, or SSH tunnel
-                        (start_server sets up both the tunnel
-                         and the remote server; sudo-request
-                         --host does the same for CLI use)
+                        (start_server spawns sudo-proxy --host
+                         which sets up the tunnel and remote
+                         server; sudo-request --host does the
+                         same for single-request CLI use)
 ```
 
 The TUI prompt asks for approval (single keypress), then `sudo` handles
@@ -192,6 +193,11 @@ sudo-proxy
 # Quiet by default; verbose prints startup info and logs each request
 sudo-proxy -v
 
+# Connect to a remote host via SSH tunnel
+# Resolves remote UID, sets up tunnel, execs into SSH running sudo-proxy
+sudo-proxy --host remotehost
+sudo-proxy --host remotehost -v     # prints the ssh command before connecting
+
 # Require confirmation for non-privileged commands too
 sudo-proxy --confirm-unprivileged
 
@@ -213,11 +219,14 @@ sudo-request --host remotehost id
 sudo-request --host remotehost -v id     # --verbose: echo the ssh command
 ```
 
-`--host` starts `ssh -t -L <tunnel> HOST sudo-proxy`, waits for the tunnel
-socket to appear, sends the request, then cleans up. The remote sudo-proxy's
-TUI prompt and sudo password prompt appear in your terminal via SSH's PTY.
-No prior SSH session or manual server start needed — just an account with SSH
-access and sudo-proxy installed on the remote host.
+`sudo-proxy --host HOST` resolves the remote UID (cached in
+`~/.config/sudo-proxy/hosts.json`), sets up an SSH tunnel to the remote
+`sudo-proxy.sock`, and execs into `ssh -t -L <tunnel> HOST sudo-proxy`.
+The remote TUI prompt and sudo password prompt appear in your terminal.
+The MCP server uses this internally via `start_server(host=...)`.
+
+`sudo-request --host HOST` does the same but for a single request: starts SSH,
+waits for the tunnel, sends the request, then cleans up. Useful for debugging.
 
 ## Protocol
 
@@ -375,7 +384,8 @@ Functional but minimal.
 - `--verbose` / `-v` on server: prints startup info, logs each request
 - `--confirm-unprivileged` on server: prompt before non-privileged commands
 - `--no-privilege` on client: sends request with `privileged: false`
-- `--host` flag: SSHs into remote, starts sudo-proxy, tunnels socket, sends request
+- `--host` flag on server: SSHs into remote, starts sudo-proxy, tunnels socket (used by MCP `start_server`)
+- `--host` flag on client: same setup for a single request, then cleans up
 - `--verbose` / `-v` on client: echoes the SSH command
 - `--print` mode for human-readable output on stdout
 - JSON-line protocol with base64-encoded output and `timeout` status

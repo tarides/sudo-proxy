@@ -127,6 +127,11 @@ pub fn default_socket_path() -> PathBuf {
     PathBuf::from(runtime_dir).join("sudo-proxy.sock")
 }
 
+/// Local tunnel endpoint path for a remote host's sudo-proxy socket.
+pub fn remote_socket_path(host: &str) -> PathBuf {
+    PathBuf::from(format!("/tmp/sudo-proxy-{host}.sock"))
+}
+
 pub fn run(
     socket_path: &Path,
     mode: Mode,
