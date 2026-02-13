@@ -2,6 +2,9 @@
 name = "sudo-proxy"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Privileged command execution proxy with human approval via pkexec or sudo"
+repository = "https://github.com/tarides/sudo-proxy"
 
 [[bin]]
 name = "sudo-proxy"
@@ -18,10 +21,14 @@ path = "src/bin/pkexec-cache.rs"
 [[bin]]
 name = "sudo-proxy-mcp"
 path = "src/bin/sudo-proxy-mcp.rs"
+required-features = ["mcp"]
 
 [lib]
 name = "sudo_proxy"
 path = "src/lib.rs"
+
+[features]
+mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
 [dependencies]
 base64 = "0.22"
@@ -29,6 +36,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libc = "0.2"
 uuid = { version = "1", features = ["v4"] }
-rmcp = { version = "0.11", features = ["transport-io"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }
-schemars = "1"
+rmcp = { version = "0.15", features = ["transport-io"], optional = true }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"], optional = true }
+schemars = { version = "1", optional = true }

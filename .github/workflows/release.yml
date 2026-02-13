@@ -1,0 +1,51 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain + MUSL target
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Install musl-tools
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build core binaries (no MCP)
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Build all binaries (with MCP)
+        run: cargo build --release --target x86_64-unknown-linux-musl --features mcp
+
+      - name: Package tarball
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          DIR="sudo-proxy-${TAG}-x86_64-linux"
+          mkdir "$DIR"
+          cp target/x86_64-unknown-linux-musl/release/sudo-proxy \
+             target/x86_64-unknown-linux-musl/release/sudo-request \
+             target/x86_64-unknown-linux-musl/release/pkexec-cache \
+             target/x86_64-unknown-linux-musl/release/sudo-proxy-mcp \
+             "$DIR/"
+          tar czf "${DIR}.tar.gz" "$DIR"
+          echo "TARBALL=${DIR}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          gh release create "$TAG" "$TARBALL" \
+            --title "$TAG" \
+            --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
