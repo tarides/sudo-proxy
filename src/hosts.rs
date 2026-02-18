@@ -148,3 +148,12 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 fn is_leap(year: u64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
+
+/// Compute the SSH target string from a host and an optional login user.
+/// Returns `login@host` if login is provided, otherwise just `host`.
+pub fn ssh_target(host: &str, login: Option<&str>) -> String {
+    match login {
+        Some(l) if !l.is_empty() => format!("{l}@{host}"),
+        _ => host.to_string(),
+    }
+}

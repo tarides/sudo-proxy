@@ -32,14 +32,19 @@ fn has_dangerous_chars(s: &str) -> bool {
 }
 
 fn validate_request(req: &Request) -> Result<(), String> {
-    if req.argv.is_empty() {
-        return Err("argv must not be empty".to_string());
+    if req.pipeline.is_empty() {
+        return Err("pipeline must not be empty".to_string());
     }
-    for (i, arg) in req.argv.iter().enumerate() {
-        if has_dangerous_chars(arg) {
-            return Err(format!(
-                "argv[{i}] contains forbidden control/bidi characters"
-            ));
+    for (stage_idx, argv) in req.pipeline.iter().enumerate() {
+        if argv.is_empty() {
+            return Err(format!("pipeline stage {stage_idx} must not be empty"));
+        }
+        for (i, arg) in argv.iter().enumerate() {
+            if has_dangerous_chars(arg) {
+                return Err(format!(
+                    "pipeline[{stage_idx}][{i}] contains forbidden control/bidi characters"
+                ));
+            }
         }
     }
     // Validate env keys too
@@ -218,7 +223,8 @@ pub fn run(
 
         if verbose {
             let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
-            eprintln!("[{}] [{}] {:?}", req.id, priv_label, req.argv);
+            let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
+            eprintln!("[{}] [{}] {}", req.id, priv_label, pipeline_display);
         }
 
         let resp = if req.privileged {

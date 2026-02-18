@@ -22,6 +22,15 @@ pub fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
+/// Join a pipeline of stages into a shell-like display string with ` | ` separators.
+pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
+    pipeline
+        .iter()
+        .map(|argv| shell_join(argv))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 #[derive(Debug, PartialEq)]
 pub enum PromptResult {
     Approved,
@@ -51,16 +60,36 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     if !req.reason.is_empty() {
         writeln!(tty_w, "Reason:  {bold}{}{reset}", req.reason)?;
     }
-    writeln!(tty_w, "Command: {bold}{}{reset}", shell_join(&req.argv))?;
+    writeln!(
+        tty_w,
+        "Command: {bold}{}{reset}",
+        pipeline_join(&req.pipeline)
+    )?;
 
-    // Show resolved path
-    if let Some(resolved) = which(&req.argv[0]) {
-        let resolved_str = resolved.display().to_string();
-        if resolved_str != req.argv[0] {
-            writeln!(tty_w, "Resolves: {}", resolved_str)?;
+    // Show resolved path for the first stage's command
+    if let Some(first_argv) = req.pipeline.first() {
+        if let Some(cmd_name) = first_argv.first() {
+            if let Some(resolved) = which(cmd_name) {
+                let resolved_str = resolved.display().to_string();
+                if resolved_str != *cmd_name {
+                    writeln!(tty_w, "Resolves: {}", resolved_str)?;
+                }
+            } else {
+                writeln!(tty_w, "Resolves: {bold}(not found in PATH){reset}")?;
+            }
         }
-    } else {
-        writeln!(tty_w, "Resolves: {bold}(not found in PATH){reset}")?;
+
+        // Warn if later stages have commands not in PATH
+        for argv in req.pipeline.iter().skip(1) {
+            if let Some(cmd_name) = argv.first() {
+                if which(cmd_name).is_none() {
+                    writeln!(
+                        tty_w,
+                        "Warning:  {bold}{cmd_name}{reset} not found in PATH"
+                    )?;
+                }
+            }
+        }
     }
 
     if !req.env.is_empty() {
@@ -111,20 +140,41 @@ pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
 
     match resp.status {
         Status::Ok => {
-            let code = resp.exit_code.unwrap_or(0);
-            if code == 0 {
+            let exit_code = resp.exit_code();
+            let multi_stage = resp.stages.len() > 1;
+
+            if multi_stage {
+                // Show all exit codes for multi-stage
+                let codes: Vec<String> =
+                    resp.stages.iter().map(|s| s.exit_code.to_string()).collect();
+                let label = format!("exit [{}]", codes.join(", "));
+                if exit_code == 0 {
+                    writeln!(w, "{dim}{label}{reset}")?;
+                } else {
+                    writeln!(w, "{bold}{label}{reset}")?;
+                }
+            } else if exit_code == 0 {
                 writeln!(w, "{dim}exit 0{reset}")?;
             } else {
-                writeln!(w, "{bold}exit {code}{reset}")?;
+                writeln!(w, "{bold}exit {exit_code}{reset}")?;
             }
+
             if let Some(ref b64) = resp.stdout {
                 if let Ok(bytes) = B64.decode(b64) {
                     print_truncated(w, &bytes, "stdout")?;
                 }
             }
-            if let Some(ref b64) = resp.stderr {
-                if let Ok(bytes) = B64.decode(b64) {
-                    print_truncated(w, &bytes, "stderr")?;
+
+            for (i, stage) in resp.stages.iter().enumerate() {
+                if let Ok(bytes) = B64.decode(&stage.stderr) {
+                    if !bytes.is_empty() {
+                        let label = if multi_stage {
+                            format!("stderr[{i}]")
+                        } else {
+                            "stderr".to_string()
+                        };
+                        print_truncated(w, &bytes, &label)?;
+                    }
                 }
             }
         }

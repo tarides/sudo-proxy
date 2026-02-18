@@ -13,14 +13,14 @@ fn main() {
         Ok(o) => o,
         Err(e) => {
             eprintln!("error: {e}");
-            eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...]");
+            eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
             process::exit(1);
         }
     };
 
-    if opts.argv.is_empty() {
+    if opts.pipeline.is_empty() || opts.pipeline.iter().all(|s| s.is_empty()) {
         eprintln!("error: no command specified");
-        eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...]");
+        eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
         process::exit(1);
     }
 
@@ -31,7 +31,7 @@ fn main() {
         host: hostname(),
         session: opts.session,
         time: now_iso8601(),
-        argv: opts.argv,
+        pipeline: opts.pipeline,
         env: std::collections::HashMap::new(),
         reason: opts.reason.unwrap_or_default(),
         privileged: opts.privileged,
@@ -84,17 +84,21 @@ fn main() {
     } else {
         match resp.status {
             Status::Ok => {
+                // Write last stage's stdout to stdout
                 if let Some(ref stdout_b64) = resp.stdout {
                     if let Ok(bytes) = B64.decode(stdout_b64) {
                         let _ = std::io::stdout().write_all(&bytes);
                     }
                 }
-                if let Some(ref stderr_b64) = resp.stderr {
-                    if let Ok(bytes) = B64.decode(stderr_b64) {
-                        let _ = std::io::stderr().write_all(&bytes);
+                // Write each stage's stderr to stderr
+                for stage in &resp.stages {
+                    if let Ok(bytes) = B64.decode(&stage.stderr) {
+                        if !bytes.is_empty() {
+                            let _ = std::io::stderr().write_all(&bytes);
+                        }
                     }
                 }
-                let code = resp.exit_code.unwrap_or(0);
+                let code = resp.exit_code();
                 if code != 0 {
                     eprintln!("(exit code: {code})");
                 }
@@ -125,7 +129,7 @@ struct Opts {
     session: String,
     print: bool,
     privileged: bool,
-    argv: Vec<String>,
+    pipeline: Vec<Vec<String>>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -145,9 +149,9 @@ fn parse_args() -> Result<Opts, String> {
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...]");
+                eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
                 eprintln!();
-                eprintln!("Debug client for sudo-proxy.");
+                eprintln!("Debug client for sudo-proxy. Supports pipelines via '|' separator.");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --socket PATH    Unix socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
@@ -155,6 +159,9 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
                 eprintln!("  --no-privilege   Run command without privilege escalation");
+                eprintln!();
+                eprintln!("Pipeline example:");
+                eprintln!("  sudo-request --no-privilege ls /tmp '|' wc -l");
                 std::process::exit(0);
             }
             "--socket" => {
@@ -188,7 +195,7 @@ fn parse_args() -> Result<Opts, String> {
                 return Err(format!("unknown option: {other}"));
             }
             _ => {
-                // Everything from here on is the command
+                // Everything from here on is the command (with | as pipeline separator)
                 argv = args[i..].to_vec();
                 break;
             }
@@ -196,14 +203,40 @@ fn parse_args() -> Result<Opts, String> {
         i += 1;
     }
 
+    // Split argv on '|' to build pipeline stages
+    let pipeline = split_pipeline(argv);
+
     Ok(Opts {
         socket,
         reason,
         session,
         print,
         privileged,
-        argv,
+        pipeline,
     })
+}
+
+/// Split a flat argv on literal `|` tokens into pipeline stages.
+fn split_pipeline(argv: Vec<String>) -> Vec<Vec<String>> {
+    if argv.is_empty() {
+        return vec![];
+    }
+    let mut pipeline = Vec::new();
+    let mut current_stage = Vec::new();
+    for arg in argv {
+        if arg == "|" {
+            if !current_stage.is_empty() {
+                pipeline.push(current_stage);
+                current_stage = Vec::new();
+            }
+        } else {
+            current_stage.push(arg);
+        }
+    }
+    if !current_stage.is_empty() {
+        pipeline.push(current_stage);
+    }
+    pipeline
 }
 
 fn hostname() -> String {
@@ -261,4 +294,3 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
 fn is_leap(year: u64) -> bool {
     year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
-

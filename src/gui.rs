@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::executor::which;
 use crate::protocol::Request;
-use crate::tui::{self, shell_join, PromptResult};
+use crate::tui::{self, pipeline_join, PromptResult};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -39,11 +39,15 @@ fn format_prompt_text(req: &Request) -> String {
     if !req.reason.is_empty() {
         lines.push(format!("Reason: {}", req.reason));
     }
-    lines.push(format!("Command: {}", shell_join(&req.argv)));
-    if let Some(resolved) = which(&req.argv[0]) {
-        let resolved_str = resolved.display().to_string();
-        if resolved_str != req.argv[0] {
-            lines.push(format!("Resolves: {}", resolved_str));
+    lines.push(format!("Command: {}", pipeline_join(&req.pipeline)));
+    if let Some(first_argv) = req.pipeline.first() {
+        if let Some(cmd_name) = first_argv.first() {
+            if let Some(resolved) = which(cmd_name) {
+                let resolved_str = resolved.display().to_string();
+                if resolved_str != *cmd_name {
+                    lines.push(format!("Resolves: {}", resolved_str));
+                }
+            }
         }
     }
     lines.push(String::new());

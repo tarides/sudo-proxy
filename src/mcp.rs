@@ -35,7 +35,11 @@ const MAX_TIMEOUT_MS: u64 = 600_000;
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ExecuteParams {
     /// Command as argument array
-    pub argv: Vec<String>,
+    pub argv: Option<Vec<String>>,
+
+    /// Pipeline of commands, each as an argument array. Use this for piped commands like [["ls", "/tmp"], ["wc", "-l"]].
+    #[serde(default)]
+    pub pipeline: Option<Vec<Vec<String>>>,
 
     /// Target host (omit for localhost)
     #[serde(default)]
@@ -101,7 +105,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Execute a command through sudo-proxy with human approval. The command runs on the target host (local by default). A human must approve privileged commands before they execute. Call start_server first if sudo-proxy is not already running."
+        description = "Execute a command through sudo-proxy with human approval. The command runs on the target host (local by default). A human must approve privileged commands before they execute. Call start_server first if sudo-proxy is not already running. Supports pipelines: use `pipeline` for multi-stage commands (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]) or `argv` for a single command."
     )]
     async fn execute(
         &self,
@@ -117,6 +121,17 @@ impl McpProxy {
             )));
         }
 
+        // Build pipeline from either `pipeline` or `argv` parameter
+        let pipeline = match (params.pipeline, params.argv) {
+            (Some(p), _) if !p.is_empty() => p,
+            (_, Some(argv)) if !argv.is_empty() => vec![argv],
+            _ => {
+                return Ok(error_result(
+                    "Either `argv` or `pipeline` must be provided.".to_string(),
+                ));
+            }
+        };
+
         let host_name = params.host.clone().unwrap_or_else(|| "localhost".into());
 
         let req = Request {
@@ -124,7 +139,7 @@ impl McpProxy {
             host: params.host.unwrap_or_default(),
             session: "sudo-proxy-mcp".to_string(),
             time: now_iso8601(),
-            argv: params.argv,
+            pipeline,
             env: params.env.unwrap_or_default(),
             reason: params.description.unwrap_or_default(),
             privileged: params.privileged,
@@ -447,19 +462,35 @@ async fn send_request(socket_path: &Path, req: &Request) -> Result<Response, Str
 fn format_response(resp: Response) -> CallToolResult {
     match resp.status {
         Status::Ok => {
-            let exit_code = resp.exit_code.unwrap_or(0);
+            let exit_code = resp.exit_code();
             let stdout = decode_b64(resp.stdout.as_deref());
-            let stderr = decode_b64(resp.stderr.as_deref());
+            let multi_stage = resp.stages.len() > 1;
 
             let mut parts = Vec::new();
             if !stdout.is_empty() {
                 parts.push(stdout);
             }
-            if !stderr.is_empty() {
-                parts.push(format!("[stderr]\n{stderr}"));
+
+            for (i, stage) in resp.stages.iter().enumerate() {
+                let stderr = decode_b64(Some(&stage.stderr));
+                if !stderr.is_empty() {
+                    let label = if multi_stage {
+                        format!("[stderr stage {i}]")
+                    } else {
+                        "[stderr]".to_string()
+                    };
+                    parts.push(format!("{label}\n{stderr}"));
+                }
             }
+
             if parts.is_empty() || exit_code != 0 {
-                parts.push(format!("[exit code: {exit_code}]"));
+                if multi_stage {
+                    let codes: Vec<String> =
+                        resp.stages.iter().map(|s| s.exit_code.to_string()).collect();
+                    parts.push(format!("[exit codes: {}]", codes.join(", ")));
+                } else {
+                    parts.push(format!("[exit code: {exit_code}]"));
+                }
             }
 
             CallToolResult {

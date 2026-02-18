@@ -13,7 +13,7 @@ pub struct Request {
     pub session: String,
     #[serde(default)]
     pub time: String,
-    pub argv: Vec<String>,
+    pub pipeline: Vec<Vec<String>>,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
@@ -35,15 +35,19 @@ fn default_session() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct StageResult {
+    pub exit_code: i32,
+    pub stderr: String, // base64
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Response {
     pub id: String,
     pub status: Status,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stages: Vec<StageResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub stderr: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
@@ -58,13 +62,12 @@ pub enum Status {
 }
 
 impl Response {
-    pub fn ok(id: &str, exit_code: i32, stdout: &[u8], stderr: &[u8]) -> Self {
+    pub fn ok(id: &str, stages: Vec<StageResult>, stdout: &[u8]) -> Self {
         Self {
             id: id.to_string(),
             status: Status::Ok,
-            exit_code: Some(exit_code),
+            stages,
             stdout: Some(B64.encode(stdout)),
-            stderr: Some(B64.encode(stderr)),
             message: None,
         }
     }
@@ -73,9 +76,8 @@ impl Response {
         Self {
             id: id.to_string(),
             status: Status::Denied,
-            exit_code: None,
+            stages: vec![],
             stdout: None,
-            stderr: None,
             message: None,
         }
     }
@@ -84,9 +86,8 @@ impl Response {
         Self {
             id: id.to_string(),
             status: Status::Timeout,
-            exit_code: None,
+            stages: vec![],
             stdout: None,
-            stderr: None,
             message: None,
         }
     }
@@ -95,10 +96,14 @@ impl Response {
         Self {
             id: id.to_string(),
             status: Status::Error,
-            exit_code: None,
+            stages: vec![],
             stdout: None,
-            stderr: None,
             message: Some(message.to_string()),
         }
+    }
+
+    /// Returns the exit code of the last stage, or 0 if no stages.
+    pub fn exit_code(&self) -> i32 {
+        self.stages.last().map(|s| s.exit_code).unwrap_or(0)
     }
 }

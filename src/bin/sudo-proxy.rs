@@ -7,6 +7,7 @@ use sudo_proxy::server;
 struct Opts {
     socket: PathBuf,
     host: Option<String>,
+    login: Option<String>,
     pkexec: bool,
     verbose: bool,
     confirm_unprivileged: bool,
@@ -17,7 +18,8 @@ fn main() {
     let opts = parse_args(&args);
 
     if let Some(ref host) = opts.host {
-        run_remote(host, opts.verbose);
+        let target = sudo_proxy::hosts::ssh_target(host, opts.login.as_deref());
+        run_remote(&target, opts.verbose);
         // run_remote execs into ssh, so we only get here on error
         return;
     }
@@ -41,6 +43,7 @@ fn main() {
 fn parse_args(args: &[String]) -> Opts {
     let mut socket = None;
     let mut host = None;
+    let mut login = None;
     let mut pkexec = false;
     let mut verbose = false;
     let mut confirm_unprivileged = false;
@@ -54,6 +57,10 @@ fn parse_args(args: &[String]) -> Opts {
             "--host" => host = iter.next().map(|s| s.to_string()),
             s if s.starts_with("--host=") => {
                 host = s.strip_prefix("--host=").map(|s| s.to_string());
+            }
+            "--login" => login = iter.next().map(|s| s.to_string()),
+            s if s.starts_with("--login=") => {
+                login = s.strip_prefix("--login=").map(|s| s.to_string());
             }
             "--pkexec" => pkexec = true,
             "--verbose" | "-v" => verbose = true,
@@ -85,6 +92,7 @@ fn parse_args(args: &[String]) -> Opts {
     Opts {
         socket: socket.unwrap_or_else(server::default_socket_path),
         host,
+        login,
         pkexec,
         verbose,
         confirm_unprivileged,
