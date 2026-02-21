@@ -170,7 +170,14 @@ fn run_remote(host: &str, verbose: bool) {
     config.touch(host);
     config.save();
 
-    let ssh_args = ["-t", "-L", &tunnel, host, "sudo-proxy"];
+    let ssh_args = [
+        "-t",
+        "-o", "ServerAliveInterval=15",
+        "-o", "ServerAliveCountMax=3",
+        "-o", "ExitOnForwardFailure=yes",
+        "-L", &tunnel,
+        host, "sudo-proxy",
+    ];
 
     if verbose {
         eprintln!("+ ssh {}", ssh_args.join(" "));

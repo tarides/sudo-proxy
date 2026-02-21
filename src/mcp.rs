@@ -121,6 +121,24 @@ impl McpProxy {
             )));
         }
 
+        // Probe socket liveness: if we can't connect within 3s, the tunnel is dead
+        match tokio::time::timeout(
+            Duration::from_secs(3),
+            UnixStream::connect(&socket_path),
+        )
+        .await
+        {
+            Ok(Ok(stream)) => drop(stream), // alive — proceed
+            Ok(Err(_)) | Err(_) => {
+                // Stale socket — remove it and report
+                let _ = std::fs::remove_file(&socket_path);
+                return Ok(error_result(format!(
+                    "sudo-proxy socket at {} is stale (server/tunnel is dead). Removed it — call start_server to reconnect.",
+                    socket_path.display()
+                )));
+            }
+        }
+
         // Build pipeline from either `pipeline` or `argv` parameter
         let pipeline = match (params.pipeline, params.argv) {
             (Some(p), _) if !p.is_empty() => p,
@@ -145,20 +163,16 @@ impl McpProxy {
             privileged: params.privileged,
         };
 
-        let result = tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            send_request(&socket_path, &req),
-        )
-        .await;
+        let total_timeout = Duration::from_millis(timeout_ms);
+        let result = send_request(&socket_path, &req, total_timeout).await;
 
-        if let Ok(Ok(_)) = &result {
+        if result.is_ok() {
             touch_host(&host_name);
         }
 
         match result {
-            Ok(Ok(resp)) => Ok(format_response(resp)),
-            Ok(Err(e)) => Ok(error_result(e)),
-            Err(_) => Ok(error_result("Request timed out.".to_string())),
+            Ok(resp) => Ok(format_response(resp)),
+            Err(e) => Ok(error_result(e)),
         }
     }
 
@@ -427,25 +441,63 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
 // Socket communication
 // ---------------------------------------------------------------------------
 
-async fn send_request(socket_path: &Path, req: &Request) -> Result<Response, String> {
-    let stream = UnixStream::connect(socket_path)
+/// Per-phase timeout for connect and write operations.
+const PHASE_TIMEOUT: Duration = Duration::from_secs(5);
+
+async fn send_request(
+    socket_path: &Path,
+    req: &Request,
+    total_timeout: Duration,
+) -> Result<Response, String> {
+    let deadline = tokio::time::Instant::now() + total_timeout;
+
+    // Phase 1: Connect (5s — if a Unix socket takes longer, the tunnel is dead)
+    let stream = tokio::time::timeout(PHASE_TIMEOUT, UnixStream::connect(socket_path))
         .await
+        .map_err(|_| {
+            format!(
+                "connect timed out after {}s — tunnel to {} may be dead, try restarting the server",
+                PHASE_TIMEOUT.as_secs(),
+                socket_path.display()
+            )
+        })?
         .map_err(|e| format!("connect to {}: {e}", socket_path.display()))?;
 
     let (read, mut write) = stream.into_split();
 
+    // Phase 2: Write (5s)
     let json = serde_json::to_string(req).map_err(|e| format!("serialize: {e}"))?;
-    write
-        .write_all(format!("{json}\n").as_bytes())
-        .await
-        .map_err(|e| format!("write: {e}"))?;
-    write.flush().await.map_err(|e| format!("flush: {e}"))?;
+    tokio::time::timeout(PHASE_TIMEOUT, async {
+        write
+            .write_all(format!("{json}\n").as_bytes())
+            .await
+            .map_err(|e| format!("write: {e}"))?;
+        write.flush().await.map_err(|e| format!("flush: {e}"))?;
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|_| {
+        format!(
+            "write timed out after {}s — server at {} may be unresponsive",
+            PHASE_TIMEOUT.as_secs(),
+            socket_path.display()
+        )
+    })??;
+
+    // Phase 3: Read (remaining time from user-specified timeout)
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    let remaining = remaining.max(Duration::from_secs(1)); // at least 1s
 
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    reader
-        .read_line(&mut line)
+    tokio::time::timeout(remaining, reader.read_line(&mut line))
         .await
+        .map_err(|_| {
+            format!(
+                "server did not respond within {}s — it may be busy with another command or waiting for user approval",
+                total_timeout.as_secs()
+            )
+        })?
         .map_err(|e| format!("read: {e}"))?;
 
     if line.is_empty() {
