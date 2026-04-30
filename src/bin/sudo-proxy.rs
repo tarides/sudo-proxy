@@ -18,6 +18,16 @@ fn main() {
     let opts = parse_args(&args);
 
     if let Some(ref host) = opts.host {
+        if let Err(e) = server::validate_host(host) {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        if let Some(ref login) = opts.login {
+            if let Err(e) = server::validate_host(login) {
+                eprintln!("error: invalid --login: {e}");
+                process::exit(1);
+            }
+        }
         let target = sudo_proxy::hosts::ssh_target(host, opts.login.as_deref());
         run_remote(&target, opts.verbose);
         // run_remote execs into ssh, so we only get here on error
@@ -111,15 +121,15 @@ fn ctrlc_cleanup(socket_path: PathBuf) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
-/// Register a signal handler that cleans up the socket file on SIGINT/SIGTERM.
-/// Uses raw libc since we want minimal dependencies.
+/// Register a signal handler that cleans up the socket file on
+/// SIGINT/SIGTERM/SIGHUP. Uses raw libc since we want minimal dependencies.
 unsafe fn signal_hook_cleanup(path: PathBuf) {
     use std::sync::OnceLock;
 
     static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
     SOCKET_PATH.get_or_init(|| path);
 
-    unsafe extern "C" fn handler(_sig: libc::c_int) {
+    unsafe extern "C" fn handler(sig: libc::c_int) {
         // Only async-signal-safe operations here
         if let Some(path) = SOCKET_PATH.get() {
             // Best-effort removal using libc::unlink
@@ -128,13 +138,14 @@ unsafe fn signal_hook_cleanup(path: PathBuf) {
                 libc::unlink(c_path.as_ptr());
             }
         }
-        // Re-raise with default handler
-        libc::signal(libc::SIGINT, libc::SIG_DFL);
-        libc::raise(libc::SIGINT);
+        // Re-raise with default handler so wait status reflects the real signal
+        libc::signal(sig, libc::SIG_DFL);
+        libc::raise(sig);
     }
 
     libc::signal(libc::SIGINT, handler as *const () as libc::sighandler_t);
     libc::signal(libc::SIGTERM, handler as *const () as libc::sighandler_t);
+    libc::signal(libc::SIGHUP, handler as *const () as libc::sighandler_t);
 }
 
 /// Connect to a remote host: resolve UID, set up SSH tunnel, exec into SSH.

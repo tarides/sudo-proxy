@@ -111,6 +111,11 @@ impl McpProxy {
         &self,
         Parameters(params): Parameters<ExecuteParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(ref h) = params.host {
+            if let Err(e) = crate::server::validate_host(h) {
+                return Ok(error_result(format!("invalid host: {e}")));
+            }
+        }
         let socket_path = socket_for_host(params.host.as_deref());
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
 
@@ -119,24 +124,6 @@ impl McpProxy {
                 "sudo-proxy is not running (socket not found at {}). Call start_server first.",
                 socket_path.display()
             )));
-        }
-
-        // Probe socket liveness: if we can't connect within 3s, the tunnel is dead
-        match tokio::time::timeout(
-            Duration::from_secs(3),
-            UnixStream::connect(&socket_path),
-        )
-        .await
-        {
-            Ok(Ok(stream)) => drop(stream), // alive — proceed
-            Ok(Err(_)) | Err(_) => {
-                // Stale socket — remove it and report
-                let _ = std::fs::remove_file(&socket_path);
-                return Ok(error_result(format!(
-                    "sudo-proxy socket at {} is stale (server/tunnel is dead). Removed it — call start_server to reconnect.",
-                    socket_path.display()
-                )));
-            }
         }
 
         // Build pipeline from either `pipeline` or `argv` parameter
@@ -183,6 +170,11 @@ impl McpProxy {
         &self,
         Parameters(params): Parameters<StartServerParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Some(ref h) = params.host {
+            if let Err(e) = crate::server::validate_host(h) {
+                return Ok(error_result(format!("invalid host: {e}")));
+            }
+        }
         let result = match &params.host {
             None => start_local().await,
             Some(host) => start_remote(host).await,
@@ -205,6 +197,9 @@ impl McpProxy {
         &self,
         Parameters(params): Parameters<UpdateHostParams>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(e) = crate::server::validate_host(&params.host) {
+            return Ok(error_result(format!("invalid host: {e}")));
+        }
         let mut config = HostsConfig::load();
         let info = config
             .hosts

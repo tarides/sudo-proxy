@@ -1,19 +1,25 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::UnixListener;
+use std::os::unix::io::AsRawFd;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
 use crate::mode::Mode;
 use crate::protocol::{Request, Response};
 use crate::tui;
 
-const MAX_SEEN_IDS: usize = 1000;
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REQUEST_AGE: Duration = Duration::from_secs(60);
+/// How long replay-protection ids are remembered. Twice MAX_REQUEST_AGE so that
+/// any id that could still pass the freshness check is also still in the set.
+const REPLAY_RETENTION: Duration = Duration::from_secs(120);
+/// Per-connection read/write timeout. An honest client writes its single
+/// JSON line in microseconds; anything slower is either broken or hostile.
+const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Characters forbidden in argv strings (control chars, bidi overrides, zero-width).
 fn has_dangerous_chars(s: &str) -> bool {
@@ -61,7 +67,7 @@ fn validate_request(req: &Request) -> Result<(), String> {
     Ok(())
 }
 
-fn check_replay(req: &Request, seen_ids: &HashSet<String>) -> Result<(), String> {
+fn check_replay(req: &Request, seen_ids: &SeenIds) -> Result<(), String> {
     if seen_ids.contains(&req.id) {
         return Err(format!("duplicate request id: {}", req.id));
     }
@@ -126,15 +132,133 @@ fn parse_age(timestamp: &str) -> Option<Duration> {
     }
 }
 
-pub fn default_socket_path() -> PathBuf {
-    let runtime_dir = std::env::var("XDG_RUNTIME_DIR")
+fn runtime_dir() -> PathBuf {
+    let dir = std::env::var("XDG_RUNTIME_DIR")
         .unwrap_or_else(|_| format!("/run/user/{}", unsafe { libc::getuid() }));
-    PathBuf::from(runtime_dir).join("sudo-proxy.sock")
+    PathBuf::from(dir)
+}
+
+pub fn default_socket_path() -> PathBuf {
+    runtime_dir().join("sudo-proxy.sock")
 }
 
 /// Local tunnel endpoint path for a remote host's sudo-proxy socket.
+/// Caller must validate `host` with [`validate_host`] first.
 pub fn remote_socket_path(host: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/sudo-proxy-{host}.sock"))
+    runtime_dir().join(format!("sudo-proxy-{host}.sock"))
+}
+
+/// Reject host strings that would escape the socket directory or be passed
+/// as an option flag to ssh. Keep this conservative — real hostnames and
+/// `user@host` forms only need ASCII alphanumerics, dots, dashes, underscores,
+/// `@`, and `:` (for port-style targets).
+pub fn validate_host(host: &str) -> Result<(), String> {
+    if host.is_empty() {
+        return Err("host must not be empty".into());
+    }
+    if host.starts_with('-') {
+        return Err("host must not start with '-'".into());
+    }
+    for c in host.chars() {
+        let bad = c == '/'
+            || c == '\\'
+            || c == '\0'
+            || (c as u32) < 0x20
+            || c.is_whitespace();
+        if bad {
+            return Err(format!("host contains forbidden character: {c:?}"));
+        }
+    }
+    Ok(())
+}
+
+/// Bounded set of recently-seen request ids, evicted by age.
+struct SeenIds {
+    set: HashSet<String>,
+    queue: VecDeque<(String, Instant)>,
+}
+
+impl SeenIds {
+    fn new() -> Self {
+        Self {
+            set: HashSet::new(),
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn contains(&self, id: &str) -> bool {
+        self.set.contains(id)
+    }
+
+    fn insert(&mut self, id: String) {
+        let now = Instant::now();
+        while let Some((_, t)) = self.queue.front() {
+            if now.duration_since(*t) > REPLAY_RETENTION {
+                let (old, _) = self.queue.pop_front().unwrap();
+                self.set.remove(&old);
+            } else {
+                break;
+            }
+        }
+        self.set.insert(id.clone());
+        self.queue.push_back((id, now));
+    }
+}
+
+/// Read SO_PEERCRED for a connected Unix socket and return the peer UID.
+/// Linux-specific. Used to refuse cross-UID connections as defense-in-depth
+/// — the socket file is already 0600 in a 0700 runtime dir.
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(cred.uid)
+}
+
+/// Bind the listener, refusing to clobber an active server. If the socket
+/// path is already bound and accepts connections, error out. If the file
+/// exists but no peer accepts, treat it as stale and replace it.
+fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
+    // Tighten umask so the socket is created 0600 even before the explicit
+    // chmod below — closes the bind→chmod TOCTOU window.
+    let prev_umask = unsafe { libc::umask(0o077) };
+    let first = UnixListener::bind(socket_path);
+    unsafe { libc::umask(prev_umask) };
+
+    let listener = match first {
+        Ok(l) => l,
+        Err(e) if e.kind() == ErrorKind::AddrInUse => {
+            if UnixStream::connect(socket_path).is_ok() {
+                return Err(io::Error::new(
+                    ErrorKind::AddrInUse,
+                    format!(
+                        "sudo-proxy is already running on {}",
+                        socket_path.display()
+                    ),
+                ));
+            }
+            fs::remove_file(socket_path)?;
+            let prev = unsafe { libc::umask(0o077) };
+            let l = UnixListener::bind(socket_path);
+            unsafe { libc::umask(prev) };
+            l?
+        }
+        Err(e) => return Err(e),
+    };
+
+    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+    Ok(listener)
 }
 
 pub fn run(
@@ -144,22 +268,15 @@ pub fn run(
     verbose: bool,
     confirm_unprivileged: bool,
 ) -> std::io::Result<()> {
-    // Remove stale socket
-    if socket_path.exists() {
-        fs::remove_file(socket_path)?;
-    }
-
-    let listener = UnixListener::bind(socket_path)?;
-
-    // Set socket permissions to 0600
-    fs::set_permissions(socket_path, fs::Permissions::from_mode(0o600))?;
+    let listener = bind_listener(socket_path)?;
 
     if verbose {
         eprintln!("sudo-proxy listening on {}", socket_path.display());
         eprintln!("mode: {}", mode.label());
     }
 
-    let mut seen_ids: HashSet<String> = HashSet::new();
+    let our_uid = unsafe { libc::getuid() };
+    let mut seen_ids = SeenIds::new();
 
     for stream in listener.incoming() {
         let mut stream = match stream {
@@ -169,6 +286,25 @@ pub fn run(
                 continue;
             }
         };
+
+        // Defense-in-depth: refuse connections from other UIDs even though
+        // the socket file is 0600 inside a 0700 runtime dir.
+        match peer_uid(&stream) {
+            Ok(uid) if uid == our_uid => {}
+            Ok(uid) => {
+                eprintln!("rejecting connection from uid {uid} (expected {our_uid})");
+                continue;
+            }
+            Err(e) => {
+                eprintln!("peer credential check failed: {e}");
+                continue;
+            }
+        }
+
+        // Bound how long any one client can hold the daemon. Without this a
+        // peer that connects and never writes wedges the accept loop forever.
+        let _ = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT));
+        let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
 
         let reader = BufReader::new(&stream);
         let mut line = String::new();
@@ -215,10 +351,6 @@ pub fn run(
             }
         };
 
-        // Track this ID
-        if seen_ids.len() >= MAX_SEEN_IDS {
-            seen_ids.clear();
-        }
         seen_ids.insert(req.id.clone());
 
         if verbose {
