@@ -38,6 +38,11 @@ fn default_session() -> String {
 pub struct StageResult {
     pub exit_code: i32,
     pub stderr: String, // base64
+    /// True if the stage's stderr was capped before the child finished
+    /// writing. Defaults to false; old peers without this field deserialize
+    /// to false transparently.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stderr_truncated: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,8 +53,16 @@ pub struct Response {
     pub stages: Vec<StageResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stdout: Option<String>,
+    /// True if the final stdout was capped at MAX_OUTPUT_BYTES before the
+    /// child finished writing.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stdout_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
@@ -68,8 +81,20 @@ impl Response {
             status: Status::Ok,
             stages,
             stdout: Some(B64.encode(stdout)),
+            stdout_truncated: false,
             message: None,
         }
+    }
+
+    pub fn ok_with_truncation(
+        id: &str,
+        stages: Vec<StageResult>,
+        stdout: &[u8],
+        stdout_truncated: bool,
+    ) -> Self {
+        let mut r = Self::ok(id, stages, stdout);
+        r.stdout_truncated = stdout_truncated;
+        r
     }
 
     pub fn denied(id: &str) -> Self {
@@ -78,6 +103,7 @@ impl Response {
             status: Status::Denied,
             stages: vec![],
             stdout: None,
+            stdout_truncated: false,
             message: None,
         }
     }
@@ -88,6 +114,7 @@ impl Response {
             status: Status::Timeout,
             stages: vec![],
             stdout: None,
+            stdout_truncated: false,
             message: None,
         }
     }
@@ -98,6 +125,7 @@ impl Response {
             status: Status::Error,
             stages: vec![],
             stdout: None,
+            stdout_truncated: false,
             message: Some(message.to_string()),
         }
     }

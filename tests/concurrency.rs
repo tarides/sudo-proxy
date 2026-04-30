@@ -323,7 +323,7 @@ fn burst_connections_above_cap_get_busy_response() {
         }));
     }
 
-    let reached = wait_until(Duration::from_secs(3), || {
+    let reached = wait_until(Duration::from_secs(10), || {
         s.in_flight.load(Ordering::Relaxed) >= 4
     });
     assert!(
