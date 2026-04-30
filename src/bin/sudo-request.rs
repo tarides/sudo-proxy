@@ -2,11 +2,26 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process;
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server::default_socket_path;
+
+/// Default read timeout for waiting on the daemon's response. Must exceed
+/// the daemon's PROMPT_TIMEOUT (60s) and EXEC_TIMEOUT (5min default) plus
+/// some slack — beyond that the daemon is wedged. Override via env var
+/// `SUDO_REQUEST_TIMEOUT_SECS`.
+const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 600;
+
+fn client_timeout() -> Duration {
+    std::env::var("SUDO_REQUEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(DEFAULT_CLIENT_TIMEOUT_SECS))
+}
 
 fn main() {
     let opts = match parse_args() {
@@ -45,6 +60,9 @@ fn main() {
             process::exit(1);
         }
     };
+    let timeout = client_timeout();
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
 
     let json = serde_json::to_string(&req).expect("serialize request");
     if let Err(e) = writeln!(stream, "{json}") {
@@ -62,6 +80,15 @@ fn main() {
             process::exit(1);
         }
         Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
+            || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            eprintln!(
+                "error: no response from daemon after {}s — it may be wedged or waiting on a prompt",
+                timeout.as_secs()
+            );
+            process::exit(1);
+        }
         Err(e) => {
             eprintln!("error: read failed: {e}");
             process::exit(1);
