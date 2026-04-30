@@ -38,6 +38,40 @@ pub enum PromptResult {
     Timeout,
 }
 
+/// Asks the user to approve or deny a privilege request.
+pub trait Prompter: Send + Sync {
+    fn prompt(&self, req: &Request, timeout: Duration) -> io::Result<PromptResult>;
+}
+
+/// Echoes the result of a completed command back to the user.
+pub trait ResultSink: Send + Sync {
+    fn display(&self, resp: &Response) -> io::Result<()>;
+}
+
+pub struct TtyPrompter;
+
+impl Prompter for TtyPrompter {
+    fn prompt(&self, req: &Request, timeout: Duration) -> io::Result<PromptResult> {
+        prompt_tty(req, timeout)
+    }
+}
+
+pub struct TtyResultSink;
+
+impl ResultSink for TtyResultSink {
+    fn display(&self, resp: &Response) -> io::Result<()> {
+        display_result(resp)
+    }
+}
+
+pub struct NoopResultSink;
+
+impl ResultSink for NoopResultSink {
+    fn display(&self, _resp: &Response) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> {
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;

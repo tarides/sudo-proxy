@@ -4,9 +4,17 @@ use std::time::Duration;
 
 use crate::executor::which;
 use crate::protocol::Request;
-use crate::tui::{self, pipeline_join, PromptResult};
+use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub struct GuiPrompter;
+
+impl Prompter for GuiPrompter {
+    fn prompt(&self, req: &Request, _timeout: Duration) -> io::Result<PromptResult> {
+        prompt_gui(req)
+    }
+}
 
 /// Show a Y/N confirmation dialog for a command request.
 /// Auto-detects: zenity → kdialog → TUI (/dev/tty) fallback.

@@ -1,8 +1,11 @@
 use std::path::PathBuf;
 use std::process;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
+use std::sync::Arc;
 
 use sudo_proxy::mode::Mode;
 use sudo_proxy::server;
+use sudo_proxy::tui::{Prompter, ResultSink, TtyPrompter, TtyResultSink};
 
 struct Opts {
     socket: PathBuf,
@@ -43,7 +46,22 @@ fn main() {
         eprintln!("warning: could not set signal handler: {e}");
     }
 
-    if let Err(e) = server::run(&socket_path, mode, opts.pkexec, opts.verbose, opts.confirm_unprivileged) {
+    let prompter: Arc<dyn Prompter> = Arc::new(TtyPrompter);
+    let sink: Arc<dyn ResultSink> = Arc::new(TtyResultSink);
+    let shutdown = AtomicBool::new(false);
+    let in_flight = Arc::new(AtomicUsize::new(0));
+
+    if let Err(e) = server::run(
+        &socket_path,
+        mode,
+        opts.pkexec,
+        opts.verbose,
+        opts.confirm_unprivileged,
+        prompter,
+        sink,
+        &shutdown,
+        in_flight,
+    ) {
         eprintln!("error: {e}");
         let _ = std::fs::remove_file(&socket_path);
         process::exit(1);

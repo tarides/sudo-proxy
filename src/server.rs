@@ -5,12 +5,15 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
 use crate::mode::Mode;
 use crate::protocol::{Request, Response};
-use crate::tui;
+use crate::tui::{self, Prompter, ResultSink};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REQUEST_AGE: Duration = Duration::from_secs(60);
@@ -67,24 +70,33 @@ fn validate_request(req: &Request) -> Result<(), String> {
     Ok(())
 }
 
-fn check_replay(req: &Request, seen_ids: &SeenIds) -> Result<(), String> {
-    if seen_ids.contains(&req.id) {
-        return Err(format!("duplicate request id: {}", req.id));
+/// Reject requests whose `time` is older than MAX_REQUEST_AGE. Performed at
+/// connection-handler entry, before any TTY contention, so a request's
+/// freshness is judged at acceptance rather than after waiting in line.
+fn check_freshness(req: &Request) -> Result<(), String> {
+    if req.time.is_empty() {
+        return Ok(());
     }
-    if !req.time.is_empty() {
-        // Parse ISO 8601 timestamp manually (avoid chrono dependency)
-        if let Some(age) = parse_age(&req.time) {
-            if age > MAX_REQUEST_AGE {
-                return Err(format!(
-                    "request too old: {}s (max {}s)",
-                    age.as_secs(),
-                    MAX_REQUEST_AGE.as_secs()
-                ));
-            }
+    // If we can't parse the time, we allow it (be lenient).
+    if let Some(age) = parse_age(&req.time) {
+        if age > MAX_REQUEST_AGE {
+            return Err(format!(
+                "request too old: {}s (max {}s)",
+                age.as_secs(),
+                MAX_REQUEST_AGE.as_secs()
+            ));
         }
-        // If we can't parse the time, we allow it (be lenient)
     }
     Ok(())
+}
+
+/// Recover poisoned mutex guards. The two mutexes in this module guard
+/// `SeenIds` (whose only mutation is insert / evict — no broken
+/// invariant after a panic) and `()` (the TTY serializer — no state).
+/// A panicking prompter must not poison the daemon for every subsequent
+/// request.
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Parse an ISO 8601 UTC timestamp and return its age relative to now.
@@ -173,25 +185,42 @@ pub fn validate_host(host: &str) -> Result<(), String> {
 }
 
 /// Bounded set of recently-seen request ids, evicted by age.
-struct SeenIds {
+pub(crate) struct SeenIds {
     set: HashSet<String>,
     queue: VecDeque<(String, Instant)>,
+    now: Box<dyn Fn() -> Instant + Send>,
 }
 
 impl SeenIds {
-    fn new() -> Self {
+    pub(crate) fn new<F: Fn() -> Instant + Send + 'static>(now: F) -> Self {
         Self {
             set: HashSet::new(),
             queue: VecDeque::new(),
+            now: Box::new(now),
         }
     }
 
-    fn contains(&self, id: &str) -> bool {
+    /// Atomic check-and-insert: returns `true` if `id` was new (and is now
+    /// remembered), `false` if it was already in the set. Combining the two
+    /// steps into one critical section closes the TOCTOU window between
+    /// concurrent connection threads.
+    pub(crate) fn try_insert(&mut self, id: String) -> bool {
+        self.evict_stale();
+        if self.set.contains(&id) {
+            return false;
+        }
+        self.set.insert(id.clone());
+        self.queue.push_back((id, (self.now)()));
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains(&self, id: &str) -> bool {
         self.set.contains(id)
     }
 
-    fn insert(&mut self, id: String) {
-        let now = Instant::now();
+    fn evict_stale(&mut self) {
+        let now = (self.now)();
         while let Some((_, t)) = self.queue.front() {
             if now.duration_since(*t) > REPLAY_RETENTION {
                 let (old, _) = self.queue.pop_front().unwrap();
@@ -200,8 +229,6 @@ impl SeenIds {
                 break;
             }
         }
-        self.set.insert(id.clone());
-        self.queue.push_back((id, now));
     }
 }
 
@@ -267,8 +294,13 @@ pub fn run(
     pkexec_only: bool,
     verbose: bool,
     confirm_unprivileged: bool,
+    prompter: Arc<dyn Prompter>,
+    result_sink: Arc<dyn ResultSink>,
+    shutdown: &AtomicBool,
+    in_flight: Arc<AtomicUsize>,
 ) -> std::io::Result<()> {
     let listener = bind_listener(socket_path)?;
+    listener.set_nonblocking(true)?;
 
     if verbose {
         eprintln!("sudo-proxy listening on {}", socket_path.display());
@@ -276,124 +308,197 @@ pub fn run(
     }
 
     let our_uid = unsafe { libc::getuid() };
-    let mut seen_ids = SeenIds::new();
+    let seen_ids = Arc::new(Mutex::new(SeenIds::new(Instant::now)));
+    let tty_lock = Arc::new(Mutex::new(()));
 
-    for stream in listener.incoming() {
-        let mut stream = match stream {
-            Ok(s) => s,
+    loop {
+        if shutdown.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        let (stream, _addr) = match listener.accept() {
+            Ok(pair) => pair,
+            Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e)
+                if matches!(
+                    e.raw_os_error(),
+                    Some(libc::EMFILE) | Some(libc::ENFILE)
+                ) =>
+            {
+                eprintln!("accept: file-descriptor pressure ({e}); backing off");
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
             Err(e) => {
                 eprintln!("accept error: {e}");
                 continue;
             }
         };
 
-        // Defense-in-depth: refuse connections from other UIDs even though
-        // the socket file is 0600 inside a 0700 runtime dir.
-        match peer_uid(&stream) {
-            Ok(uid) if uid == our_uid => {}
-            Ok(uid) => {
-                eprintln!("rejecting connection from uid {uid} (expected {our_uid})");
-                continue;
-            }
-            Err(e) => {
-                eprintln!("peer credential check failed: {e}");
-                continue;
-            }
+        in_flight.fetch_add(1, Ordering::Relaxed);
+        let prompter = Arc::clone(&prompter);
+        let sink = Arc::clone(&result_sink);
+        let seen = Arc::clone(&seen_ids);
+        let tty = Arc::clone(&tty_lock);
+        let counter = Arc::clone(&in_flight);
+
+        thread::spawn(move || {
+            handle_connection(
+                stream,
+                our_uid,
+                mode,
+                pkexec_only,
+                verbose,
+                confirm_unprivileged,
+                prompter,
+                sink,
+                seen,
+                tty,
+            );
+            counter.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn handle_connection(
+    mut stream: UnixStream,
+    our_uid: u32,
+    mode: Mode,
+    pkexec_only: bool,
+    verbose: bool,
+    confirm_unprivileged: bool,
+    prompter: Arc<dyn Prompter>,
+    result_sink: Arc<dyn ResultSink>,
+    seen_ids: Arc<Mutex<SeenIds>>,
+    tty_lock: Arc<Mutex<()>>,
+) {
+    // Defense-in-depth: refuse connections from other UIDs even though the
+    // socket file is 0600 inside a 0700 runtime dir.
+    match peer_uid(&stream) {
+        Ok(uid) if uid == our_uid => {}
+        Ok(uid) => {
+            eprintln!("rejecting connection from uid {uid} (expected {our_uid})");
+            return;
         }
-
-        // Bound how long any one client can hold the daemon. Without this a
-        // peer that connects and never writes wedges the accept loop forever.
-        let _ = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT));
-        let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
-
-        let reader = BufReader::new(&stream);
-        let mut line = String::new();
-        match reader.take(1_048_576).read_line(&mut line) {
-            Ok(0) => continue, // empty connection
-            Ok(_) => {}
-            Err(e) => {
-                let resp = Response::error("", &format!("read error: {e}"));
-                let _ = write_response(&mut stream, &resp);
-                continue;
-            }
+        Err(e) => {
+            eprintln!("peer credential check failed: {e}");
+            return;
         }
+    }
 
-        let req: Request = match serde_json::from_str(line.trim()) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::error("", &format!("invalid JSON: {e}"));
-                let _ = write_response(&mut stream, &resp);
-                continue;
-            }
-        };
+    let _ = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
 
-        // Validate request
-        if let Err(msg) = validate_request(&req) {
+    let reader = BufReader::new(&stream);
+    let mut line = String::new();
+    match reader.take(1_048_576).read_line(&mut line) {
+        Ok(0) => return,
+        Ok(_) => {}
+        Err(e) => {
+            let resp = Response::error("", &format!("read error: {e}"));
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
+    }
+
+    let req: Request = match serde_json::from_str(line.trim()) {
+        Ok(r) => r,
+        Err(e) => {
+            let resp = Response::error("", &format!("invalid JSON: {e}"));
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
+    };
+
+    if let Err(msg) = validate_request(&req) {
+        let resp = Response::error(&req.id, &msg);
+        let _ = write_response(&mut stream, &resp);
+        return;
+    }
+
+    // Freshness is checked at handler entry, NOT after the TTY lock — a
+    // request must not age past MAX_REQUEST_AGE just because it queued
+    // behind another user's prompt.
+    if let Err(msg) = check_freshness(&req) {
+        let resp = Response::error(&req.id, &msg);
+        let _ = write_response(&mut stream, &resp);
+        return;
+    }
+
+    let env = match sanitize_env(&req.env) {
+        Ok(e) => e,
+        Err(msg) => {
             let resp = Response::error(&req.id, &msg);
             let _ = write_response(&mut stream, &resp);
-            continue;
+            return;
         }
+    };
 
-        // Replay protection
-        if let Err(msg) = check_replay(&req, &seen_ids) {
-            let resp = Response::error(&req.id, &msg);
+    // Atomic check-and-insert: closes the TOCTOU window between
+    // contains() and insert() that exists when two threads race the
+    // same request id.
+    {
+        let mut ids = lock_recover(&seen_ids);
+        if !ids.try_insert(req.id.clone()) {
+            drop(ids);
+            let resp = Response::error(&req.id, &format!("duplicate request id: {}", req.id));
             let _ = write_response(&mut stream, &resp);
-            continue;
+            return;
         }
+    }
 
-        // Sanitize environment
-        let env = match sanitize_env(&req.env) {
-            Ok(e) => e,
-            Err(msg) => {
-                let resp = Response::error(&req.id, &msg);
-                let _ = write_response(&mut stream, &resp);
-                continue;
-            }
-        };
+    if verbose {
+        let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
+        let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
+        eprintln!("[{}] [{}] {}", req.id, priv_label, pipeline_display);
+    }
 
-        seen_ids.insert(req.id.clone());
-
-        if verbose {
-            let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
-            let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
-            eprintln!("[{}] [{}] {}", req.id, priv_label, pipeline_display);
-        }
-
-        let resp = if req.privileged {
-            if pkexec_only && mode == Mode::Local {
-                // --pkexec: old behavior — pkexec handles both auth and approval
-                exec_pkexec(&req, &env)
-            } else {
-                // Default: TUI prompt first, then sudo for escalation
-                match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                    Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
-                    Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
-                    Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
-                    Err(e) => Response::error(&req.id, &format!("TUI error: {e}")),
-                }
-            }
-        } else if confirm_unprivileged {
-            // Non-privileged with confirmation: always TUI
-            match tui::prompt_tty(&req, PROMPT_TIMEOUT) {
-                Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
+    let resp = if req.privileged {
+        if pkexec_only && mode == Mode::Local {
+            // --pkexec: pkexec itself handles auth and approval; no TTY lock.
+            exec_pkexec(&req, &env)
+        } else {
+            // Hold the TTY lock only across the prompt; release it before exec
+            // so concurrent execs don't queue behind each other.
+            let prompt_result = {
+                let _g = lock_recover(&tty_lock);
+                prompter.prompt(&req, PROMPT_TIMEOUT)
+            };
+            match prompt_result {
+                Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
                 Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                 Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
                 Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
             }
-        } else {
-            // Non-privileged, no confirmation: run directly
-            exec_direct(&req, &env)
-        };
-
-        // Echo result on /dev/tty for all privileged commands
-        if req.privileged && !pkexec_only {
-            let _ = tui::display_result(&resp);
         }
+    } else if confirm_unprivileged {
+        let prompt_result = {
+            let _g = lock_recover(&tty_lock);
+            prompter.prompt(&req, PROMPT_TIMEOUT)
+        };
+        match prompt_result {
+            Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
+            Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+            Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+            Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
+        }
+    } else {
+        // Non-privileged, no confirmation: no TTY contention.
+        exec_direct(&req, &env)
+    };
 
-        let _ = write_response(&mut stream, &resp);
+    // Echo result on the TTY for privileged commands. Lock held briefly;
+    // multiple threads writing to /dev/tty without synchronization
+    // would interleave bytes.
+    if req.privileged && !pkexec_only {
+        let _g = lock_recover(&tty_lock);
+        let _ = result_sink.display(&resp);
     }
 
-    Ok(())
+    let _ = write_response(&mut stream, &resp);
 }
 
 fn write_response(stream: &mut impl Write, resp: &Response) -> std::io::Result<()> {
@@ -402,4 +507,137 @@ fn write_response(stream: &mut impl Write, resp: &Response) -> std::io::Result<(
     });
     writeln!(stream, "{json}")?;
     stream.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn fake_clock() -> (Arc<Mutex<Instant>>, impl Fn() -> Instant + Send + 'static) {
+        let cell = Arc::new(Mutex::new(Instant::now()));
+        let cloned = Arc::clone(&cell);
+        (cell, move || *cloned.lock().unwrap())
+    }
+
+    fn advance(clock: &Mutex<Instant>, by: Duration) {
+        let mut g = clock.lock().unwrap();
+        *g += by;
+    }
+
+    #[test]
+    fn seen_ids_remembers_insertion() {
+        let (_clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        assert!(ids.contains("alpha"));
+        assert!(!ids.contains("beta"));
+    }
+
+    #[test]
+    fn seen_ids_evicts_after_retention() {
+        let (clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        advance(&clock, REPLAY_RETENTION + Duration::from_secs(1));
+        assert!(ids.try_insert("beta".into()));
+        assert!(!ids.contains("alpha"));
+        assert!(ids.contains("beta"));
+    }
+
+    #[test]
+    fn seen_ids_keeps_within_retention() {
+        let (clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        advance(&clock, Duration::from_secs(60));
+        assert!(ids.try_insert("beta".into()));
+        assert!(ids.contains("alpha"));
+        assert!(ids.contains("beta"));
+    }
+
+    #[test]
+    fn seen_ids_partial_eviction() {
+        let (clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("a".into()));
+        advance(&clock, Duration::from_secs(60));
+        assert!(ids.try_insert("b".into()));
+        advance(&clock, Duration::from_secs(70));
+        assert!(ids.try_insert("c".into()));
+        assert!(!ids.contains("a"));
+        assert!(ids.contains("b"));
+        assert!(ids.contains("c"));
+    }
+
+    #[test]
+    fn try_insert_returns_true_on_new_id() {
+        let (_clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        assert!(ids.contains("alpha"));
+    }
+
+    #[test]
+    fn try_insert_returns_false_on_duplicate() {
+        let (_clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        assert!(!ids.try_insert("alpha".into()));
+    }
+
+    #[test]
+    fn try_insert_accepts_id_again_after_eviction() {
+        let (clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("alpha".into()));
+        advance(&clock, REPLAY_RETENTION + Duration::from_secs(1));
+        // The next try_insert must evict "alpha" before its own check, so a
+        // re-use of the same id after retention is treated as new.
+        assert!(ids.try_insert("alpha".into()));
+    }
+
+    #[test]
+    fn validate_host_rejects_dash_prefix() {
+        assert!(validate_host("-oProxyCommand=evil").is_err());
+    }
+
+    #[test]
+    fn validate_host_rejects_slashes_and_control() {
+        assert!(validate_host("foo/bar").is_err());
+        assert!(validate_host("foo\nbar").is_err());
+        assert!(validate_host("").is_err());
+    }
+
+    #[test]
+    fn validate_host_accepts_typical_targets() {
+        assert!(validate_host("localhost").is_ok());
+        assert!(validate_host("user@host.example.com").is_ok());
+        assert!(validate_host("root@10.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn parse_age_rejects_malformed_strings() {
+        assert!(parse_age("").is_none());
+        assert!(parse_age("not-a-timestamp").is_none());
+        assert!(parse_age("2026-04-30").is_none(), "missing T-separated time");
+        assert!(parse_age("2026-04-30T12:00").is_none(), "incomplete time");
+        assert!(parse_age("2026-13-01T00:00:00Z").is_none(), "month out of range");
+    }
+
+    #[test]
+    fn parse_age_accepts_valid_iso8601() {
+        // Any well-formed past timestamp returns Some(_). We can't know the
+        // exact age without freezing wall-clock time; just assert it parses.
+        assert!(parse_age("2024-01-01T00:00:00Z").is_some());
+        assert!(parse_age("2024-01-01T00:00:00").is_some(), "trailing Z optional");
+    }
+
+    #[test]
+    fn parse_age_clamps_future_timestamp_to_zero() {
+        // A timestamp far enough in the future should not panic on subtract;
+        // the parser caps the age at zero.
+        let age = parse_age("3000-01-01T00:00:00Z");
+        assert_eq!(age, Some(Duration::from_secs(0)));
+    }
 }
