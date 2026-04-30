@@ -72,11 +72,7 @@ fn prompt_zenity(text: &str) -> io::Result<PromptResult> {
         .stderr(Stdio::null())
         .status()?;
 
-    match status.code() {
-        Some(0) => Ok(PromptResult::Approved),
-        Some(5) => Ok(PromptResult::Timeout), // zenity timeout exit code
-        _ => Ok(PromptResult::Denied),
-    }
+    map_zenity_status(status.code())
 }
 
 fn prompt_kdialog(text: &str) -> io::Result<PromptResult> {
@@ -87,8 +83,68 @@ fn prompt_kdialog(text: &str) -> io::Result<PromptResult> {
         .stderr(Stdio::null())
         .status()?;
 
-    match status.code() {
+    map_kdialog_status(status.code())
+}
+
+/// Map zenity's documented exit codes. Anything else (signal death, crash,
+/// killed window) returns Err so the daemon surfaces a real error rather
+/// than silently denying a request the user never saw.
+fn map_zenity_status(code: Option<i32>) -> io::Result<PromptResult> {
+    match code {
         Some(0) => Ok(PromptResult::Approved),
-        _ => Ok(PromptResult::Denied),
+        Some(1) => Ok(PromptResult::Denied),
+        Some(5) => Ok(PromptResult::Timeout),
+        Some(other) => Err(io::Error::other(format!(
+            "zenity exited with unexpected status {other}"
+        ))),
+        None => Err(io::Error::other(
+            "zenity terminated by signal (window closed?)",
+        )),
+    }
+}
+
+fn map_kdialog_status(code: Option<i32>) -> io::Result<PromptResult> {
+    match code {
+        Some(0) => Ok(PromptResult::Approved),
+        Some(1) | Some(2) => Ok(PromptResult::Denied),
+        Some(other) => Err(io::Error::other(format!(
+            "kdialog exited with unexpected status {other}"
+        ))),
+        None => Err(io::Error::other(
+            "kdialog terminated by signal (window closed?)",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zenity_known_statuses() {
+        assert!(matches!(map_zenity_status(Some(0)), Ok(PromptResult::Approved)));
+        assert!(matches!(map_zenity_status(Some(1)), Ok(PromptResult::Denied)));
+        assert!(matches!(map_zenity_status(Some(5)), Ok(PromptResult::Timeout)));
+    }
+
+    #[test]
+    fn zenity_unknown_status_is_error() {
+        assert!(map_zenity_status(Some(127)).is_err(),
+            "unexpected exit must surface as error, not silent denial");
+        assert!(map_zenity_status(None).is_err(),
+            "signal-death must surface as error, not silent denial");
+    }
+
+    #[test]
+    fn kdialog_known_statuses() {
+        assert!(matches!(map_kdialog_status(Some(0)), Ok(PromptResult::Approved)));
+        assert!(matches!(map_kdialog_status(Some(1)), Ok(PromptResult::Denied)));
+        assert!(matches!(map_kdialog_status(Some(2)), Ok(PromptResult::Denied)));
+    }
+
+    #[test]
+    fn kdialog_unknown_status_is_error() {
+        assert!(map_kdialog_status(Some(127)).is_err());
+        assert!(map_kdialog_status(None).is_err());
     }
 }

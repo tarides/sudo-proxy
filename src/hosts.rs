@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct HostInfo {
@@ -40,12 +44,7 @@ impl HostsConfig {
 
     pub fn save(&self) {
         let path = Self::config_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        let _ = save_to(&path, self);
     }
 
     pub fn touch(&mut self, host: &str) {
@@ -156,4 +155,34 @@ pub fn ssh_target(host: &str, login: Option<&str>) -> String {
         Some(l) if !l.is_empty() => format!("{l}@{host}"),
         _ => host.to_string(),
     }
+}
+
+/// Atomic save: serialize, write to a per-process tempfile in the same
+/// directory, fsync, then rename over the destination. Concurrent writers
+/// won't tear the file — every reader sees either the previous valid
+/// contents or this writer's complete output.
+pub fn save_to(path: &Path, config: &HostsConfig) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hosts.json");
+    // Per-(pid, counter) tmp name so concurrent writers in the same
+    // process don't clobber each other's tmpfile before rename.
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
+
+    {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
 }

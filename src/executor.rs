@@ -162,6 +162,10 @@ fn exec_sudo_stage(
         cmd.arg(arg);
     }
     cmd.current_dir("/");
+    // Close stdin so a privileged child like `sudo cat` doesn't inherit
+    // the daemon's controlling tty and block reading from it. sudo opens
+    // /dev/tty itself for password entry, so this doesn't break auth.
+    cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -259,19 +263,14 @@ fn exec_pipeline(
 
         cmd.current_dir("/");
 
-        // stdin: first stage gets null (direct) or inherited terminal (sudo),
-        // others get previous stage's stdout
+        // stdin: first stage gets null, later stages get the previous
+        // stage's stdout. sudo's password prompt reads from /dev/tty, not
+        // stdin, so closing stdin doesn't break authentication and prevents
+        // the first stage from blocking on the daemon's tty.
         if let Some(prev) = prev_stdout.take() {
             cmd.stdin(prev);
         } else if is_first {
-            match mode {
-                EscalationMode::Direct => {
-                    cmd.stdin(Stdio::null());
-                }
-                EscalationMode::Sudo => {
-                    // Inherit terminal for sudo password prompt
-                }
-            }
+            cmd.stdin(Stdio::null());
         }
 
         // stdout: last stage piped to parent, others piped to next stage
