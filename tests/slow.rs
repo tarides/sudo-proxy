@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -77,12 +78,12 @@ fn request_queued_behind_slow_prompt_completes_normally() {
     assert_eq!(resp_a.status, Status::Denied);
 }
 
-/// CONNECTION_IO_TIMEOUT (5s): a client that connects and writes nothing
-/// must not be allowed to wedge the loop. Server should eventually write
-/// an error response and close. We allow up to 8s for the round trip.
+/// HANDSHAKE_DEADLINE (10s): a client that connects and writes nothing
+/// must not be allowed to wedge the loop. Server should write an error
+/// response and close once the deadline expires.
 #[test]
 #[ignore]
-fn connection_io_timeout_drops_silent_client() {
+fn handshake_deadline_drops_silent_client() {
     let s = start_test_server(TestServerOpts::default());
 
     let stream = UnixStream::connect(&s.socket_path).expect("connect");
@@ -97,16 +98,73 @@ fn connection_io_timeout_drops_silent_client() {
     let elapsed = start.elapsed();
 
     assert!(
-        elapsed < Duration::from_secs(8),
+        elapsed < Duration::from_secs(13),
         "server took too long to drop a silent client: {:?}",
         elapsed
     );
     assert!(
-        elapsed >= Duration::from_secs(4),
-        "server dropped client too eagerly (before CONNECTION_IO_TIMEOUT): {:?}",
+        elapsed >= Duration::from_secs(9),
+        "server dropped client too eagerly (before HANDSHAKE_DEADLINE): {:?}",
         elapsed
     );
     assert!(n > 0, "expected an error response from the server");
     let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
     assert_eq!(parsed["status"], "error");
+}
+
+/// Slow-loris: a client that drips one byte every ~800ms keeps each read
+/// syscall under CONNECTION_IO_TIMEOUT and would, before HANDSHAKE_DEADLINE,
+/// hold a handler thread for arbitrarily long. The wall-clock deadline must
+/// fire and close the connection within ~10s regardless of pacing.
+#[test]
+fn trickle_feed_client_disconnected_within_handshake_deadline() {
+    let s = start_test_server(TestServerOpts::default());
+
+    let stream = UnixStream::connect(&s.socket_path).expect("connect");
+    let mut writer = stream.try_clone().expect("clone");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+
+    let start = Instant::now();
+    let writer_handle = thread::spawn(move || {
+        // Drip up to 18 bytes (≈ 14s of writes) — far beyond the deadline.
+        // Each byte alone never produces a newline, so read_request_line
+        // keeps looping. write_all will eventually fail when the daemon
+        // closes the connection.
+        for _ in 0..18 {
+            if writer.write_all(b"x").is_err() {
+                break;
+            }
+            let _ = writer.flush();
+            thread::sleep(Duration::from_millis(800));
+        }
+    });
+
+    let mut reader = BufReader::new(stream);
+    let mut buf = String::new();
+    let n = reader.read_line(&mut buf).unwrap_or(0);
+    let elapsed = start.elapsed();
+
+    let _ = writer_handle.join();
+
+    assert!(
+        elapsed <= Duration::from_secs(13),
+        "daemon should close by HANDSHAKE_DEADLINE (~10s); took {:?}",
+        elapsed
+    );
+    assert!(n > 0, "expected an error response from the server");
+    let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
+    assert_eq!(parsed["status"], "error");
+    assert!(
+        parsed["message"].as_str().unwrap_or("").contains("handshake")
+            || parsed["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("deadline"),
+        "expected handshake-deadline error, got {:?}",
+        parsed["message"]
+    );
+
+    assert!(wait_until(Duration::from_secs(2), || s.in_flight.load(Ordering::Relaxed) == 0));
 }

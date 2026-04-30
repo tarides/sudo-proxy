@@ -249,6 +249,20 @@ fn print_truncated(tty: &mut impl Write, bytes: &[u8], label: &str) -> io::Resul
     Ok(())
 }
 
+/// Restores `tcsetattr` to a saved termios on drop. Manual restore would be
+/// skipped on panic, leaving the user's TTY in raw (no-echo, non-canonical)
+/// mode for subsequent shells.
+struct TermiosGuard {
+    fd: std::os::unix::io::RawFd,
+    orig: libc::termios,
+}
+
+impl Drop for TermiosGuard {
+    fn drop(&mut self) {
+        unsafe { libc::tcsetattr(self.fd, libc::TCSANOW, &self.orig) };
+    }
+}
+
 /// Read a single keypress from a file descriptor with a timeout using poll(2).
 /// Switches the terminal to non-canonical mode so Enter is not required.
 /// Returns None on timeout, Some(char) otherwise.
@@ -257,7 +271,6 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
 
     let fd = file.as_raw_fd();
 
-    // Save terminal state and switch to non-canonical mode
     let mut orig: libc::termios = unsafe { std::mem::zeroed() };
     if unsafe { libc::tcgetattr(fd, &mut orig) } < 0 {
         return Err(io::Error::last_os_error());
@@ -269,36 +282,88 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
     if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    let _guard = TermiosGuard { fd, orig };
 
-    let result = (|| {
-        let timeout_ms = timeout.as_millis() as i32;
-        let mut pfd = libc::pollfd {
-            fd,
-            events: libc::POLLIN,
-            revents: 0,
+    let timeout_ms = timeout.as_millis() as i32;
+    let mut pfd = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+
+    let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
+    if ret < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if ret == 0 {
+        return Ok(None);
+    }
+
+    let mut buf = [0u8; 1];
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(buf[0]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// If a panic unwinds out of the raw-mode block, the TermiosGuard must
+    /// still call tcsetattr to restore the saved flags. Without the guard,
+    /// the user's tty would be left with ICANON/ECHO cleared.
+    #[test]
+    fn termios_guard_restores_on_panic() {
+        let mut master: libc::c_int = 0;
+        let mut slave: libc::c_int = 0;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
         };
+        assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error());
 
-        let ret = unsafe { libc::poll(&mut pfd, 1, timeout_ms) };
-        if ret < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if ret == 0 {
-            return Ok(None);
-        }
+        let mut orig: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave, &mut orig) }, 0);
 
-        let mut buf = [0u8; 1];
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr() as *mut libc::c_void, 1) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        if n == 0 {
-            return Ok(None);
-        }
-        Ok(Some(buf[0]))
-    })();
+        // Pre-condition: the freshly-opened pty has ICANON and ECHO set.
+        assert!(orig.c_lflag & libc::ICANON != 0);
+        assert!(orig.c_lflag & libc::ECHO != 0);
 
-    // Restore terminal state
-    unsafe { libc::tcsetattr(fd, libc::TCSANOW, &orig) };
+        let result = std::panic::catch_unwind(|| {
+            let _g = TermiosGuard { fd: slave, orig };
+            let mut raw = orig;
+            raw.c_lflag &= !(libc::ICANON | libc::ECHO);
+            unsafe { libc::tcsetattr(slave, libc::TCSANOW, &raw) };
+            panic!("synthetic panic mid-prompt");
+        });
+        assert!(result.is_err());
 
-    result
+        let mut after: libc::termios = unsafe { std::mem::zeroed() };
+        assert_eq!(unsafe { libc::tcgetattr(slave, &mut after) }, 0);
+        assert_ne!(
+            after.c_lflag & libc::ICANON,
+            0,
+            "ICANON must be restored after panic"
+        );
+        assert_ne!(
+            after.c_lflag & libc::ECHO,
+            0,
+            "ECHO must be restored after panic"
+        );
+
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+    }
 }

@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -280,6 +282,127 @@ fn concurrent_distinct_ids_succeed() {
         total < Duration::from_millis(1500),
         "8 concurrent 300ms requests took {:?} — should run in parallel",
         total
+    );
+}
+
+/// Cap on concurrent handler threads: when in_flight reaches max_in_flight,
+/// new connections must receive an inline busy response and close, rather
+/// than spawning yet another thread. The cap is what prevents a same-UID
+/// process from spawning thousands of threads by opening connections.
+#[test]
+fn burst_connections_above_cap_get_busy_response() {
+    let mut opts = TestServerOpts::default();
+    opts.max_in_flight = 4;
+    opts.confirm_unprivileged = false;
+    let s = start_test_server(opts);
+
+    // Hold-until-released prompter so the test isn't racing the prompt
+    // delay. As long as `release` is false, every prompter call blocks;
+    // when it flips, all queued prompts wake.
+    let release = Arc::new((Mutex::new(false), Condvar::new()));
+    {
+        let release = Arc::clone(&release);
+        s.prompter.set_response(move |_| {
+            let (lock, cvar) = &*release;
+            let mut g = lock.lock().unwrap();
+            while !*g {
+                g = cvar.wait(g).unwrap();
+            }
+            (Duration::ZERO, PromptResult::Denied)
+        });
+    }
+
+    // Saturate the cap: 4 privileged requests, all parked in the prompter.
+    let mut occupiers = Vec::new();
+    for i in 0..4 {
+        let path = s.socket_path.clone();
+        occupiers.push(thread::spawn(move || {
+            let mut req = make_req(&format!("hold-{i}"), vec![vec!["true"]]);
+            req.privileged = true;
+            send_request(&path, &req)
+        }));
+    }
+
+    let reached = wait_until(Duration::from_secs(3), || {
+        s.in_flight.load(Ordering::Relaxed) >= 4
+    });
+    assert!(
+        reached,
+        "in_flight reached {}, expected ≥4",
+        s.in_flight.load(Ordering::Relaxed)
+    );
+
+    // While the cap is saturated, every new connection must be rejected
+    // inline with a busy response. No thread spawn means no further
+    // increment of in_flight.
+    let mut overflow = Vec::new();
+    for i in 0..3 {
+        let path = s.socket_path.clone();
+        overflow.push(thread::spawn(move || {
+            let mut req = make_req(&format!("over-{i}"), vec![vec!["true"]]);
+            req.privileged = true;
+            send_request(&path, &req)
+        }));
+    }
+
+    let overflow_results: Vec<_> = overflow.into_iter().map(|h| h.join().unwrap()).collect();
+    for r in &overflow_results {
+        assert_eq!(r.status, Status::Error, "overflow request should be rejected");
+        assert!(
+            r.message.as_deref().unwrap_or("").contains("busy"),
+            "expected busy message, got {:?}",
+            r.message
+        );
+    }
+    assert_eq!(
+        s.in_flight.load(Ordering::Relaxed),
+        4,
+        "rejections must not have inflated in_flight"
+    );
+
+    // Release the prompter so the held requests finish.
+    {
+        let (lock, cvar) = &*release;
+        *lock.lock().unwrap() = true;
+        cvar.notify_all();
+    }
+    for h in occupiers {
+        let r = h.join().unwrap();
+        assert_eq!(r.status, Status::Denied);
+    }
+
+    assert!(wait_until(Duration::from_secs(2), || {
+        s.in_flight.load(Ordering::Relaxed) == 0
+    }));
+    let mut req = make_req("after-drain", vec![vec!["true"]]);
+    req.privileged = true;
+    s.prompter
+        .set_response(|_| (Duration::ZERO, PromptResult::Denied));
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Denied);
+}
+
+/// A panicking prompter must not leak the `in_flight` slot. Without the
+/// `InFlightGuard`, the `fetch_sub` after `handle_connection` was skipped
+/// during unwind, so each panic permanently inflated the counter.
+#[test]
+fn in_flight_decremented_after_handler_panic() {
+    let s = start_test_server(TestServerOpts::default());
+    s.prompter.set_response(|_| panic!("synthetic prompter panic"));
+
+    let mut req = make_req("panic-1", vec![vec!["true"]]);
+    req.privileged = true;
+
+    let line = serde_json::to_string(&req).unwrap() + "\n";
+    let _ = s.send_raw(line.as_bytes());
+
+    let ok = wait_until(Duration::from_secs(2), || {
+        s.in_flight.load(Ordering::Relaxed) == 0
+    });
+    assert!(
+        ok,
+        "in_flight remained {} after panicking handler",
+        s.in_flight.load(Ordering::Relaxed)
     );
 }
 

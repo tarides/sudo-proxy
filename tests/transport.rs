@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use sudo_proxy::mode::Mode;
 use sudo_proxy::protocol::Status;
 use sudo_proxy::server;
 use sudo_proxy::tui::NoopResultSink;
@@ -51,10 +50,7 @@ fn refuses_to_clobber_active_server() {
 
     let result = server::run(
         &path,
-        Mode::Local,
-        false,
-        false,
-        false,
+        server::ServerConfig::default(),
         prompter,
         sink,
         &shutdown,
@@ -95,12 +91,13 @@ fn replaces_stale_socket_file() {
     let path_for_thread = path.clone();
 
     let handle = thread::spawn(move || {
+        let config = server::ServerConfig {
+            confirm_unprivileged: true,
+            ..Default::default()
+        };
         server::run(
             &path_for_thread,
-            Mode::Local,
-            false,
-            false,
-            true,
+            config,
             p_for_thread,
             Arc::new(NoopResultSink),
             &s_for_thread,

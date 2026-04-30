@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 use std::fs;
-use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -20,9 +20,22 @@ const MAX_REQUEST_AGE: Duration = Duration::from_secs(60);
 /// How long replay-protection ids are remembered. Twice MAX_REQUEST_AGE so that
 /// any id that could still pass the freshness check is also still in the set.
 const REPLAY_RETENTION: Duration = Duration::from_secs(120);
-/// Per-connection read/write timeout. An honest client writes its single
-/// JSON line in microseconds; anything slower is either broken or hostile.
+/// Per-syscall read/write timeout. Bounds any single I/O operation.
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
+/// Wall-clock deadline for completing the request handshake (read+parse).
+/// CONNECTION_IO_TIMEOUT bounds each syscall, but a slow-loris client
+/// could trickle bytes within each window indefinitely. This deadline
+/// puts an upper bound on the whole handshake regardless of pacing.
+const HANDSHAKE_DEADLINE: Duration = Duration::from_secs(10);
+/// Hard cap on the size of one JSON request line, including the trailing
+/// newline. Bounds the per-connection read buffer.
+const MAX_REQUEST_BYTES: usize = 1_048_576;
+/// Default ceiling on concurrent handler threads. A buggy or hostile
+/// same-UID process that opens N connections must not be able to spawn N
+/// threads; once the cap is reached, new connections receive a `busy`
+/// error and are closed without spawning. Soft cap — chosen high enough
+/// that legitimate burst usage is unaffected.
+pub const DEFAULT_MAX_IN_FLIGHT: usize = 64;
 
 /// Characters forbidden in argv strings (control chars, bidi overrides, zero-width).
 fn has_dangerous_chars(s: &str) -> bool {
@@ -97,6 +110,18 @@ fn check_freshness(req: &Request) -> Result<(), String> {
 /// request.
 fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// RAII decrement of `in_flight` on drop. Plain `fetch_sub` after
+/// `handle_connection` would be skipped on panic, leaking the counter.
+struct InFlightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// Parse an ISO 8601 UTC timestamp and return its age relative to now.
@@ -288,12 +313,32 @@ fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Tunable knobs for `run`. Holds the static configuration that doesn't
+/// change over the daemon's lifetime; runtime objects (prompter, sink,
+/// shutdown, counter) stay separate so tests can inject fakes.
+pub struct ServerConfig {
+    pub mode: Mode,
+    pub pkexec_only: bool,
+    pub verbose: bool,
+    pub confirm_unprivileged: bool,
+    pub max_in_flight: usize,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            mode: Mode::Local,
+            pkexec_only: false,
+            verbose: false,
+            confirm_unprivileged: false,
+            max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+        }
+    }
+}
+
 pub fn run(
     socket_path: &Path,
-    mode: Mode,
-    pkexec_only: bool,
-    verbose: bool,
-    confirm_unprivileged: bool,
+    config: ServerConfig,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
     shutdown: &AtomicBool,
@@ -302,9 +347,9 @@ pub fn run(
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
 
-    if verbose {
+    if config.verbose {
         eprintln!("sudo-proxy listening on {}", socket_path.display());
-        eprintln!("mode: {}", mode.label());
+        eprintln!("mode: {}", config.mode.label());
     }
 
     let our_uid = unsafe { libc::getuid() };
@@ -315,7 +360,7 @@ pub fn run(
         if shutdown.load(Ordering::Relaxed) {
             return Ok(());
         }
-        let (stream, _addr) = match listener.accept() {
+        let (mut stream, _addr) = match listener.accept() {
             Ok(pair) => pair,
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -337,14 +382,33 @@ pub fn run(
             }
         };
 
+        // Backpressure: if the cap is reached, reject inline rather than
+        // spawn another handler thread. We don't read anything from the
+        // peer here — just write a fixed busy response and close. The
+        // socket file is 0600 in a 0700 dir so only same-UID peers reach
+        // this path; no need to verify SO_PEERCRED before declining.
+        if in_flight.load(Ordering::Relaxed) >= config.max_in_flight {
+            let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
+            let resp = Response::error("", "server busy: too many in-flight requests");
+            let _ = write_response(&mut stream, &resp);
+            continue;
+        }
+
         in_flight.fetch_add(1, Ordering::Relaxed);
         let prompter = Arc::clone(&prompter);
         let sink = Arc::clone(&result_sink);
         let seen = Arc::clone(&seen_ids);
         let tty = Arc::clone(&tty_lock);
-        let counter = Arc::clone(&in_flight);
+        let guard = InFlightGuard {
+            counter: Arc::clone(&in_flight),
+        };
 
+        let mode = config.mode;
+        let pkexec_only = config.pkexec_only;
+        let verbose = config.verbose;
+        let confirm_unprivileged = config.confirm_unprivileged;
         thread::spawn(move || {
+            let _guard = guard;
             handle_connection(
                 stream,
                 our_uid,
@@ -357,7 +421,6 @@ pub fn run(
                 seen,
                 tty,
             );
-            counter.fetch_sub(1, Ordering::Relaxed);
         });
     }
 }
@@ -389,22 +452,24 @@ fn handle_connection(
         }
     }
 
-    let _ = stream.set_read_timeout(Some(CONNECTION_IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
 
-    let reader = BufReader::new(&stream);
-    let mut line = String::new();
-    match reader.take(1_048_576).read_line(&mut line) {
-        Ok(0) => return,
-        Ok(_) => {}
+    let line = match read_request_line(&mut stream, Instant::now() + HANDSHAKE_DEADLINE) {
+        Ok(b) if b.is_empty() => return,
+        Ok(b) => b,
+        Err(e) if e.kind() == ErrorKind::TimedOut => {
+            let resp = Response::error("", "handshake deadline exceeded");
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
         Err(e) => {
             let resp = Response::error("", &format!("read error: {e}"));
             let _ = write_response(&mut stream, &resp);
             return;
         }
-    }
+    };
 
-    let req: Request = match serde_json::from_str(line.trim()) {
+    let req: Request = match serde_json::from_slice(&line) {
         Ok(r) => r,
         Err(e) => {
             let resp = Response::error("", &format!("invalid JSON: {e}"));
@@ -507,6 +572,56 @@ fn write_response(stream: &mut impl Write, resp: &Response) -> std::io::Result<(
     });
     writeln!(stream, "{json}")?;
     stream.flush()
+}
+
+/// Read up to one newline-terminated request line from `stream`, bounded by
+/// both a wall-clock `deadline` and a max byte count. Returns the line
+/// *without* the trailing newline. An empty Vec means the client closed
+/// before sending any data.
+fn read_request_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::with_capacity(1024);
+    let mut chunk = [0u8; 4096];
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(io::Error::new(
+                ErrorKind::TimedOut,
+                "handshake deadline exceeded",
+            ));
+        }
+        let remaining = deadline - now;
+        // Cap each syscall at CONNECTION_IO_TIMEOUT so a kernel-stuck
+        // read can't outlive the deadline by more than that amount.
+        let to = remaining.min(CONNECTION_IO_TIMEOUT);
+        stream.set_read_timeout(Some(to))?;
+
+        let n = match stream.read(&mut chunk) {
+            Ok(0) => return Ok(buf),
+            Ok(n) => n,
+            // Per-syscall timeout: loop back so the deadline check at the
+            // top of the loop converts a true deadline expiry into the
+            // canonical "handshake deadline exceeded" error.
+            Err(e)
+                if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => return Err(e),
+        };
+
+        let want = (MAX_REQUEST_BYTES.saturating_sub(buf.len())).min(n);
+        buf.extend_from_slice(&chunk[..want]);
+        if let Some(idx) = buf.iter().position(|&b| b == b'\n') {
+            buf.truncate(idx);
+            return Ok(buf);
+        }
+        if want < n {
+            return Err(io::Error::new(
+                ErrorKind::InvalidData,
+                "request exceeds maximum size",
+            ));
+        }
+    }
 }
 
 #[cfg(test)]

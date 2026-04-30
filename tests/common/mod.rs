@@ -99,6 +99,7 @@ pub struct TestServerOpts {
     pub confirm_unprivileged: bool,
     pub pkexec_only: bool,
     pub mode: Mode,
+    pub max_in_flight: usize,
 }
 
 impl Default for TestServerOpts {
@@ -107,6 +108,7 @@ impl Default for TestServerOpts {
             confirm_unprivileged: true,
             pkexec_only: false,
             mode: Mode::Local,
+            max_in_flight: sudo_proxy::server::DEFAULT_MAX_IN_FLIGHT,
         }
     }
 }
@@ -136,14 +138,18 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
     let path = socket_path.clone();
 
     let handle = thread::spawn(move || {
+        let config = server::ServerConfig {
+            mode: opts.mode,
+            pkexec_only: opts.pkexec_only,
+            verbose: false,
+            confirm_unprivileged: opts.confirm_unprivileged,
+            max_in_flight: opts.max_in_flight,
+        };
         // Coercion to Arc<dyn Trait> happens here at the function-argument
         // site, where the parameter type is known.
         let _ = server::run(
             &path,
-            opts.mode,
-            opts.pkexec_only,
-            false,
-            opts.confirm_unprivileged,
+            config,
             prompter_arc,
             sink_arc,
             &sh_arc,
@@ -157,6 +163,16 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             break;
         }
         thread::sleep(Duration::from_millis(10));
+    }
+    // The connect probe above wakes a handler thread that briefly counts
+    // toward in_flight. Wait for it to drain so tests start from a clean
+    // slate (otherwise the probe races with cap/load tests).
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < drain_deadline {
+        if in_flight.load(Ordering::Relaxed) == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
     }
 
     TestServer {

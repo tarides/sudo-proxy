@@ -51,12 +51,17 @@ fn main() {
     let shutdown = AtomicBool::new(false);
     let in_flight = Arc::new(AtomicUsize::new(0));
 
+    let config = server::ServerConfig {
+        mode,
+        pkexec_only: opts.pkexec,
+        verbose: opts.verbose,
+        confirm_unprivileged: opts.confirm_unprivileged,
+        ..Default::default()
+    };
+
     if let Err(e) = server::run(
         &socket_path,
-        mode,
-        opts.pkexec,
-        opts.verbose,
-        opts.confirm_unprivileged,
+        config,
         prompter,
         sink,
         &shutdown,
