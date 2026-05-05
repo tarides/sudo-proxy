@@ -343,18 +343,21 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let proxy_cmd = format!("{}", proxy_bin.display());
+    let proxy_bin_str = proxy_bin.to_string_lossy().into_owned();
 
     let mut cmd = std::process::Command::new(&terminal);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Pass the proxy binary as a separate argv element so the terminal exec
+    // path never goes through `sh -c`. This closes a command-injection
+    // vector when user-controlled fields ever land in this code path.
     match terminal.as_str() {
         "gnome-terminal" => {
-            cmd.args(["--", "sh", "-c", &proxy_cmd]);
+            cmd.args(["--", proxy_bin_str.as_str()]);
         }
         _ => {
-            cmd.args(["-e", "sh", "-c", &proxy_cmd]);
+            cmd.args(["-e", proxy_bin_str.as_str()]);
         }
     }
 
@@ -398,18 +401,23 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
     let terminal = find_terminal()
         .map_err(|e| McpError::internal_error(e, None))?;
 
-    let proxy_cmd = format!("{} --host {}", proxy_bin.display(), host);
+    let proxy_bin_str = proxy_bin.to_string_lossy().into_owned();
 
     let mut cmd = std::process::Command::new(&terminal);
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // Pass argv directly to the terminal — never through `sh -c`. The host
+    // string is caller-controlled (via the MCP tool) and shell-interpolating
+    // it would let a peer execute arbitrary commands inside the spawned
+    // terminal without the TUI approval gate. validate_host has already
+    // rejected anything outside [A-Za-z0-9._@:-], so this is defence in depth.
     match terminal.as_str() {
         "gnome-terminal" => {
-            cmd.args(["--", "sh", "-c", &proxy_cmd]);
+            cmd.args(["--", proxy_bin_str.as_str(), "--host", host]);
         }
         _ => {
-            cmd.args(["-e", "sh", "-c", &proxy_cmd]);
+            cmd.args(["-e", proxy_bin_str.as_str(), "--host", host]);
         }
     }
 

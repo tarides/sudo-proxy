@@ -185,10 +185,14 @@ pub fn remote_socket_path(host: &str) -> PathBuf {
     runtime_dir().join(format!("sudo-proxy-{host}.sock"))
 }
 
-/// Reject host strings that would escape the socket directory or be passed
-/// as an option flag to ssh. Keep this conservative — real hostnames and
-/// `user@host` forms only need ASCII alphanumerics, dots, dashes, underscores,
-/// `@`, and `:` (for port-style targets).
+/// Reject host strings that would escape the socket directory, be passed
+/// as an option flag to ssh, or carry shell metacharacters into a downstream
+/// `sh -c` style call site. Strict allowlist: ASCII alphanumerics plus
+/// `.`, `-`, `_`, `@`, `:`. Everything else (including the shell
+/// metacharacters `;`, `|`, `&`, `$`, backtick, `(`, `)`, `<`, `>`, `*`, `?`,
+/// braces, brackets, quotes, `=`, `,`, etc.) is rejected. Bare-form IPv6
+/// (`::1`, `user@::1`) works because `:` is allowed; bracketed `[::1]` is
+/// not.
 pub fn validate_host(host: &str) -> Result<(), String> {
     if host.is_empty() {
         return Err("host must not be empty".into());
@@ -197,12 +201,8 @@ pub fn validate_host(host: &str) -> Result<(), String> {
         return Err("host must not start with '-'".into());
     }
     for c in host.chars() {
-        let bad = c == '/'
-            || c == '\\'
-            || c == '\0'
-            || (c as u32) < 0x20
-            || c.is_whitespace();
-        if bad {
+        let ok = c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '@' | ':');
+        if !ok {
             return Err(format!("host contains forbidden character: {c:?}"));
         }
     }
@@ -729,6 +729,23 @@ mod tests {
         assert!(validate_host("localhost").is_ok());
         assert!(validate_host("user@host.example.com").is_ok());
         assert!(validate_host("root@10.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn validate_host_rejects_shell_metacharacters() {
+        // Each of these would, if `host` were ever interpolated into an
+        // `sh -c` string, allow the caller to break out of the intended
+        // command. The strict allowlist must reject every one.
+        for bad in [
+            "a;b", "a|b", "a&b", "a$b", "a`b", "a(b", "a)b", "a<b", "a>b",
+            "a*b", "a?b", "a{b", "a}b", "a[b", "a]b", "a'b", "a\"b", "a\\b",
+            "a=b", "a,b", "a~b", "a!b", "a#b", "a%b", "a^b", "a+b", "a/b",
+        ] {
+            assert!(
+                validate_host(bad).is_err(),
+                "validate_host must reject {bad:?}"
+            );
+        }
     }
 
     #[test]
