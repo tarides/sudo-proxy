@@ -4,6 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -222,11 +223,17 @@ fn exec_direct_stage(
 fn run_single_command(cmd: &mut Command, id: &str, timeout: Duration) -> Response {
     unsafe {
         cmd.pre_exec(|| {
-            // New session/process group so we can SIGKILL the entire
+            // New process group so kill_group can SIGKILL the entire
             // group on timeout — otherwise a wrapper like `sh -c '... &'`
             // would leave grandchild processes orphaned to PID 1, holding
             // stdio pipes open and blocking our drain threads forever.
-            libc::setsid();
+            //
+            // setpgid (vs the historical setsid) keeps the child in the
+            // *same session* as the daemon, so the controlling terminal
+            // stays reachable. Under setsid the child had no controlling
+            // tty, and `sudo` could not open /dev/tty for its password
+            // prompt — see issue #19.
+            libc::setpgid(0, 0);
             libc::umask(0o077);
             Ok(())
         });
@@ -236,6 +243,22 @@ fn run_single_command(cmd: &mut Command, id: &str, timeout: Duration) -> Respons
         Ok(c) => c,
         Err(e) => return Response::error(id, &format!("failed to execute command: {e}")),
     };
+
+    let cpid = child.id() as libc::pid_t;
+    // Race-safe duplicate of the child's setpgid: closes the window
+    // between fork() and the child reaching its pre_exec hook. A second
+    // setpgid with the same args is harmless; if the child has already
+    // exec'd, EACCES is returned and we fall back to whatever the child
+    // managed to set itself.
+    unsafe {
+        let _ = libc::setpgid(cpid, cpid);
+    }
+
+    // Hand the controlling terminal's foreground to the child so reads
+    // from /dev/tty (e.g. sudo's password prompt) don't raise SIGTTIN
+    // and stop the child. Best-effort — no-op when the daemon has no
+    // controlling tty (headless / detached run).
+    let _fg = ForegroundGuard::take(cpid);
 
     // Drain stdout/stderr in threads so a child filling its stderr pipe
     // doesn't block our read of stdout (or vice versa).
@@ -459,6 +482,91 @@ fn collect_pipeline_results(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Process-global serialization for foreground process-group swaps. Two
+/// concurrent foreground handoffs would race: the loser's child becomes
+/// background and a read from /dev/tty raises SIGTTIN, which by default
+/// *stops* the process — and tcsetpgrp does not auto-resume it. Holding
+/// this mutex for the lifetime of each ForegroundGuard makes sequential
+/// runs deterministic.
+fn fg_swap_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+/// RAII handoff of the controlling tty's foreground process group.
+///
+/// On `take`, opens /dev/tty, saves the current foreground pgid, and
+/// installs `child_pgid` as the new foreground (with SIGTTOU blocked
+/// across the syscall — without that the daemon would self-suspend if
+/// it itself were in a background pgrp). On drop, the previous
+/// foreground is restored and the saved signal mask reinstated.
+///
+/// Best-effort: returns `None` if the daemon has no controlling tty,
+/// or if `tcgetpgrp`/`tcsetpgrp` fails. In those cases the caller
+/// proceeds without the swap; kill-group reaping (via the `setpgid` in
+/// `pre_exec`) is independent and unaffected.
+struct ForegroundGuard {
+    // Held until drop — see fg_swap_lock for why.
+    _lock: MutexGuard<'static, ()>,
+    tty_fd: libc::c_int,
+    prev_pgrp: libc::pid_t,
+    saved_mask: libc::sigset_t,
+}
+
+impl ForegroundGuard {
+    fn take(child_pgid: libc::pid_t) -> Option<Self> {
+        let lock = fg_swap_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        unsafe {
+            let tty_fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
+            if tty_fd < 0 {
+                return None;
+            }
+
+            let mut to_block: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut to_block);
+            libc::sigaddset(&mut to_block, libc::SIGTTOU);
+            let mut saved_mask: libc::sigset_t = std::mem::zeroed();
+            libc::pthread_sigmask(libc::SIG_BLOCK, &to_block, &mut saved_mask);
+
+            let prev_pgrp = libc::tcgetpgrp(tty_fd);
+            if prev_pgrp < 0 {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &saved_mask, std::ptr::null_mut());
+                libc::close(tty_fd);
+                return None;
+            }
+
+            if libc::tcsetpgrp(tty_fd, child_pgid) != 0 {
+                libc::pthread_sigmask(libc::SIG_SETMASK, &saved_mask, std::ptr::null_mut());
+                libc::close(tty_fd);
+                return None;
+            }
+
+            Some(Self {
+                _lock: lock,
+                tty_fd,
+                prev_pgrp,
+                saved_mask,
+            })
+        }
+    }
+}
+
+impl Drop for ForegroundGuard {
+    fn drop(&mut self) {
+        // Best-effort restore. Failures are silently ignored: the
+        // daemon may have already lost the controlling tty (e.g. ssh
+        // tunnel collapsed) or the prior pgid may have died.
+        unsafe {
+            libc::tcsetpgrp(self.tty_fd, self.prev_pgrp);
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.saved_mask, std::ptr::null_mut());
+            libc::close(self.tty_fd);
+        }
+    }
+}
 
 #[derive(Debug)]
 enum WaitError {
