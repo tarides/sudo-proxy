@@ -354,7 +354,13 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
     raw.c_lflag &= !(libc::ICANON | libc::ECHO);
     raw.c_cc[libc::VMIN] = 1;
     raw.c_cc[libc::VTIME] = 0;
-    if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } < 0 {
+    // TCSAFLUSH (vs TCSANOW): atomically discard any input that has been
+    // received but not yet read. Without this, a stray byte buffered in
+    // canonical mode before the prompt arrived (a leftover Enter, a
+    // mistyped keystroke, paste residue) is delivered immediately by
+    // poll/read in the new raw mode; anything other than y/Y resolves as
+    // Denied without the user touching the keyboard.
+    if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw) } < 0 {
         return Err(io::Error::last_os_error());
     }
     let _guard = TermiosGuard { fd, orig };
@@ -486,6 +492,54 @@ mod tests {
         unsafe {
             libc::close(master);
             libc::close(slave);
+        }
+    }
+
+    /// Regression: input pending in the line-discipline buffer at the
+    /// moment the prompt switches to raw mode must be discarded, not
+    /// returned by the next read. Without TCSAFLUSH, a stray byte queued
+    /// before the prompt was rendered would be delivered immediately and
+    /// — unless it happens to be y/Y — resolve as Denied with the user
+    /// having pressed nothing.
+    #[test]
+    fn read_key_timeout_discards_pre_prompt_input() {
+        use std::os::unix::io::FromRawFd;
+        use std::time::Duration;
+
+        let mut master: libc::c_int = 0;
+        let mut slave: libc::c_int = 0;
+        let rc = unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        assert_eq!(rc, 0, "openpty failed: {}", io::Error::last_os_error());
+
+        // Stuff the input queue with a stray byte plus a newline so the
+        // line discipline (still ICANON at this point) commits it.
+        let stray = b"q\n";
+        let n = unsafe {
+            libc::write(master, stray.as_ptr() as *const libc::c_void, stray.len())
+        };
+        assert_eq!(n as usize, stray.len(), "write to pty master failed");
+        // Give the kernel a moment to enqueue.
+        std::thread::sleep(Duration::from_millis(50));
+
+        let slave_file = unsafe { File::from_raw_fd(slave) };
+        let result =
+            read_key_timeout(&slave_file, Duration::from_millis(200)).expect("read_key_timeout");
+        assert_eq!(
+            result, None,
+            "buffered input must be flushed by TCSAFLUSH (got {result:?})"
+        );
+
+        // slave_file's Drop closes slave.
+        unsafe {
+            libc::close(master);
         }
     }
 }
