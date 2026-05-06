@@ -276,7 +276,9 @@ Security model:
 ## Protocol
 
 JSON lines over Unix socket. One request per connection, processed sequentially.
-Maximum request size: 1 MB.
+Maximum request size: 1 MB. Each line must terminate with `\n`; a peer that
+sends a partial line and closes gets a specific "missing trailing newline"
+error rather than an "invalid JSON" misdirection.
 
 **Request:**
 ```json
@@ -285,23 +287,63 @@ Maximum request size: 1 MB.
   "host": "workstation.local",
   "session": "claude-code-project-alpha",
   "time": "2026-02-13T14:30:00Z",
-  "argv": ["apt", "install", "nginx"],
+  "pipeline": [["apt", "install", "nginx"]],
   "env": {"DEBIAN_FRONTEND": "noninteractive"},
   "reason": "Install nginx to set up a web server",
-  "privileged": true
+  "privileged": true,
+  "forward_agent": false
 }
 ```
 
-`privileged` defaults to `true` if omitted. Set to `false` to run the command
-as the current user without sudo/pkexec.
+The wire shape is always a list of stages: a single command is
+`[["cmd", "arg"]]`, a pipeline is `[["a"], ["b"], ["c"]]` (equivalent
+to `a | b | c`). The MCP `execute` tool accepts a convenience `argv`
+field and wraps it for you.
+
+Field defaults (every field except `pipeline` is optional on the wire):
+
+- `id` — defaults to a fresh UUIDv4.
+- `host`, `session`, `time`, `reason`, `env` — empty if omitted, but
+  `time` must be a fresh, non-empty ISO 8601 timestamp; missing or
+  unparseable values are rejected.
+- `privileged` — defaults to `true` (the most-restrictive default; a
+  client that forgets the field still goes through approval + sudo).
+- `forward_agent` — defaults to `false`. Setting `true` is only valid
+  when `privileged: false`.
 
 **Response:**
-```json
-{"id":"550e...","status":"ok","exit_code":0,"stdout":"<base64>","stderr":"<base64>"}
+```jsonc
+// Success — single command:
+{"id":"550e...","status":"ok",
+ "stages":[{"exit_code":0,"stderr":"<base64>"}],
+ "stdout":"<base64>"}
+
+// Success — two-stage pipeline (one stages entry per command):
+{"id":"550e...","status":"ok",
+ "stages":[
+   {"exit_code":0,"stderr":""},
+   {"exit_code":0,"stderr":""}
+ ],
+ "stdout":"<base64>"}
+
+// Truncation flags only appear when the daemon capped the corresponding
+// stream at MAX_OUTPUT_BYTES (16 MiB):
+{"id":"550e...","status":"ok",
+ "stages":[{"exit_code":0,"stderr":"<base64>","stderr_truncated":true}],
+ "stdout":"<base64>","stdout_truncated":true}
+
 {"id":"550e...","status":"denied"}
 {"id":"550e...","status":"timeout"}
 {"id":"550e...","status":"error","message":"..."}
 ```
+
+`stages` carries one entry per pipeline stage (`exit_code` and
+base64-encoded `stderr`). The final stage's stdout is hoisted to the
+top-level `stdout` field. Truncation flags are absent when false.
+
+**Forward-compat:** every optional field uses `#[serde(default)]`.
+Clients should ignore unknown fields and tolerate additional metadata
+(e.g. truncation flags, stage subfields) added in future versions.
 
 ## Security considerations
 
@@ -325,8 +367,8 @@ bidi override characters (U+202A–U+202E, U+2066–U+2069) that could mislead
 the user during TUI approval.
 
 **Replay protection:** request UUIDs are tracked in a set that is cleared every
-1000 entries. Duplicate IDs are rejected. Requests with a `time` older than
-60 seconds are rejected.
+1000 entries. Duplicate IDs are rejected. Requests must carry a non-empty
+`time`; missing, unparseable, or older-than-60-seconds values are rejected.
 
 **Socket security:** the socket file is created with mode 0600 (owner-only).
 `$XDG_RUNTIME_DIR` is already restricted to the user.

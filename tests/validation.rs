@@ -126,13 +126,28 @@ fn oversize_request_rejected() {
 }
 
 #[test]
-fn request_with_empty_time_accepted() {
-    // Server is lenient when `time` is empty.
+fn request_with_empty_time_rejected() {
+    // Issue #14: empty `time` used to bypass the freshness check
+    // entirely. Now it is rejected with a `time`-related error.
     let s = server();
     let mut req = make_req("v-notime", vec![vec!["true"]]);
     req.time = String::new();
     let resp = s.send(&req);
-    assert_eq!(resp.status, Status::Ok, "got: {:?}", resp);
+    assert_eq!(resp.status, Status::Error);
+    let msg = resp.message.as_deref().unwrap_or("");
+    assert!(msg.contains("time"), "got: {msg:?}");
+}
+
+#[test]
+fn request_with_malformed_time_rejected() {
+    // Defence in depth: a parser failure used to be silently lenient.
+    let s = server();
+    let mut req = make_req("v-badtime", vec![vec!["true"]]);
+    req.time = "not-a-timestamp".to_string();
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error);
+    let msg = resp.message.as_deref().unwrap_or("");
+    assert!(msg.contains("time"), "got: {msg:?}");
 }
 
 #[test]
@@ -166,8 +181,14 @@ fn fresh_time_accepted() {
 fn missing_privileged_field_defaults_to_privileged() {
     let s = server();
 
-    let line = br#"{"id":"defprivd","pipeline":[["true"]],"session":"t"}"#.to_vec();
-    let mut payload = line;
+    // Build the wire payload by hand so we can omit `privileged` while
+    // still satisfying every other validation check (incl. fresh `time`,
+    // which is now mandatory after issue #14).
+    let line = format!(
+        r#"{{"id":"defprivd","pipeline":[["true"]],"session":"t","time":"{}"}}"#,
+        iso_now()
+    );
+    let mut payload = line.into_bytes();
     payload.push(b'\n');
 
     let bytes = s.send_raw(&payload);
