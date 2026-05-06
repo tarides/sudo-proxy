@@ -52,6 +52,23 @@ fn main() {
         eprintln!("warning: could not set signal handler: {e}");
     }
 
+    // The TUI prompt reads /dev/tty. While a previously-approved
+    // privileged child holds the foreground process group (handed off in
+    // executor::run_single_command so sudo can read its password), the
+    // daemon itself is in a *background* pgrp on its own controlling
+    // terminal. A read from /dev/tty in that state delivers SIGTTIN to
+    // the daemon's process group; the default action is to *stop* the
+    // process — and nothing in this codebase ever sends SIGCONT, so the
+    // daemon hangs until the user kills it. The user-visible symptom is
+    // a TUI window that appears but never renders the next prompt while
+    // Claude Code keeps retrying. Ignoring SIGTTIN/SIGTTOU turns those
+    // background-tty races into EIO at the read site, where the prompt
+    // simply errors out and the next request can proceed.
+    unsafe {
+        libc::signal(libc::SIGTTIN, libc::SIG_IGN);
+        libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+    }
+
     let prompter: Arc<dyn Prompter> = Arc::new(TtyPrompter);
     let sink: Arc<dyn ResultSink> = Arc::new(TtyResultSink);
     let shutdown = AtomicBool::new(false);
@@ -74,7 +91,14 @@ fn main() {
         in_flight,
     ) {
         eprintln!("error: {e}");
-        let _ = std::fs::remove_file(&socket_path);
+        // Only remove the socket file if it is ours. AddrInUse means
+        // another sudo-proxy is already bound there — deleting that
+        // file would silently break the live daemon's reachability for
+        // every subsequent client without taking it down, leaving a
+        // running-but-unreachable process behind.
+        if e.kind() != std::io::ErrorKind::AddrInUse {
+            let _ = std::fs::remove_file(&socket_path);
+        }
         process::exit(1);
     }
 }
