@@ -19,6 +19,7 @@ fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
         env: HashMap::new(),
         reason: String::new(),
         privileged: false,
+        forward_agent: false,
     }
 }
 

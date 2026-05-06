@@ -37,6 +37,19 @@ const MAX_REQUEST_BYTES: usize = 1_048_576;
 /// that legitimate burst usage is unaffected.
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 64;
 
+/// Returns the SSH_AUTH_SOCK forwarded to the daemon, if any.
+///
+/// Read from the daemon's *own* environment (set by sshd when the user
+/// opened the tunnel with `-A`), never from a request — the request env
+/// is controlled by the local peer. Used by the executor to inject the
+/// socket into unprivileged children that requested `forward_agent`.
+///
+/// The daemon never mutates its own environment, so live-reading gives a
+/// stable value across the daemon's lifetime; we don't bother caching.
+pub fn forwarded_agent_socket() -> Option<String> {
+    std::env::var("SSH_AUTH_SOCK").ok()
+}
+
 /// Characters forbidden in argv strings (control chars, bidi overrides, zero-width).
 fn has_dangerous_chars(s: &str) -> bool {
     for c in s.chars() {
@@ -330,7 +343,11 @@ impl Default for ServerConfig {
             mode: Mode::Local,
             pkexec_only: false,
             verbose: false,
-            confirm_unprivileged: false,
+            // Human-in-the-loop is the marketed value of sudo-proxy.
+            // Unprivileged commands now go through the same Y/N gate as
+            // privileged ones by default; opt out via
+            // `--no-confirm-unprivileged` for batch/automation flows.
+            confirm_unprivileged: true,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
     }
@@ -350,6 +367,9 @@ pub fn run(
     if config.verbose {
         eprintln!("sudo-proxy listening on {}", socket_path.display());
         eprintln!("mode: {}", config.mode.label());
+        if forwarded_agent_socket().is_some() {
+            eprintln!("ssh agent forwarding: available");
+        }
     }
 
     let our_uid = unsafe { libc::getuid() };
@@ -484,6 +504,19 @@ fn handle_connection(
         return;
     }
 
+    // Agent forwarding is unprivileged-only. A privileged child runs under
+    // sudo (which env_resets) or pkexec (which we env_clear), so the socket
+    // would be silently dropped — but we reject explicitly so a misconfigured
+    // caller fails loudly instead of being puzzled by a missing key.
+    if req.forward_agent && req.privileged {
+        let resp = Response::error(
+            &req.id,
+            "forward_agent is only allowed for unprivileged commands",
+        );
+        let _ = write_response(&mut stream, &resp);
+        return;
+    }
+
     // Freshness is checked at handler entry, NOT after the TTY lock — a
     // request must not age past MAX_REQUEST_AGE just because it queued
     // behind another user's prompt.
@@ -551,16 +584,30 @@ fn handle_connection(
             Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
         }
     } else {
-        // Non-privileged, no confirmation: no TTY contention.
+        // Non-privileged, no confirmation: print a one-line banner so the
+        // user can see what the proxy is running on their behalf, then exec.
+        // Best-effort: try_lock so the banner never queues behind a
+        // long-running privileged prompt. Skipping the banner under
+        // contention is preferred to making `ls` wait on a human Y/N.
+        if let Ok(_g) = tty_lock.try_lock() {
+            let _ = tui::display_banner(&req);
+        }
         exec_direct(&req, &env)
     };
 
-    // Echo result on the TTY for privileged commands. Lock held briefly;
-    // multiple threads writing to /dev/tty without synchronization
-    // would interleave bytes.
-    if req.privileged && !pkexec_only {
-        let _g = lock_recover(&tty_lock);
-        let _ = result_sink.display(&resp);
+    // Echo result on the TTY. The privileged path takes the lock blocking
+    // because it is already serialized with the prompt anyway. The
+    // unprivileged path uses try_lock so a still-pending privileged prompt
+    // never delays an unprivileged command's completion. Skip pkexec
+    // because pkexec has its own dialog.
+    let used_pkexec = req.privileged && pkexec_only && mode == Mode::Local;
+    if !used_pkexec {
+        if req.privileged {
+            let _g = lock_recover(&tty_lock);
+            let _ = result_sink.display(&resp);
+        } else if let Ok(_g) = tty_lock.try_lock() {
+            let _ = result_sink.display(&resp);
+        }
     }
 
     let _ = write_response(&mut stream, &resp);

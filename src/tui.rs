@@ -94,23 +94,25 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     if !req.reason.is_empty() {
         writeln!(tty_w, "Reason:  {bold}{}{reset}", req.reason)?;
     }
+    let dim = "\x1b[2m";
+    let agent_tag = if req.forward_agent {
+        format!(" {dim}(agent forwarded){reset}")
+    } else {
+        String::new()
+    };
     writeln!(
         tty_w,
-        "Command: {bold}{}{reset}",
+        "Command: {bold}{}{reset}{agent_tag}",
         pipeline_join(&req.pipeline)
     )?;
 
-    // Show resolved path for the first stage's command
+    // Show resolved path for the first stage's command. Symlinks are
+    // followed via canonicalize so a same-UID adversary who substitutes
+    // /usr/local/bin/foo -> /tmp/evil cannot hide the redirection from
+    // the prompt.
     if let Some(first_argv) = req.pipeline.first() {
         if let Some(cmd_name) = first_argv.first() {
-            if let Some(resolved) = which(cmd_name) {
-                let resolved_str = resolved.display().to_string();
-                if resolved_str != *cmd_name {
-                    writeln!(tty_w, "Resolves: {}", resolved_str)?;
-                }
-            } else {
-                writeln!(tty_w, "Resolves: {bold}(not found in PATH){reset}")?;
-            }
+            write_resolves_line(&mut tty_w, cmd_name, bold, dim, reset)?;
         }
 
         // Warn if later stages have commands not in PATH
@@ -158,7 +160,80 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     Ok(result)
 }
 
+/// Write the `Resolves:` line for a command name. PATH-searches the
+/// name (or accepts an absolute path), then `canonicalize`s the result
+/// so symlink redirection — including `/usr/local/bin/foo -> /tmp/evil`
+/// when the absolute path was supplied directly — is visible.
+///
+/// Display rules:
+/// - request matches resolved matches canonical: nothing printed.
+/// - request differs from resolved (PATH search): show resolved path,
+///   appending `-> canonical` if canonical also differs.
+/// - request matches resolved but canonical differs (absolute symlink):
+///   show `request -> canonical` in bold.
+/// - canonicalize fails (broken symlink, EACCES): show what we know and
+///   flag `(canonicalize failed)` so the prompt is honest about not
+///   having verified the target.
+fn write_resolves_line<W: Write>(
+    w: &mut W,
+    cmd_name: &str,
+    bold: &str,
+    dim: &str,
+    reset: &str,
+) -> io::Result<()> {
+    let resolved = match which(cmd_name) {
+        Some(p) => p,
+        None => {
+            return writeln!(w, "Resolves: {bold}(not found in PATH){reset}");
+        }
+    };
+    let resolved_str = resolved.display().to_string();
+    let resolved_differs = resolved_str != *cmd_name;
+
+    match std::fs::canonicalize(&resolved) {
+        Ok(canonical) => {
+            let canonical_str = canonical.display().to_string();
+            let canonical_differs = canonical_str != resolved_str;
+            match (resolved_differs, canonical_differs) {
+                (false, false) => Ok(()),
+                (true, false) => writeln!(w, "Resolves: {resolved_str}"),
+                (false, true) => writeln!(
+                    w,
+                    "Resolves: {bold}{resolved_str} -> {canonical_str}{reset}"
+                ),
+                (true, true) => writeln!(
+                    w,
+                    "Resolves: {resolved_str} {bold}->{reset} {canonical_str}"
+                ),
+            }
+        }
+        Err(_) => writeln!(
+            w,
+            "Resolves: {resolved_str} {dim}(canonicalize failed){reset}"
+        ),
+    }
+}
+
 const MAX_DISPLAY_LINES: usize = 3;
+
+/// Print a one-line non-interactive banner on /dev/tty announcing an
+/// unprivileged command that is about to run. Best-effort: silently
+/// returns Ok if /dev/tty cannot be opened (headless daemon).
+pub fn display_banner(req: &Request) -> io::Result<()> {
+    let mut tty = match OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    let dim = "\x1b[2m";
+    let reset = "\x1b[0m";
+    let cmd = pipeline_join(&req.pipeline);
+    if req.forward_agent {
+        writeln!(tty, "{dim}\u{25b6}{reset} {cmd} {dim}(agent forwarded){reset}")?;
+    } else {
+        writeln!(tty, "{dim}\u{25b6}{reset} {cmd}")?;
+    }
+    Ok(())
+}
 
 /// Display the command result on /dev/tty. Truncate stdout/stderr to 3 lines.
 pub fn display_result(resp: &Response) -> io::Result<()> {
@@ -313,6 +388,53 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn render_resolves(cmd_name: &str) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_resolves_line(&mut buf, cmd_name, "B", "D", "R").expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn resolves_line_path_search_no_symlink() {
+        // `true` resolves via PATH and is unlikely to be symlinked.
+        // The line should mention the resolved path; arrow only if canonical differs.
+        let out = render_resolves("true");
+        assert!(out.starts_with("Resolves: "), "got: {out:?}");
+        assert!(out.trim().ends_with('e') || out.contains("->"));
+    }
+
+    #[test]
+    fn resolves_line_absolute_symlink_shows_arrow() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp.path().join("target.sh");
+        std::fs::write(&target, "#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        let link = tmp.path().join("foo");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+
+        let out = render_resolves(link.to_str().unwrap());
+        assert!(
+            out.contains("->"),
+            "absolute path that is a symlink must show '->': {out:?}"
+        );
+        // Bold marker B should wrap the symlink redirect for visibility.
+        assert!(out.contains('B'), "expected bold marker in: {out:?}");
+        assert!(
+            out.contains(target.to_str().unwrap()),
+            "must show canonical target {target:?} in: {out:?}"
+        );
+    }
+
+    #[test]
+    fn resolves_line_not_in_path() {
+        let out = render_resolves("definitely-no-such-binary-9f2a");
+        assert!(out.contains("not found in PATH"), "got: {out:?}");
+    }
 
     /// If a panic unwinds out of the raw-mode block, the TermiosGuard must
     /// still call tcsetattr to restore the saved flags. Without the guard,

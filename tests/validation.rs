@@ -63,6 +63,41 @@ fn dangerous_env_value_rejected() {
 }
 
 #[test]
+fn unprivileged_request_prompts_by_default() {
+    // Regression for issue #17: unprivileged requests must hit the TUI
+    // prompter by default. Pre-fix, only privileged requests did.
+    let s = start_test_server(TestServerOpts::default());
+    let req = make_req("v-unpriv-default", vec![vec!["true"]]);
+    // Default ScriptedPrompter approves immediately, so the request
+    // succeeds; we only need to assert the prompter saw it.
+    let resp = s.send(&req);
+    assert_eq!(resp.status, sudo_proxy::protocol::Status::Ok);
+    assert_eq!(
+        s.prompter.call_count(),
+        1,
+        "unprivileged request must go through the prompter under default config"
+    );
+}
+
+#[test]
+fn ld_preload_rejected_with_specific_error() {
+    // Regression for issue #16: LD_PRELOAD used to be silently stripped
+    // (along with the rest of the blocklist), softening the response for
+    // the most security-sensitive names. It must now hit the same hard
+    // rejection path as any other non-allowlisted var.
+    let s = server();
+    let mut req = make_req("v-ld-preload", vec![vec!["true"]]);
+    req.env.insert("LD_PRELOAD".into(), "/tmp/evil.so".into());
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error);
+    let msg = resp.message.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("LD_PRELOAD"),
+        "expected error to mention LD_PRELOAD, got: {msg:?}"
+    );
+}
+
+#[test]
 fn invalid_json_returns_error_with_empty_id() {
     let s = server();
     let bytes = s.send_raw(b"this is not json\n");

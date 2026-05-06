@@ -60,6 +60,12 @@ pub struct ExecuteParams {
     /// Environment variables
     #[serde(default)]
     pub env: Option<HashMap<String, String>>,
+
+    /// Forward the local SSH agent to the command (unprivileged only).
+    /// Requires the proxy session to have been started with `forward_agent: true`.
+    /// Useful for `git clone` of private repos via SSH on a remote host.
+    #[serde(default)]
+    pub forward_agent: bool,
 }
 
 fn default_true() -> bool {
@@ -71,6 +77,12 @@ pub struct StartServerParams {
     /// Remote hostname (omit for localhost)
     #[serde(default)]
     pub host: Option<String>,
+
+    /// Enable SSH agent forwarding on the tunnel so unprivileged commands
+    /// that opt in (via execute's `forward_agent: true`) can authenticate
+    /// to GitHub etc. with the user's local key. Ignored for local servers.
+    #[serde(default)]
+    pub forward_agent: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -139,6 +151,12 @@ impl McpProxy {
 
         let host_name = params.host.clone().unwrap_or_else(|| "localhost".into());
 
+        if params.forward_agent && params.privileged {
+            return Ok(error_result(
+                "forward_agent is only allowed with privileged: false".to_string(),
+            ));
+        }
+
         let req = Request {
             id: uuid::Uuid::new_v4().to_string(),
             host: params.host.unwrap_or_default(),
@@ -148,6 +166,7 @@ impl McpProxy {
             env: params.env.unwrap_or_default(),
             reason: params.description.unwrap_or_default(),
             privileged: params.privileged,
+            forward_agent: params.forward_agent,
         };
 
         let total_timeout = Duration::from_millis(timeout_ms);
@@ -177,7 +196,7 @@ impl McpProxy {
         }
         let result = match &params.host {
             None => start_local().await,
-            Some(host) => start_remote(host).await,
+            Some(host) => start_remote(host, params.forward_agent).await,
         };
 
         if let Ok(ref r) = result {
@@ -381,7 +400,7 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     )))
 }
 
-async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
+async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult, McpError> {
     let local_sock = crate::server::remote_socket_path(host);
 
     // Check if tunnel already exists
@@ -412,12 +431,20 @@ async fn start_remote(host: &str) -> Result<CallToolResult, McpError> {
     // it would let a peer execute arbitrary commands inside the spawned
     // terminal without the TUI approval gate. validate_host has already
     // rejected anything outside [A-Za-z0-9._@:-], so this is defence in depth.
+    let mut proxy_args: Vec<&str> = vec![proxy_bin_str.as_str(), "--host", host];
+    if forward_agent {
+        proxy_args.push("--forward-agent");
+    }
     match terminal.as_str() {
         "gnome-terminal" => {
-            cmd.args(["--", proxy_bin_str.as_str(), "--host", host]);
+            let mut full = vec!["--"];
+            full.extend(proxy_args.iter().copied());
+            cmd.args(&full);
         }
         _ => {
-            cmd.args(["-e", proxy_bin_str.as_str(), "--host", host]);
+            let mut full = vec!["-e"];
+            full.extend(proxy_args.iter().copied());
+            cmd.args(&full);
         }
     }
 
