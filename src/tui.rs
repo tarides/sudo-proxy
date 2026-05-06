@@ -87,6 +87,8 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
         req.session,
         if req.host.is_empty() { "local" } else { &req.host }
     )?;
+    let client_ver = if req.version.is_empty() { "(unknown)" } else { req.version.as_str() };
+    writeln!(tty_w, "Client:  sudo-proxy {client_ver}")?;
     if !req.time.is_empty() {
         writeln!(tty_w, "Time:    {}", req.time)?;
     }

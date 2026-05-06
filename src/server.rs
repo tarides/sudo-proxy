@@ -567,7 +567,8 @@ fn handle_connection(
     if verbose {
         let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
         let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
-        eprintln!("[{}] [{}] {}", req.id, priv_label, pipeline_display);
+        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
+        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, pipeline_display);
     }
 
     let resp = if req.privileged {

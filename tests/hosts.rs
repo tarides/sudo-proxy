@@ -29,6 +29,7 @@ fn concurrent_save_is_atomic_and_loses_no_data() {
                         os: String::new(),
                         last_connected: String::new(),
                         uid: String::new(),
+                        version: String::new(),
                     },
                 );
                 save_to(&path, &cfg).expect("atomic save");
@@ -58,6 +59,7 @@ fn save_then_load_roundtrips() {
             os: "Linux".into(),
             last_connected: "2026-04-30T12:00:00Z".into(),
             uid: "1000".into(),
+            version: "0.5.0".into(),
         },
     );
     save_to(&path, &cfg).unwrap();
@@ -66,4 +68,41 @@ fn save_then_load_roundtrips() {
     let loaded: HostsConfig = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(loaded.hosts.len(), 1);
     assert_eq!(loaded.hosts["alpha"].uid, "1000");
+    assert_eq!(loaded.hosts["alpha"].version, "0.5.0");
+}
+
+/// Forward-compat: a hosts.json written by an older build (no `version`
+/// field) loads cleanly, with version defaulting to empty string.
+#[test]
+fn load_hosts_json_without_version_field() {
+    let json = r#"{
+        "hosts": {
+            "legacy": {
+                "description": "old config",
+                "os": "Linux",
+                "last_connected": "2026-04-30T12:00:00Z",
+                "uid": "1000"
+            }
+        }
+    }"#;
+    let cfg: HostsConfig = serde_json::from_str(json).expect("parse legacy hosts.json");
+    let info = cfg.hosts.get("legacy").expect("host present");
+    assert_eq!(info.version, "");
+    assert_eq!(info.uid, "1000");
+}
+
+/// `record_version` should only persist non-empty values and should
+/// report whether the cached value actually changed, so callers can
+/// avoid redundant disk writes.
+#[test]
+fn record_version_signals_change_and_ignores_empty() {
+    let mut cfg = HostsConfig::default();
+    assert!(cfg.record_version("h1", "0.6.0"), "first set is a change");
+    assert!(!cfg.record_version("h1", "0.6.0"), "same value: no change");
+    assert!(cfg.record_version("h1", "0.7.0"), "new value: change");
+    assert!(
+        !cfg.record_version("h1", ""),
+        "empty version must not overwrite a known value"
+    );
+    assert_eq!(cfg.hosts["h1"].version, "0.7.0");
 }

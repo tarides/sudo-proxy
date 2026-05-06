@@ -51,6 +51,7 @@ fn main() {
         reason: opts.reason.unwrap_or_default(),
         privileged: opts.privileged,
         forward_agent: opts.forward_agent,
+        version: sudo_proxy::protocol::VERSION.to_string(),
     };
 
     // Connect and send

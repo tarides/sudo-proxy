@@ -16,6 +16,11 @@ pub struct HostInfo {
     pub last_connected: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uid: String,
+    /// Last-seen `sudo-proxy` version reported by this host's daemon.
+    /// Empty if the daemon predates the protocol version field, or if no
+    /// successful exchange has happened yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -57,7 +62,34 @@ impl HostsConfig {
                 os: String::new(),
                 last_connected: now,
                 uid: String::new(),
+                version: String::new(),
             });
+    }
+
+    /// Cache the daemon version reported by `host`. Returns `true` if the
+    /// stored value changed (caller may persist accordingly). Empty
+    /// `version` is a no-op so we don't overwrite a known value when a
+    /// transient response happens to lack the field.
+    pub fn record_version(&mut self, host: &str, version: &str) -> bool {
+        if version.is_empty() {
+            return false;
+        }
+        let info = self
+            .hosts
+            .entry(host.to_string())
+            .or_insert_with(|| HostInfo {
+                description: String::new(),
+                os: String::new(),
+                last_connected: String::new(),
+                uid: String::new(),
+                version: String::new(),
+            });
+        if info.version == version {
+            false
+        } else {
+            info.version = version.to_string();
+            true
+        }
     }
 
     /// Return the remote UID for `host`, using the cached value if available,
@@ -103,6 +135,7 @@ impl HostsConfig {
                 os: String::new(),
                 last_connected: String::new(),
                 uid: String::new(),
+                version: String::new(),
             });
         info.uid = uid.clone();
         self.save();

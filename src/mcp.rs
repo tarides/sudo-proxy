@@ -20,7 +20,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::hosts::HostsConfig;
-use crate::protocol::{Request, Response, Status};
+use crate::protocol::{self, Request, Response, Status};
 use crate::server::default_socket_path;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -167,17 +167,17 @@ impl McpProxy {
             reason: params.description.unwrap_or_default(),
             privileged: params.privileged,
             forward_agent: params.forward_agent,
+            version: protocol::VERSION.to_string(),
         };
 
         let total_timeout = Duration::from_millis(timeout_ms);
         let result = send_request(&socket_path, &req, total_timeout).await;
 
-        if result.is_ok() {
-            touch_host(&host_name);
-        }
-
         match result {
-            Ok(resp) => Ok(format_response(resp)),
+            Ok(resp) => {
+                touch_host(&host_name, &resp.version);
+                Ok(format_response(resp))
+            }
             Err(e) => Ok(error_result(e)),
         }
     }
@@ -202,7 +202,7 @@ impl McpProxy {
         if let Ok(ref r) = result {
             if r.is_error != Some(true) {
                 let host_name = params.host.unwrap_or_else(|| "localhost".into());
-                touch_host(&host_name);
+                touch_host(&host_name, "");
             }
         }
 
@@ -228,6 +228,7 @@ impl McpProxy {
                 os: String::new(),
                 last_connected: String::new(),
                 uid: String::new(),
+                version: String::new(),
             });
         if let Some(desc) = params.description {
             info.description = desc;
@@ -251,6 +252,10 @@ impl ServerHandler for McpProxy {
              Call start_server first if sudo-proxy is not running, \
              then use execute to run commands.",
         );
+        instructions.push_str(&format!(
+            "\n\nThis sudo-proxy-mcp is version {}.",
+            protocol::VERSION
+        ));
 
         let config = HostsConfig::load();
         if !config.hosts.is_empty() {
@@ -262,6 +267,9 @@ impl ServerHandler for McpProxy {
                 }
                 if !info.os.is_empty() {
                     instructions.push_str(&format!(" ({})", info.os));
+                }
+                if !info.version.is_empty() {
+                    instructions.push_str(&format!(" [sudo-proxy {}]", info.version));
                 }
                 if !info.last_connected.is_empty() {
                     instructions.push_str(&format!(" [last: {}]", info.last_connected));
@@ -534,7 +542,24 @@ async fn send_request(
         return Err("server closed connection without response".to_string());
     }
 
-    serde_json::from_str(line.trim()).map_err(|e| format!("parse response: {e}"))
+    let trimmed = line.trim();
+    serde_json::from_str::<Response>(trimmed).map_err(|e| {
+        // Lenient peek: even if the response is structurally invalid, the
+        // version field is usually a top-level string and can still be
+        // extracted to make skew obvious in the diagnostic.
+        let peer_ver = serde_json::from_str::<serde_json::Value>(trimmed)
+            .ok()
+            .as_ref()
+            .and_then(|v| v.get("version"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        format!(
+            "parse response from sudo-proxy {peer_ver} (client sudo-proxy-mcp {}): {e}",
+            protocol::VERSION
+        )
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -590,7 +615,15 @@ fn format_response(resp: Response) -> CallToolResult {
             let msg = resp
                 .message
                 .unwrap_or_else(|| "unknown error".to_string());
-            error_result(format!("Error: {msg}"))
+            let server_ver = if resp.version.is_empty() {
+                "unknown".to_string()
+            } else {
+                resp.version
+            };
+            error_result(format!(
+                "Error from sudo-proxy {server_ver} (client sudo-proxy-mcp {}): {msg}",
+                protocol::VERSION
+            ))
         }
     }
 }
@@ -658,9 +691,10 @@ fn which(name: &str) -> Option<PathBuf> {
     })
 }
 
-fn touch_host(host: &str) {
+fn touch_host(host: &str, version: &str) {
     let mut config = HostsConfig::load();
     config.touch(host);
+    config.record_version(host, version);
     config.save();
 }
 

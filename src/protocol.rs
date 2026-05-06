@@ -3,6 +3,10 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Version stamped onto outgoing wire messages. All four binaries live in
+/// the same crate, so this resolves to the same value everywhere.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Request {
     #[serde(default = "default_id")]
@@ -26,6 +30,9 @@ pub struct Request {
     /// rejects the request otherwise.
     #[serde(default)]
     pub forward_agent: bool,
+    /// Sender's `CARGO_PKG_VERSION`. Empty when peer predates this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 fn default_true() -> bool {
@@ -65,6 +72,9 @@ pub struct Response {
     pub stdout_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Daemon's `CARGO_PKG_VERSION`. Empty when peer predates this field.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub version: String,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -89,6 +99,7 @@ impl Response {
             stdout: Some(B64.encode(stdout)),
             stdout_truncated: false,
             message: None,
+            version: VERSION.to_string(),
         }
     }
 
@@ -111,6 +122,7 @@ impl Response {
             stdout: None,
             stdout_truncated: false,
             message: None,
+            version: VERSION.to_string(),
         }
     }
 
@@ -122,6 +134,7 @@ impl Response {
             stdout: None,
             stdout_truncated: false,
             message: None,
+            version: VERSION.to_string(),
         }
     }
 
@@ -133,6 +146,7 @@ impl Response {
             stdout: None,
             stdout_truncated: false,
             message: Some(message.to_string()),
+            version: VERSION.to_string(),
         }
     }
 

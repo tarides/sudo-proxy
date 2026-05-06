@@ -184,3 +184,53 @@ fn client_close_without_data_keeps_daemon_responsive() {
     let resp = s.send(&make_req("after-drive-bys", vec![vec!["true"]]));
     assert_eq!(resp.status, Status::Ok);
 }
+
+/// The daemon stamps its own VERSION on every Response. Clients can rely
+/// on this to detect skew without having to parse `--version` output.
+#[test]
+fn response_carries_daemon_version() {
+    let s = start_test_server(TestServerOpts::default());
+    let resp = s.send(&make_req("ver-stamp", vec![vec!["true"]]));
+    assert_eq!(resp.status, Status::Ok);
+    assert_eq!(resp.version, sudo_proxy::protocol::VERSION);
+}
+
+/// Forward-compat: a Request from an older client without a `version`
+/// field must still be accepted; on parse it deserializes to the empty
+/// string so the prompt/log can render `(unknown)`.
+#[test]
+fn request_without_version_field_accepted() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let s = start_test_server(TestServerOpts::default());
+
+    let id = "legacy-no-version";
+    let time = iso_now();
+    let line = format!(
+        "{{\"id\":\"{id}\",\"host\":\"\",\"session\":\"old-client\",\"time\":\"{time}\",\"pipeline\":[[\"true\"]],\"env\":{{}},\"reason\":\"\",\"privileged\":false,\"forward_agent\":false}}\n"
+    );
+
+    let mut stream = UnixStream::connect(&s.socket_path).expect("connect");
+    stream.write_all(line.as_bytes()).expect("write");
+    let mut reader = BufReader::new(&stream);
+    let mut buf = String::new();
+    reader.read_line(&mut buf).expect("read");
+
+    let resp: sudo_proxy::protocol::Response =
+        serde_json::from_str(buf.trim()).expect("parse response");
+    assert_eq!(resp.id, id);
+    assert_eq!(resp.status, Status::Ok, "got: {:?}", resp.message);
+    // Round-trip preserves daemon version on the response.
+    assert_eq!(resp.version, sudo_proxy::protocol::VERSION);
+}
+
+/// Forward-compat: a Response JSON missing the `version` field
+/// (i.e. emitted by a daemon predating this change) deserializes to an
+/// empty version string so callers can render `(unknown)`.
+#[test]
+fn response_without_version_field_deserializes() {
+    let json = r#"{"id":"legacy","status":"ok","stages":[],"stdout":null}"#;
+    let resp: sudo_proxy::protocol::Response =
+        serde_json::from_str(json).expect("parse");
+    assert_eq!(resp.version, "");
+}
