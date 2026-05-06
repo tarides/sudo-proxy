@@ -247,6 +247,7 @@ pub fn make_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
         env: Default::default(),
         reason: String::new(),
         privileged: false,
+        forward_agent: false,
     }
 }
 

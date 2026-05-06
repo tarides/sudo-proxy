@@ -14,6 +14,7 @@ struct Opts {
     pkexec: bool,
     verbose: bool,
     confirm_unprivileged: bool,
+    forward_agent: bool,
 }
 
 fn main() {
@@ -32,9 +33,14 @@ fn main() {
             }
         }
         let target = sudo_proxy::hosts::ssh_target(host, opts.login.as_deref());
-        run_remote(&target, opts.verbose);
+        run_remote(&target, opts.verbose, opts.forward_agent);
         // run_remote execs into ssh, so we only get here on error
         return;
+    }
+
+    if opts.forward_agent {
+        eprintln!("error: --forward-agent requires --host (no SSH session in local mode)");
+        process::exit(1);
     }
 
     let mode = Mode::detect();
@@ -79,7 +85,11 @@ fn parse_args(args: &[String]) -> Opts {
     let mut login = None;
     let mut pkexec = false;
     let mut verbose = false;
-    let mut confirm_unprivileged = false;
+    // Confirmation for unprivileged commands is on by default. The
+    // `--confirm-unprivileged` flag is now a no-op kept for backwards
+    // compatibility; pass `--no-confirm-unprivileged` to skip the gate.
+    let mut confirm_unprivileged = true;
+    let mut forward_agent = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -97,23 +107,30 @@ fn parse_args(args: &[String]) -> Opts {
             }
             "--pkexec" => pkexec = true,
             "--verbose" | "-v" => verbose = true,
+            // Accepted for backwards compat — confirmation is now on by default.
             "--confirm-unprivileged" => confirm_unprivileged = true,
+            "--no-confirm-unprivileged" => confirm_unprivileged = false,
+            "--forward-agent" => forward_agent = true,
             "--version" | "-V" => {
                 println!("sudo-proxy {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--confirm-unprivileged]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--no-confirm-unprivileged] [--forward-agent]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
+                eprintln!("Every command (privileged or not) goes through the TUI Y/N gate by default.");
                 eprintln!();
                 eprintln!("Options:");
-                eprintln!("  --socket PATH            Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
-                eprintln!("  --host HOST              Connect to remote host via SSH tunnel");
-                eprintln!("  --pkexec                 Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
-                eprintln!("  --verbose, -v            Print startup info and log each request to stderr");
-                eprintln!("  --confirm-unprivileged   Prompt for confirmation before running non-privileged commands");
+                eprintln!("  --socket PATH               Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
+                eprintln!("  --host HOST                 Connect to remote host via SSH tunnel");
+                eprintln!("  --pkexec                    Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
+                eprintln!("  --verbose, -v               Print startup info and log each request to stderr");
+                eprintln!("  --no-confirm-unprivileged   Skip the Y/N gate for unprivileged commands (batch/automation)");
+                eprintln!("  --confirm-unprivileged      No-op (kept for backwards compat — this is now the default)");
+                eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
+                eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 std::process::exit(0);
             }
             _ => {
@@ -129,6 +146,7 @@ fn parse_args(args: &[String]) -> Opts {
         pkexec,
         verbose,
         confirm_unprivileged,
+        forward_agent,
     }
 }
 
@@ -172,7 +190,7 @@ unsafe fn signal_hook_cleanup(path: PathBuf) {
 }
 
 /// Connect to a remote host: resolve UID, set up SSH tunnel, exec into SSH.
-fn run_remote(host: &str, verbose: bool) {
+fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
     use std::os::unix::process::CommandExt;
     use sudo_proxy::hosts::HostsConfig;
 
@@ -204,14 +222,18 @@ fn run_remote(host: &str, verbose: bool) {
     config.touch(host);
     config.save();
 
-    let ssh_args = [
+    let mut ssh_args: Vec<&str> = vec![
         "-t",
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=3",
         "-o", "ExitOnForwardFailure=yes",
         "-L", &tunnel,
-        host, "sudo-proxy",
     ];
+    if forward_agent {
+        ssh_args.push("-A");
+    }
+    ssh_args.push(host);
+    ssh_args.push("sudo-proxy");
 
     if verbose {
         eprintln!("+ ssh {}", ssh_args.join(" "));

@@ -23,25 +23,27 @@ privilege escalation. The password prompt appears in the same terminal.
 This flow is identical for local and remote hosts.
 
 **Non-privileged mode** (`privileged: false` in the request):
-runs the command directly as the current user, without sudo.
-By default, no confirmation is needed. Pass `--confirm-unprivileged` to the
-server to require a TUI Y/N prompt.
+runs the command directly as the current user, without sudo. The TUI Y/N
+gate fires by default — same human review as the privileged path, just
+no password step. Pass `--no-confirm-unprivileged` to the server to skip
+the gate (useful for batch/automation flows where the operator has
+already accepted the risk).
 
 ## Why not just use the Bash tool?
 
 | | Bash tool | sudo-proxy MCP |
 |---|---|---|
 | Privilege escalation | Not possible | sudo with human approval |
-| Human review | None — executes immediately | Every privileged command shown in TUI |
+| Human review | None — executes immediately | TUI Y/N gate on every command (privileged and unprivileged) |
 | Timeout | Up to 10 min, no user prompt | 60 s TUI prompt + configurable overall timeout |
 | Remote hosts | Not supported | SSH tunnel with TUI on remote terminal |
 | Environment | Inherits shell env | Sanitized allowlist only |
 | Audit trail | None | Server logs each request (with `-v`) |
 
-The Bash tool is fine for non-privileged commands. sudo-proxy fills the gap
-when a model needs to install packages, edit system files, or manage
-services — with the human always in the loop, even when Claude Code is
-run with `--dangerously-skip-permissions`.
+sudo-proxy fills the gap when a model needs to install packages, edit
+system files, manage services, or run any other command — with the human
+always in the loop, even when Claude Code is run with
+`--dangerously-skip-permissions`.
 
 ## Installation
 
@@ -197,8 +199,9 @@ sudo-proxy -v
 sudo-proxy --host remotehost
 sudo-proxy --host remotehost -v     # prints the ssh command before connecting
 
-# Require confirmation for non-privileged commands too
-sudo-proxy --confirm-unprivileged
+# Skip the confirmation prompt for unprivileged commands
+# (default is to prompt for both privileged and unprivileged)
+sudo-proxy --no-confirm-unprivileged
 
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock
@@ -230,6 +233,45 @@ ssh -t -L /tmp/sudo-proxy-HOST.sock:/run/user/$(ssh HOST id -u)/sudo-proxy.sock 
 This allocates a PTY (`-t`), forwards the local socket to the remote
 `sudo-proxy.sock`, and runs `sudo-proxy` on the remote end. Clients then
 connect to `/tmp/sudo-proxy-HOST.sock` locally.
+
+### SSH agent forwarding for `git clone` of private repos
+
+Cloning a private GitHub repository on the remote host requires the
+remote `git` to authenticate with your local SSH key. `sudo-proxy`
+supports this in a tightly scoped way:
+
+```bash
+# 1. Start the tunnel with agent forwarding (-A) enabled.
+sudo-proxy --host HOST --forward-agent
+
+# 2. Per-request opt-in. Privileged commands cannot use the agent.
+sudo-request --no-privilege --forward-agent -- \
+    git clone git@github.com:org/private-repo.git
+```
+
+Through the MCP server:
+
+```jsonc
+start_server({"host": "HOST", "forward_agent": true})
+execute({
+  "argv": ["git", "clone", "git@github.com:org/private-repo.git"],
+  "privileged": false,
+  "forward_agent": true
+})
+```
+
+Security model:
+
+- The `SSH_AUTH_SOCK` injected into the child process is taken from the
+  daemon's *own* environment (set by `sshd` when `-A` was used). It is
+  never read from the request — a local peer cannot point your `git`
+  invocation at a different agent socket.
+- `forward_agent: true` is honored only when `privileged: false`. The
+  daemon rejects the request otherwise; sudo/pkexec children never see
+  the socket.
+- Without `--forward-agent` on the launcher, requests with
+  `forward_agent: true` still run, but no `SSH_AUTH_SOCK` is set on the
+  child (the daemon has no socket to inject).
 
 ## Protocol
 
@@ -263,12 +305,16 @@ as the current user without sudo/pkexec.
 
 ## Security considerations
 
-**Environment:** dangerous variables (`LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`,
-etc.) are stripped from the request. Only an allowlist of known-safe names
-(`LANG`, `LC_*`, `TZ`, `HOME`, `DEBIAN_FRONTEND`, `TERM`) passes through;
-anything else is rejected. For pkexec and direct execution the process
-environment is cleared before applying the allowlist. For sudo mode the process
-environment is inherited, but sudo's own `env_reset` policy handles cleanup.
+**Environment:** the request `env` is gated by a hard allowlist
+(`LANG`, `LC_*`, `TZ`, `HOME`, `DEBIAN_FRONTEND`, `TERM`). Anything else —
+including `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, etc. — produces an
+error response; nothing is silently stripped. For pkexec and direct
+execution the process environment is cleared before applying the
+allowlist. For sudo mode the process environment is inherited, but
+sudo's own `env_reset` policy handles cleanup. `SSH_AUTH_SOCK` is
+rejected with a specific error; agent forwarding goes through the
+dedicated `forward_agent` field instead (see "SSH agent forwarding"
+above).
 
 **No shell invocation:** commands are executed via `Command::new(argv[0]).args(…)`,
 never `sh -c`. This prevents `;`, `|`, `&&` injection.
@@ -292,9 +338,14 @@ password.
 
 **TUI hardening:** the Y/N prompt reads a single keypress in non-canonical
 terminal mode (no Enter required) and times out after 60 seconds (default deny).
-The resolved absolute path of argv[0] is displayed alongside the requested name
-so symlink tricks are visible. If argv[0] is not found in PATH, the prompt
-shows `(not found in PATH)` as a warning.
+The resolved absolute path of argv[0] is displayed alongside the requested name,
+followed by `->` and the canonical target when it differs (i.e. when the
+PATH-found file is itself a symlink), so a same-UID adversary who substitutes
+`/usr/local/bin/foo -> /tmp/evil` cannot hide the redirection by either
+relying on a PATH search or passing the absolute path directly. If
+`canonicalize` fails (broken symlink, EACCES) the prompt says so explicitly
+rather than silently displaying the as-found name. If argv[0] is not found in
+PATH, the prompt shows `(not found in PATH)` as a warning.
 
 ## pkexec mode
 
@@ -383,14 +434,15 @@ Functional but minimal.
 
 **Implemented:**
 - TUI approval prompt + sudo for privilege escalation (local and remote)
-- Non-privileged mode (direct execution, no escalation)
+- Non-privileged mode (direct execution, no escalation) — also TUI-gated by default
 - `--verbose` / `-v` on server: prints startup info, logs each request
-- `--confirm-unprivileged` on server: prompt before non-privileged commands
+- `--no-confirm-unprivileged` on server: skip the Y/N gate for unprivileged commands
+  (`--confirm-unprivileged` is accepted as a no-op for backwards compat)
 - `--no-privilege` on client: sends request with `privileged: false`
 - `--host` flag on server: SSHs into remote, starts sudo-proxy, tunnels socket (used by MCP `start_server`)
 - `--print` mode for human-readable output on stdout
 - JSON-line protocol with base64-encoded output and `timeout` status
-- Environment sanitization (blocklist + allowlist)
+- Environment sanitization (hard-allowlist; non-allowlisted vars produce an error)
 - Input validation (control chars, bidi overrides, zero-width chars)
 - Replay protection (UUID dedup, 60s request age)
 - Socket permissions (0600)

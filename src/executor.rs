@@ -12,17 +12,6 @@ use base64::Engine;
 
 use crate::protocol::{Request, Response, StageResult};
 
-/// Environment variables that are never passed through (security-sensitive).
-const ENV_BLOCKLIST: &[&str] = &[
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "PATH",
-    "LD_AUDIT",
-    "LD_DEBUG",
-    "LD_DYNAMIC_WEAK",
-    "LD_ORIGIN_PATH",
-];
-
 /// Hard cap on captured stdout/stderr per stream. A privileged
 /// `cat /dev/zero` would otherwise OOM the daemon. When the cap is
 /// reached, the drainer stops reading and the child is killed so it
@@ -56,13 +45,22 @@ fn is_env_allowed(key: &str) -> bool {
 }
 
 /// Sanitize the environment from a request.
-/// Returns Ok(filtered map) or Err(message) if a non-allowed var is found.
+///
+/// Hard rejection model: every var must be on the allowlist, otherwise
+/// the whole request fails. There is no silent stripping — `LD_PRELOAD`
+/// and friends fail loudly the same way any unknown var does.
 pub fn sanitize_env(env: &HashMap<String, String>) -> Result<HashMap<String, String>, String> {
     let mut out = HashMap::new();
     for (k, v) in env {
-        if ENV_BLOCKLIST.iter().any(|b| k == *b) {
-            eprintln!("warning: stripped blocked env var: {k}");
-            continue;
+        // SSH_AUTH_SOCK is owned by the daemon's environment (set by sshd
+        // when the user opened the tunnel with -A). Accepting a request-
+        // supplied value would let a local peer point a child at an
+        // arbitrary socket. Use `forward_agent: true` instead.
+        if k == "SSH_AUTH_SOCK" {
+            return Err(
+                "SSH_AUTH_SOCK cannot be set in request env; use forward_agent instead"
+                    .to_string(),
+            );
         }
         if !is_env_allowed(k) {
             return Err(format!("environment variable not allowed: {k}"));
@@ -135,7 +133,7 @@ pub fn exec_sudo(req: &Request, env: &HashMap<String, String>) -> Response {
 /// Execute a pipeline directly as the current user (no privilege escalation).
 pub fn exec_direct(req: &Request, env: &HashMap<String, String>) -> Response {
     if req.pipeline.len() == 1 {
-        return exec_direct_stage(&req.pipeline[0], env, &req.id);
+        return exec_direct_stage(&req.pipeline[0], env, &req.id, req.forward_agent);
     }
 
     exec_pipeline(req, env, EscalationMode::Direct)
@@ -202,6 +200,7 @@ fn exec_direct_stage(
     argv: &[String],
     env: &HashMap<String, String>,
     id: &str,
+    forward_agent: bool,
 ) -> Response {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..]);
@@ -212,6 +211,11 @@ fn exec_direct_stage(
     cmd.env_clear();
     for (k, v) in env {
         cmd.env(k, v);
+    }
+    if forward_agent {
+        if let Some(sock) = crate::server::forwarded_agent_socket() {
+            cmd.env("SSH_AUTH_SOCK", &sock);
+        }
     }
 
     run_single_command(&mut cmd, id, exec_timeout())
@@ -339,6 +343,11 @@ fn exec_pipeline(
                 c.env_clear();
                 for (k, v) in env {
                     c.env(k, v);
+                }
+                if req.forward_agent {
+                    if let Some(sock) = crate::server::forwarded_agent_socket() {
+                        c.env("SSH_AUTH_SOCK", &sock);
+                    }
                 }
                 c
             }
@@ -715,6 +724,36 @@ mod tests {
 
     fn pid_alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[test]
+    fn sanitize_env_rejects_ld_preload() {
+        // Issue #16: LD_PRELOAD must not be silently stripped. It now
+        // takes the same hard-reject path as any other non-allowlisted
+        // var.
+        let mut env = HashMap::new();
+        env.insert("LD_PRELOAD".to_string(), "/tmp/evil.so".to_string());
+        let err = sanitize_env(&env).expect_err("LD_PRELOAD must be rejected");
+        assert!(
+            err.contains("LD_PRELOAD"),
+            "expected error to mention LD_PRELOAD, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn sanitize_env_rejects_path_override() {
+        let mut env = HashMap::new();
+        env.insert("PATH".to_string(), "/tmp/evil".to_string());
+        let err = sanitize_env(&env).expect_err("PATH must be rejected");
+        assert!(err.contains("PATH"), "got: {err:?}");
+    }
+
+    #[test]
+    fn sanitize_env_allows_lang() {
+        let mut env = HashMap::new();
+        env.insert("LANG".to_string(), "en_US.UTF-8".to_string());
+        let out = sanitize_env(&env).expect("LANG is on the allowlist");
+        assert_eq!(out.get("LANG").map(String::as_str), Some("en_US.UTF-8"));
     }
 
     #[test]

@@ -50,6 +50,7 @@ fn main() {
         env: std::collections::HashMap::new(),
         reason: opts.reason.unwrap_or_default(),
         privileged: opts.privileged,
+        forward_agent: opts.forward_agent,
     };
 
     // Connect and send
@@ -156,6 +157,7 @@ struct Opts {
     session: String,
     print: bool,
     privileged: bool,
+    forward_agent: bool,
     pipeline: Vec<Vec<String>>,
 }
 
@@ -166,6 +168,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut session = String::from("sudo-request-cli");
     let mut print = false;
     let mut privileged = true;
+    let mut forward_agent = false;
     let mut argv = Vec::new();
     let mut i = 0;
 
@@ -186,6 +189,7 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
                 eprintln!("  --no-privilege   Run command without privilege escalation");
+                eprintln!("  --forward-agent  Forward the local SSH agent to the command (unprivileged only)");
                 eprintln!();
                 eprintln!("Pipeline example:");
                 eprintln!("  sudo-request --no-privilege ls /tmp '|' wc -l");
@@ -218,6 +222,9 @@ fn parse_args() -> Result<Opts, String> {
             "--no-privilege" => {
                 privileged = false;
             }
+            "--forward-agent" => {
+                forward_agent = true;
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option: {other}"));
             }
@@ -233,12 +240,20 @@ fn parse_args() -> Result<Opts, String> {
     // Split argv on '|' to build pipeline stages
     let pipeline = split_pipeline(argv);
 
+    if forward_agent && privileged {
+        return Err(
+            "--forward-agent is only allowed with --no-privilege (privileged commands cannot use the agent)"
+                .to_string(),
+        );
+    }
+
     Ok(Opts {
         socket,
         reason,
         session,
         print,
         privileged,
+        forward_agent,
         pipeline,
     })
 }

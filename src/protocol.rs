@@ -20,6 +20,12 @@ pub struct Request {
     pub reason: String,
     #[serde(default = "default_true")]
     pub privileged: bool,
+    /// Inject the daemon's snapshotted SSH_AUTH_SOCK into the child env
+    /// so unprivileged commands (e.g. `git clone`) can reach the user's
+    /// agent. Honored only when `privileged` is false; the daemon
+    /// rejects the request otherwise.
+    #[serde(default)]
+    pub forward_agent: bool,
 }
 
 fn default_true() -> bool {
