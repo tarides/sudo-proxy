@@ -62,11 +62,21 @@ impl HostsConfig {
 
     /// Return the remote UID for `host`, using the cached value if available,
     /// otherwise resolving via `ssh HOST id -u` and persisting the result.
+    ///
+    /// The uid string ends up interpolated into a path
+    /// (`/run/user/{uid}/sudo-proxy.sock`) and into ssh's `-L` argument,
+    /// so a non-numeric value would produce a corrupt tunnel target. We
+    /// validate at both the resolve site (in case a malicious or
+    /// compromised SSH server returns garbage) AND when reading from
+    /// the cache (in case the file was hand-edited or written by an
+    /// older unvalidated build).
     pub fn resolve_uid(&mut self, host: &str) -> Result<String, String> {
         if let Some(info) = self.hosts.get(host) {
-            if !info.uid.is_empty() {
+            if is_valid_uid(&info.uid) {
                 return Ok(info.uid.clone());
             }
+            // A cached non-numeric uid (e.g. from a pre-fix build, or
+            // hand-edited config) is treated as missing and re-resolved.
         }
 
         let output = std::process::Command::new("ssh")
@@ -79,8 +89,10 @@ impl HostsConfig {
             ));
         }
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if uid.is_empty() {
-            return Err("ssh id -u returned empty output".to_string());
+        if !is_valid_uid(&uid) {
+            return Err(format!(
+                "ssh {host} id -u returned non-numeric uid: {uid:?}"
+            ));
         }
 
         let info = self
@@ -96,6 +108,37 @@ impl HostsConfig {
         self.save();
 
         Ok(uid)
+    }
+}
+
+/// A uid is valid if it's a non-empty ASCII-digit string of at most
+/// 10 chars (u32::MAX is `4294967295`, ten digits). The length cap
+/// keeps a malicious peer from filling our config with an arbitrarily
+/// long string that subsequently gets interpolated into paths and
+/// argvs.
+fn is_valid_uid(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_valid_uid_accepts_typical_uids() {
+        assert!(is_valid_uid("0"));
+        assert!(is_valid_uid("1000"));
+        assert!(is_valid_uid("4294967295")); // u32::MAX
+    }
+
+    #[test]
+    fn is_valid_uid_rejects_garbage() {
+        assert!(!is_valid_uid(""), "empty");
+        assert!(!is_valid_uid("0\nfoo"), "embedded newline");
+        assert!(!is_valid_uid("0/../etc"), "path traversal");
+        assert!(!is_valid_uid("1000 "), "trailing space (caller must trim)");
+        assert!(!is_valid_uid("abc"), "letters");
+        assert!(!is_valid_uid("12345678901"), "11 digits exceeds cap");
     }
 }
 

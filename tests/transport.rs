@@ -137,6 +137,38 @@ fn replaces_stale_socket_file() {
     }
 }
 
+/// Issue #13: a client that sends bytes but closes without a trailing
+/// newline must produce a specific error response, not the misleading
+/// "invalid JSON" path that downstream parsing would otherwise return.
+/// Empty connections (the case below) remain the silent success path.
+#[test]
+fn eof_without_newline_returns_error() {
+    use std::io::{BufRead, BufReader, Write};
+
+    let s = start_test_server(TestServerOpts::default());
+
+    let mut stream = UnixStream::connect(&s.socket_path).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(b"{\"id\":\"x\",\"pipeline\":[[\"true\"]]}").unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read response");
+    let parsed: serde_json::Value = serde_json::from_str(line.trim()).expect("parse");
+    assert_eq!(parsed["status"], "error", "got: {line:?}");
+    let msg = parsed["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("newline") || msg.contains("missing"),
+        "expected missing-newline error, got: {msg:?}"
+    );
+}
+
 /// A client that connects and immediately closes its end (read_line
 /// returns Ok(0)) must be handled silently — no panic, no half-baked
 /// response, daemon stays responsive to subsequent connections.

@@ -96,22 +96,21 @@ fn validate_request(req: &Request) -> Result<(), String> {
     Ok(())
 }
 
-/// Reject requests whose `time` is older than MAX_REQUEST_AGE. Performed at
-/// connection-handler entry, before any TTY contention, so a request's
-/// freshness is judged at acceptance rather than after waiting in line.
+/// Reject requests whose `time` is missing, malformed, or older than
+/// MAX_REQUEST_AGE. Performed at connection-handler entry, before any
+/// TTY contention, so a request's freshness is judged at acceptance
+/// rather than after waiting in line.
 fn check_freshness(req: &Request) -> Result<(), String> {
     if req.time.is_empty() {
-        return Ok(());
+        return Err("missing time field".to_string());
     }
-    // If we can't parse the time, we allow it (be lenient).
-    if let Some(age) = parse_age(&req.time) {
-        if age > MAX_REQUEST_AGE {
-            return Err(format!(
-                "request too old: {}s (max {}s)",
-                age.as_secs(),
-                MAX_REQUEST_AGE.as_secs()
-            ));
-        }
+    let age = parse_age(&req.time).ok_or_else(|| "malformed time field".to_string())?;
+    if age > MAX_REQUEST_AGE {
+        return Err(format!(
+            "request too old: {}s (max {}s)",
+            age.as_secs(),
+            MAX_REQUEST_AGE.as_secs()
+        ));
     }
     Ok(())
 }
@@ -161,18 +160,35 @@ fn parse_age(timestamp: &str) -> Option<Duration> {
     let (year, month, day) = (date_parts[0], date_parts[1], date_parts[2]);
     let (hour, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
 
-    // Days in each month (non-leap). Good enough for age checking.
-    let days_before_month: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    if month < 1 || month > 12 {
+    // Reject out-of-range components up front. Defence in depth: without
+    // these guards, year < 1970 underflows `(year - 1970)`, day == 0
+    // underflows `(day - 1)`, and an out-of-range month would index
+    // `days_before_month` out of bounds. A wrapped value cascades into
+    // `ts_secs` and a stale request can appear fresh (issue #11).
+    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
-    let mut days = (year - 1970) * 365 + (year - 1969) / 4;
-    days += days_before_month[(month - 1) as usize] + (day - 1);
+    // Allow sec == 60 for ISO 8601 leap-second tolerance.
+    if hour > 23 || min > 59 || sec > 60 {
+        return None;
+    }
+
+    // Days in each month (non-leap). Good enough for age checking.
+    let days_before_month: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
+    let mut days = year.checked_sub(1970)?.checked_mul(365)?
+        .checked_add(year.checked_sub(1969)? / 4)?;
+    days = days
+        .checked_add(days_before_month[(month - 1) as usize])?
+        .checked_add(day - 1)?;
     // Leap year correction for current year
     if month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
-        days += 1;
+        days = days.checked_add(1)?;
     }
-    let ts_secs = days * 86400 + hour * 3600 + min * 60 + sec;
+    let ts_secs = days
+        .checked_mul(86400)?
+        .checked_add(hour.checked_mul(3600)?)?
+        .checked_add(min.checked_mul(60)?)?
+        .checked_add(sec)?;
 
     let now_secs = now.as_secs();
     if ts_secs > now_secs {
@@ -643,7 +659,22 @@ fn read_request_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<V
         stream.set_read_timeout(Some(to))?;
 
         let n = match stream.read(&mut chunk) {
-            Ok(0) => return Ok(buf),
+            Ok(0) => {
+                // EOF. An empty buffer is the canonical "client closed
+                // before sending data" signal — handle_connection uses
+                // is_empty() to drop these silently. A non-empty buffer
+                // without a terminating newline is a protocol violation:
+                // surfacing a specific error keeps the size-cap and
+                // missing-newline cases from masquerading as "invalid
+                // JSON" downstream.
+                if buf.is_empty() {
+                    return Ok(buf);
+                }
+                return Err(io::Error::new(
+                    ErrorKind::InvalidData,
+                    "request missing trailing newline",
+                ));
+            }
             Ok(n) => n,
             // Per-syscall timeout: loop back so the deadline check at the
             // top of the loop converts a true deadline expiry into the
@@ -802,6 +833,20 @@ mod tests {
         assert!(parse_age("2026-04-30").is_none(), "missing T-separated time");
         assert!(parse_age("2026-04-30T12:00").is_none(), "incomplete time");
         assert!(parse_age("2026-13-01T00:00:00Z").is_none(), "month out of range");
+    }
+
+    /// Issue #11 regression: out-of-range components used to underflow
+    /// or wrap, letting a stale timestamp appear age-zero.
+    #[test]
+    fn parse_age_rejects_out_of_range_components() {
+        assert!(parse_age("1969-12-31T23:59:59Z").is_none(), "year < 1970");
+        assert!(parse_age("0001-01-01T00:00:00Z").is_none(), "ancient year");
+        assert!(parse_age("2026-00-15T00:00:00Z").is_none(), "month == 0");
+        assert!(parse_age("2026-01-00T00:00:00Z").is_none(), "day == 0");
+        assert!(parse_age("2026-01-32T00:00:00Z").is_none(), "day > 31");
+        assert!(parse_age("2026-02-30T25:00:00Z").is_none(), "hour > 23");
+        assert!(parse_age("2026-02-15T12:60:00Z").is_none(), "minute > 59");
+        assert!(parse_age("2026-02-15T12:00:61Z").is_none(), "sec > 60");
     }
 
     #[test]
