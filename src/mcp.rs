@@ -244,47 +244,61 @@ impl McpProxy {
     }
 }
 
+/// Render the MCP server's instructions block. Pure function over a
+/// `HostsConfig` snapshot and a "is the sudo-proxy binary reachable?"
+/// flag — the side-effectful pieces (config load, PATH lookup) live in
+/// `get_info` so this layer stays testable.
+///
+/// The format is part of the MCP user-visible surface: it lands in every
+/// Claude Code session's startup reminder. Changes here are observable
+/// to the model and the operator.
+pub fn build_instructions(config: &HostsConfig, have_proxy_binary: bool) -> String {
+    let mut instructions = String::from(
+        "Execute commands through sudo-proxy with human approval. \
+         Call start_server first if sudo-proxy is not running, \
+         then use execute to run commands.",
+    );
+    instructions.push_str(&format!(
+        "\n\nThis sudo-proxy-mcp is version {}.",
+        protocol::VERSION
+    ));
+
+    if !config.hosts.is_empty() {
+        instructions.push_str("\n\nKnown hosts:");
+        for (name, info) in &config.hosts {
+            instructions.push_str(&format!("\n- {name}"));
+            if !info.description.is_empty() {
+                instructions.push_str(&format!(": {}", info.description));
+            }
+            if !info.os.is_empty() {
+                instructions.push_str(&format!(" ({})", info.os));
+            }
+            if !info.version.is_empty() {
+                instructions.push_str(&format!(" [sudo-proxy {}]", info.version));
+            }
+            if !info.last_connected.is_empty() {
+                instructions.push_str(&format!(" [last: {}]", info.last_connected));
+            }
+        }
+    }
+
+    if !have_proxy_binary {
+        instructions.push_str(
+            "\n\nThe sudo-proxy binary is not installed. \
+             See https://github.com/tarides/sudo-proxy#installation for setup instructions.",
+        );
+    }
+
+    instructions
+}
+
 #[tool_handler]
 impl ServerHandler for McpProxy {
     fn get_info(&self) -> ServerInfo {
-        let mut instructions = String::from(
-            "Execute commands through sudo-proxy with human approval. \
-             Call start_server first if sudo-proxy is not running, \
-             then use execute to run commands.",
-        );
-        instructions.push_str(&format!(
-            "\n\nThis sudo-proxy-mcp is version {}.",
-            protocol::VERSION
-        ));
-
         let config = HostsConfig::load();
-        if !config.hosts.is_empty() {
-            instructions.push_str("\n\nKnown hosts:");
-            for (name, info) in &config.hosts {
-                instructions.push_str(&format!("\n- {name}"));
-                if !info.description.is_empty() {
-                    instructions.push_str(&format!(": {}", info.description));
-                }
-                if !info.os.is_empty() {
-                    instructions.push_str(&format!(" ({})", info.os));
-                }
-                if !info.version.is_empty() {
-                    instructions.push_str(&format!(" [sudo-proxy {}]", info.version));
-                }
-                if !info.last_connected.is_empty() {
-                    instructions.push_str(&format!(" [last: {}]", info.last_connected));
-                }
-            }
-        }
-
-        let has_binary = find_sibling_binary("sudo-proxy").is_some()
+        let have_proxy_binary = find_sibling_binary("sudo-proxy").is_some()
             || which("sudo-proxy").is_some();
-        if !has_binary {
-            instructions.push_str(
-                "\n\nThe sudo-proxy binary is not installed. \
-                 See https://github.com/tarides/sudo-proxy#installation for setup instructions.",
-            );
-        }
+        let instructions = build_instructions(&config, have_proxy_binary);
 
         ServerInfo {
             instructions: Some(instructions.into()),

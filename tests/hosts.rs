@@ -106,3 +106,91 @@ fn record_version_signals_change_and_ignores_empty() {
     );
     assert_eq!(cfg.hosts["h1"].version, "0.7.0");
 }
+
+// ---------------------------------------------------------------------------
+// MCP instructions block format
+//
+// The instructions string is the most user-visible surface of the
+// version-stamping feature — every Claude Code session reads it on
+// startup. Pin the format so a future refactor of `get_info` can't
+// silently drift away from what issue #4 spec'd.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "mcp")]
+mod instructions_format {
+    use super::*;
+    use sudo_proxy::mcp::build_instructions;
+    use sudo_proxy::protocol;
+
+    fn host(version: &str, os: &str, last: &str, description: &str) -> HostInfo {
+        HostInfo {
+            description: description.into(),
+            os: os.into(),
+            last_connected: last.into(),
+            uid: String::new(),
+            version: version.into(),
+        }
+    }
+
+    #[test]
+    fn empty_config_shows_mcp_version_and_no_known_hosts() {
+        let out = build_instructions(&HostsConfig::default(), true);
+        assert!(
+            out.contains(&format!("This sudo-proxy-mcp is version {}.", protocol::VERSION)),
+            "missing self-version line in: {out}"
+        );
+        assert!(
+            !out.contains("Known hosts:"),
+            "Known hosts: must not appear when config is empty: {out}"
+        );
+        assert!(
+            !out.contains("is not installed"),
+            "binary-installed hint must be omitted when have_proxy_binary=true: {out}"
+        );
+    }
+
+    #[test]
+    fn host_line_renders_desc_os_version_last_in_order() {
+        let mut cfg = HostsConfig::default();
+        cfg.hosts.insert(
+            "argos.ci.dev".into(),
+            host("0.6.0", "Ubuntu 24.04", "2026-05-04T16:16:20Z", "BlockSci CI server"),
+        );
+        let out = build_instructions(&cfg, true);
+        let expected =
+            "- argos.ci.dev: BlockSci CI server (Ubuntu 24.04) [sudo-proxy 0.6.0] [last: 2026-05-04T16:16:20Z]";
+        assert!(
+            out.contains(expected),
+            "expected substring not found.\nwant: {expected}\ngot:  {out}"
+        );
+    }
+
+    #[test]
+    fn host_line_with_only_last_connected_omits_empty_brackets() {
+        let mut cfg = HostsConfig::default();
+        cfg.hosts.insert(
+            "bare.example".into(),
+            host("", "", "2026-05-01T00:00:00Z", ""),
+        );
+        let out = build_instructions(&cfg, true);
+        let expected = "- bare.example [last: 2026-05-01T00:00:00Z]";
+        assert!(
+            out.contains(expected),
+            "expected substring not found.\nwant: {expected}\ngot:  {out}"
+        );
+        assert!(
+            !out.contains("[sudo-proxy ]"),
+            "must not emit an empty [sudo-proxy ] bracket: {out}"
+        );
+        assert!(!out.contains("()"), "must not emit empty parens: {out}");
+    }
+
+    #[test]
+    fn missing_proxy_binary_appends_install_hint() {
+        let out = build_instructions(&HostsConfig::default(), false);
+        assert!(
+            out.contains("The sudo-proxy binary is not installed."),
+            "install hint missing when have_proxy_binary=false: {out}"
+        );
+    }
+}
