@@ -45,6 +45,32 @@ system files, manage services, or run any other command — with the human
 always in the loop, even when Claude Code is run with
 `--dangerously-skip-permissions`.
 
+## Compared to other tools
+
+Detailed write-ups in [COMPARISON.md](COMPARISON.md). One-liners:
+
+### Direct alternatives
+
+| Tool | One-line comparison |
+|---|---|
+| [mcp-firewall](https://github.com/ressl/mcp-firewall) | Generic MCP proxy with policy and secret scanning; no privilege escalation. |
+| [mac-shell-mcp](https://github.com/cfdude/mac-shell-mcp) | macOS-only MCP shell with whitelist + approval; no sudo, no remote. |
+| [code-sandbox-mcp](https://github.com/Automata-Labs-team/code-sandbox-mcp) | Runs code inside Docker; isolates instead of approving; no privilege escalation. |
+| [Anthropic sandbox-runtime](https://code.claude.com/docs/en/sandboxing) | Confines the Bash tool with OS-level sandboxing; sandbox, not approval gate. |
+| [AgentSudo](https://agentsudo.dev/) | Python library guarding agent-framework tool calls; not OS commands. |
+
+### Adjacent and building-block tools
+
+| Tool | One-line comparison |
+|---|---|
+| [LangGraph HITL middleware](https://docs.langchain.com/oss/python/langchain/human-in-the-loop) | Framework-internal approve/edit/reject gate; no OS layer, LangGraph-only. |
+| [AgentWard](https://www.agentward.ai/) | Commercial permission-enforcement platform for AI agents; broader scope, no privilege focus. |
+| [Permit.io HITL](https://www.permit.io/blog/human-in-the-loop-for-ai-agents-best-practices-frameworks-use-cases-and-demo) | Authorization platform with HITL workflow; governance layer above runtime. |
+| [pkttyagent](https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html) | Polkit textual auth agent; sudo-proxy explicitly rejects this route, see README. |
+| `sudo` + sudoers | OS baseline for escalation; no AI-aware approval surface or audit trail. |
+| [OpenSnitch](https://github.com/evilsocket/opensnitch) | Interactive per-connection network consent; same UX pattern, different domain. |
+| [doas](https://man.openbsd.org/doas) | Minimalist sudo alternative; same OS layer, no AI integration. |
+
 ## Installation
 
 ### From source (with Rust toolchain)
