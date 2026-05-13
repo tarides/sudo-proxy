@@ -124,6 +124,24 @@ fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Log the underlying `io::Error` from a failed `Prompter::prompt`.
+///
+/// Verbose-only because a healthy daemon never hits this branch; when
+/// it does, the kind + raw_os_error is what distinguishes a benign
+/// `BrokenPipe` (peer hung up mid-prompt) from a residual
+/// background-pgrp `EIO` (the fix from PR #22 turned the daemon-stop
+/// hang into this errno; if it ever recurs, it shows up here).
+fn log_prompt_io_error(verbose: bool, id: &str, e: &io::Error) {
+    if !verbose {
+        return;
+    }
+    eprintln!(
+        "[{id}] prompt io error: kind={:?} raw_os_error={:?}: {e}",
+        e.kind(),
+        e.raw_os_error()
+    );
+}
+
 /// RAII decrement of `in_flight` on drop. Plain `fetch_sub` after
 /// `handle_connection` would be skipped on panic, leaking the counter.
 struct InFlightGuard {
@@ -586,7 +604,10 @@ fn handle_connection(
                 Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
                 Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                 Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
-                Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
+                Err(e) => {
+                    log_prompt_io_error(verbose, &req.id, &e);
+                    Response::error(&req.id, &format!("prompt error: {e}"))
+                }
             }
         }
     } else if confirm_unprivileged {
@@ -598,7 +619,10 @@ fn handle_connection(
             Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
             Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
             Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
-            Err(e) => Response::error(&req.id, &format!("prompt error: {e}")),
+            Err(e) => {
+                log_prompt_io_error(verbose, &req.id, &e);
+                Response::error(&req.id, &format!("prompt error: {e}"))
+            }
         }
     } else {
         // Non-privileged, no confirmation: print a one-line banner so the

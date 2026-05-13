@@ -16,7 +16,7 @@ use rmcp::service::RequestContext;
 use rmcp::{
     schemars, tool, tool_handler, tool_router, ErrorData as McpError, RoleServer, ServerHandler,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::hosts::HostsConfig;
@@ -25,8 +25,29 @@ use crate::server::default_socket_path;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-/// Default remote socket path — uses /run/user/<uid>/sudo-proxy.sock.
-/// The UID is resolved at connection time via `ssh host id -u`.
+
+/// Whether SUDO_PROXY_MCP_VERBOSE is set. MCP stdio is JSON-RPC over
+/// stdout, so the only safe trace sink is stderr. Cached once at first
+/// use; an unset value disables tracing with no per-call cost.
+fn mcp_verbose() -> bool {
+    use std::sync::OnceLock;
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("SUDO_PROXY_MCP_VERBOSE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// stderr-only trace, gated on `SUDO_PROXY_MCP_VERBOSE`. Prefix all
+/// messages with `[mcp]` so they're greppable in the user's terminal.
+macro_rules! mcp_trace {
+    ($($arg:tt)*) => {
+        if $crate::mcp::mcp_verbose() {
+            eprintln!("[mcp] {}", format!($($arg)*));
+        }
+    };
+}
 
 // ---------------------------------------------------------------------------
 // Tool parameter schemas
@@ -364,12 +385,69 @@ impl ServerHandler for McpProxy {
 // start_server implementations
 // ---------------------------------------------------------------------------
 
+/// Probe a socket for end-to-end readiness, not just file presence.
+///
+/// `local_sock.exists()` is true as soon as `sudo-proxy` (local) binds
+/// the listener — or, for `start_remote`, as soon as `ssh -L` sets up
+/// the local end of the forward. In the remote case the local socket
+/// exists *before* the remote daemon has bound its socket: SSH will
+/// accept a local connect, attempt to open a remote channel, find no
+/// listener on the remote socket, and close the local end. The window
+/// is sub-second on a warm SSH connection but easily widens to several
+/// seconds (cold key auth, ControlMaster setup, slow remote startup).
+///
+/// We distinguish the two states by *connecting* and then doing a small
+/// read with a tight timeout:
+///   - read timeout (no bytes available) → daemon is listening, ready
+///   - read EOF / error → tunnel was opened then closed: not ready
+///
+/// A real daemon will never spontaneously emit bytes before receiving a
+/// request, so a 100 ms quiet window is a reliable positive signal.
+async fn remote_socket_ready(local_sock: &Path) -> bool {
+    let mut stream = match tokio::time::timeout(
+        Duration::from_millis(500),
+        UnixStream::connect(local_sock),
+    )
+    .await
+    {
+        Ok(Ok(s)) => s,
+        Ok(Err(e)) => {
+            mcp_trace!("readiness: connect({}) failed: {e}", local_sock.display());
+            return false;
+        }
+        Err(_) => {
+            mcp_trace!("readiness: connect({}) timed out", local_sock.display());
+            return false;
+        }
+    };
+
+    let mut buf = [0u8; 1];
+    match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut buf)).await {
+        Err(_) => true, // read timeout — peer is silently waiting → ready
+        Ok(Ok(0)) => {
+            mcp_trace!("readiness: peer EOF on {} → not ready", local_sock.display());
+            false
+        }
+        Ok(Ok(_)) => {
+            // A daemon should never speak first. Treat unexpected data
+            // as "something is listening but it isn't us" — fail closed.
+            mcp_trace!("readiness: unexpected pre-request bytes on {}", local_sock.display());
+            false
+        }
+        Ok(Err(e)) => {
+            mcp_trace!("readiness: read({}) failed: {e}", local_sock.display());
+            false
+        }
+    }
+}
+
 async fn start_local() -> Result<CallToolResult, McpError> {
     let socket_path = default_socket_path();
+    mcp_trace!("start_local: socket={}", socket_path.display());
 
     // Check if already running
     if socket_path.exists() {
-        if UnixStream::connect(&socket_path).await.is_ok() {
+        if remote_socket_ready(&socket_path).await {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "sudo-proxy is already running at {}",
                 socket_path.display()
@@ -405,9 +483,18 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     cmd.spawn()
         .map_err(|e| McpError::internal_error(format!("spawn terminal: {e}"), None))?;
 
-    // Wait for socket to appear (up to 5s)
-    for _ in 0..50 {
-        if socket_path.exists() {
+    // Wait for socket to be actively listening (not just file-present).
+    // A stale socket file from a previous crashed daemon would otherwise
+    // satisfy `exists()` immediately and let us return success before the
+    // new daemon has bound. Up to 5 s total.
+    let start = std::time::Instant::now();
+    for tick in 0..50 {
+        if socket_path.exists() && remote_socket_ready(&socket_path).await {
+            mcp_trace!(
+                "start_local: ready after {} ms ({} ticks)",
+                start.elapsed().as_millis(),
+                tick + 1
+            );
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "sudo-proxy started in terminal at {}",
                 socket_path.display()
@@ -424,10 +511,15 @@ async fn start_local() -> Result<CallToolResult, McpError> {
 
 async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult, McpError> {
     let local_sock = crate::server::remote_socket_path(host);
+    mcp_trace!(
+        "start_remote: host={host} local_sock={} forward_agent={forward_agent}",
+        local_sock.display()
+    );
 
-    // Check if tunnel already exists
+    // Check if tunnel already exists and end-to-end ready (remote daemon
+    // is bound, not just the SSH forward).
     if local_sock.exists() {
-        if UnixStream::connect(&local_sock).await.is_ok() {
+        if remote_socket_ready(&local_sock).await {
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "SSH tunnel to {host} is already active at {}",
                 local_sock.display()
@@ -473,9 +565,20 @@ async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult,
     cmd.spawn()
         .map_err(|e| McpError::internal_error(format!("spawn terminal: {e}"), None))?;
 
-    // Wait for tunnel socket (up to 30s)
-    for _ in 0..300 {
-        if local_sock.exists() {
+    // Wait for the tunnel to be end-to-end ready. The local socket file
+    // appears as soon as ssh -L binds (well before the remote daemon
+    // has bound its socket); just checking exists() lets the first
+    // execute hit a tunnel whose remote end isn't there yet, get
+    // immediate EOF, and triggers the user-visible "blank window,
+    // Claude keeps retrying" failure. Probe instead.
+    let start = std::time::Instant::now();
+    for tick in 0..300 {
+        if local_sock.exists() && remote_socket_ready(&local_sock).await {
+            mcp_trace!(
+                "start_remote: tunnel to {host} ready after {} ms ({} ticks)",
+                start.elapsed().as_millis(),
+                tick + 1
+            );
             return Ok(CallToolResult::success(vec![Content::text(format!(
                 "SSH tunnel to {host} established at {}",
                 local_sock.display()
@@ -501,40 +604,105 @@ async fn send_request(
     req: &Request,
     total_timeout: Duration,
 ) -> Result<Response, String> {
+    // Bounded retry on transient EOF — the SSH `-L` forward accepts a
+    // local connect before the remote daemon has bound the remote
+    // socket, in which case the channel-open fails and we read 0 bytes.
+    // Up to ~2 s of 200 ms retries closes that window without delaying
+    // a genuinely-dead remote (the next attempt still surfaces the
+    // existing error).
+    const EOF_RETRY_BUDGET: Duration = Duration::from_secs(2);
+    const EOF_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+    let retry_deadline = tokio::time::Instant::now() + EOF_RETRY_BUDGET;
+    let mut eof_retries = 0u32;
+
+    loop {
+        match send_request_once(socket_path, req, total_timeout).await {
+            Ok(resp) => {
+                if eof_retries > 0 {
+                    mcp_trace!(
+                        "send_request: succeeded after {eof_retries} eof-retry"
+                    );
+                }
+                return Ok(resp);
+            }
+            Err(SendError::TransientEof)
+                if tokio::time::Instant::now() < retry_deadline =>
+            {
+                eof_retries += 1;
+                mcp_trace!("send_request: eof-retry #{eof_retries} (transient EOF)");
+                tokio::time::sleep(EOF_RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(SendError::TransientEof) => {
+                return Err(format!(
+                    "server closed connection without response (after {eof_retries} retries)"
+                ));
+            }
+            Err(SendError::Hard(msg)) => return Err(msg),
+        }
+    }
+}
+
+enum SendError {
+    /// Server closed the connection before sending a response. On an
+    /// SSH-forwarded socket this typically means the remote daemon
+    /// hadn't bound the remote socket yet; the next attempt may succeed.
+    TransientEof,
+    /// Anything else — propagate verbatim to the caller.
+    Hard(String),
+}
+
+async fn send_request_once(
+    socket_path: &Path,
+    req: &Request,
+    total_timeout: Duration,
+) -> Result<Response, SendError> {
     let deadline = tokio::time::Instant::now() + total_timeout;
 
     // Phase 1: Connect (5s — if a Unix socket takes longer, the tunnel is dead)
     let stream = tokio::time::timeout(PHASE_TIMEOUT, UnixStream::connect(socket_path))
         .await
         .map_err(|_| {
-            format!(
+            SendError::Hard(format!(
                 "connect timed out after {}s — tunnel to {} may be dead, try restarting the server",
                 PHASE_TIMEOUT.as_secs(),
                 socket_path.display()
-            )
+            ))
         })?
-        .map_err(|e| format!("connect to {}: {e}", socket_path.display()))?;
+        .map_err(|e| SendError::Hard(format!("connect to {}: {e}", socket_path.display())))?;
 
     let (read, mut write) = stream.into_split();
 
     // Phase 2: Write (5s)
-    let json = serde_json::to_string(req).map_err(|e| format!("serialize: {e}"))?;
-    tokio::time::timeout(PHASE_TIMEOUT, async {
+    let json = serde_json::to_string(req).map_err(|e| SendError::Hard(format!("serialize: {e}")))?;
+    let write_result: Result<(), SendError> = tokio::time::timeout(PHASE_TIMEOUT, async {
         write
             .write_all(format!("{json}\n").as_bytes())
             .await
-            .map_err(|e| format!("write: {e}"))?;
-        write.flush().await.map_err(|e| format!("flush: {e}"))?;
-        Ok::<(), String>(())
+            .map_err(|e| {
+                // A broken pipe on write is the SSH-channel-closed signal
+                // surfacing on the write side instead of the read side.
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    SendError::TransientEof
+                } else {
+                    SendError::Hard(format!("write: {e}"))
+                }
+            })?;
+        write
+            .flush()
+            .await
+            .map_err(|e| SendError::Hard(format!("flush: {e}")))?;
+        Ok(())
     })
     .await
     .map_err(|_| {
-        format!(
+        SendError::Hard(format!(
             "write timed out after {}s — server at {} may be unresponsive",
             PHASE_TIMEOUT.as_secs(),
             socket_path.display()
-        )
-    })??;
+        ))
+    })?;
+    write_result?;
 
     // Phase 3: Read (remaining time from user-specified timeout)
     let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -545,15 +713,15 @@ async fn send_request(
     tokio::time::timeout(remaining, reader.read_line(&mut line))
         .await
         .map_err(|_| {
-            format!(
+            SendError::Hard(format!(
                 "server did not respond within {}s — it may be busy with another command or waiting for user approval",
                 total_timeout.as_secs()
-            )
+            ))
         })?
-        .map_err(|e| format!("read: {e}"))?;
+        .map_err(|e| SendError::Hard(format!("read: {e}")))?;
 
     if line.is_empty() {
-        return Err("server closed connection without response".to_string());
+        return Err(SendError::TransientEof);
     }
 
     let trimmed = line.trim();
@@ -569,10 +737,10 @@ async fn send_request(
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "unknown".to_string());
-        format!(
+        SendError::Hard(format!(
             "parse response from sudo-proxy {peer_ver} (client sudo-proxy-mcp {}): {e}",
             protocol::VERSION
-        )
+        ))
     })
 }
 
