@@ -253,6 +253,14 @@ fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=3",
         "-o", "ExitOnForwardFailure=yes",
+        // Silence the "channel N: open failed: connect failed: open
+        // failed" lines that ssh prints to the terminal each time the
+        // MCP readiness probe connects to the local end of -L before
+        // the remote sudo-proxy has bound its socket. Channel-open
+        // failures log at INFO; LogLevel=ERROR drops them while keeping
+        // auth failures, host-key mismatches, and other real errors
+        // visible.
+        "-o", "LogLevel=ERROR",
         "-L", &tunnel,
     ];
     if forward_agent {
