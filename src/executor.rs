@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -93,9 +93,9 @@ pub fn which(name: &str) -> Option<PathBuf> {
 
 /// Execute a pipeline via pkexec (local/graphical mode).
 /// For multi-stage pipelines, wraps in `pkexec sh -c 'cmd1 | cmd2 | ...'`.
-pub fn exec_pkexec(req: &Request, env: &HashMap<String, String>) -> Response {
+pub fn exec_pkexec(req: &Request, env: &HashMap<String, String>, tty_lock: &Mutex<()>) -> Response {
     if req.pipeline.len() == 1 {
-        return exec_pkexec_stage(&req.pipeline[0], env, &req.id);
+        return exec_pkexec_stage(&req.pipeline[0], env, &req.id, tty_lock);
     }
 
     // Multi-stage: wrap entire pipeline in sh -c via pkexec
@@ -118,13 +118,13 @@ pub fn exec_pkexec(req: &Request, env: &HashMap<String, String>) -> Response {
         cmd.env("XAUTHORITY", v);
     }
 
-    run_single_command(&mut cmd, &req.id, exec_timeout())
+    run_single_command(&mut cmd, &req.id, exec_timeout(), Some(tty_lock))
 }
 
 /// Execute a pipeline via sudo (remote/TUI mode).
-pub fn exec_sudo(req: &Request, env: &HashMap<String, String>) -> Response {
+pub fn exec_sudo(req: &Request, env: &HashMap<String, String>, tty_lock: &Mutex<()>) -> Response {
     if req.pipeline.len() == 1 {
-        return exec_sudo_stage(&req.pipeline[0], env, &req.id);
+        return exec_sudo_stage(&req.pipeline[0], env, &req.id, tty_lock);
     }
 
     exec_pipeline(req, env, EscalationMode::Sudo)
@@ -147,6 +147,7 @@ fn exec_pkexec_stage(
     argv: &[String],
     env: &HashMap<String, String>,
     id: &str,
+    tty_lock: &Mutex<()>,
 ) -> Response {
     let mut cmd = Command::new("pkexec");
     for arg in argv {
@@ -170,13 +171,14 @@ fn exec_pkexec_stage(
         cmd.env("XAUTHORITY", v);
     }
 
-    run_single_command(&mut cmd, id, exec_timeout())
+    run_single_command(&mut cmd, id, exec_timeout(), Some(tty_lock))
 }
 
 fn exec_sudo_stage(
     argv: &[String],
     env: &HashMap<String, String>,
     id: &str,
+    tty_lock: &Mutex<()>,
 ) -> Response {
     let mut cmd = Command::new("sudo");
     for (k, v) in env {
@@ -193,7 +195,7 @@ fn exec_sudo_stage(
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    run_single_command(&mut cmd, id, exec_timeout())
+    run_single_command(&mut cmd, id, exec_timeout(), Some(tty_lock))
 }
 
 fn exec_direct_stage(
@@ -218,13 +220,24 @@ fn exec_direct_stage(
         }
     }
 
-    run_single_command(&mut cmd, id, exec_timeout())
+    run_single_command(&mut cmd, id, exec_timeout(), None)
 }
 
 /// Spawn `cmd`, drain stdout/stderr concurrently with caps, and wait for
 /// the child up to `timeout`. Kill the child on cap-hit or timeout so it
 /// doesn't outlive the daemon.
-fn run_single_command(cmd: &mut Command, id: &str, timeout: Duration) -> Response {
+/// `fg_lock` is `Some` for privileged children (sudo, pkexec) that need
+/// the controlling tty's foreground pgrp so sudo's `/dev/tty` password
+/// prompt doesn't EIO; the mutex serializes the swap against prompts
+/// (held by `server::handle_connection`). `None` for unprivileged
+/// children: they run with `stdin=null` and piped stdio, never read
+/// /dev/tty, and would needlessly serialize with daemon prompts.
+fn run_single_command(
+    cmd: &mut Command,
+    id: &str,
+    timeout: Duration,
+    fg_lock: Option<&Mutex<()>>,
+) -> Response {
     unsafe {
         cmd.pre_exec(|| {
             // New process group so kill_group can SIGKILL the entire
@@ -261,8 +274,10 @@ fn run_single_command(cmd: &mut Command, id: &str, timeout: Duration) -> Respons
     // Hand the controlling terminal's foreground to the child so reads
     // from /dev/tty (e.g. sudo's password prompt) don't raise SIGTTIN
     // and stop the child. Best-effort — no-op when the daemon has no
-    // controlling tty (headless / detached run).
-    let _fg = ForegroundGuard::take(cpid);
+    // controlling tty (headless / detached run). Skipped for
+    // unprivileged children: they don't read /dev/tty and the swap's
+    // shared `tty_lock` would needlessly queue them behind prompts.
+    let _fg = fg_lock.and_then(|m| ForegroundGuard::take(cpid, m));
 
     // Drain stdout/stderr in threads so a child filling its stderr pipe
     // doesn't block our read of stdout (or vice versa).
@@ -492,17 +507,6 @@ fn collect_pipeline_results(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Process-global serialization for foreground process-group swaps. Two
-/// concurrent foreground handoffs would race: the loser's child becomes
-/// background and a read from /dev/tty raises SIGTTIN, which by default
-/// *stops* the process — and tcsetpgrp does not auto-resume it. Holding
-/// this mutex for the lifetime of each ForegroundGuard makes sequential
-/// runs deterministic.
-fn fg_swap_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
 /// RAII handoff of the controlling tty's foreground process group.
 ///
 /// On `take`, opens /dev/tty, saves the current foreground pgid, and
@@ -511,21 +515,27 @@ fn fg_swap_lock() -> &'static Mutex<()> {
 /// it itself were in a background pgrp). On drop, the previous
 /// foreground is restored and the saved signal mask reinstated.
 ///
+/// Holds `tty_lock` (a per-server `Mutex<()>` owned by `server::run`) for
+/// its lifetime. The same lock is taken by the prompt path in `server`,
+/// so prompts and exec foreground-swaps are mutually exclusive — without
+/// that, an in-flight swap would leave the daemon in a background pgrp
+/// on /dev/tty and any concurrent prompt would EIO (PR #22 turned the
+/// prior SIGTTIN-stop into EIO).
+///
 /// Best-effort: returns `None` if the daemon has no controlling tty,
 /// or if `tcgetpgrp`/`tcsetpgrp` fails. In those cases the caller
 /// proceeds without the swap; kill-group reaping (via the `setpgid` in
 /// `pre_exec`) is independent and unaffected.
-struct ForegroundGuard {
-    // Held until drop — see fg_swap_lock for why.
-    _lock: MutexGuard<'static, ()>,
+struct ForegroundGuard<'a> {
+    _lock: MutexGuard<'a, ()>,
     tty_fd: libc::c_int,
     prev_pgrp: libc::pid_t,
     saved_mask: libc::sigset_t,
 }
 
-impl ForegroundGuard {
-    fn take(child_pgid: libc::pid_t) -> Option<Self> {
-        let lock = fg_swap_lock()
+impl<'a> ForegroundGuard<'a> {
+    fn take(child_pgid: libc::pid_t, tty_lock: &'a Mutex<()>) -> Option<Self> {
+        let lock = tty_lock
             .lock()
             .unwrap_or_else(|e| e.into_inner());
 
@@ -564,7 +574,7 @@ impl ForegroundGuard {
     }
 }
 
-impl Drop for ForegroundGuard {
+impl Drop for ForegroundGuard<'_> {
     fn drop(&mut self) {
         // Best-effort restore. Failures are silently ignored: the
         // daemon may have already lost the controlling tty (e.g. ssh

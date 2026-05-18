@@ -5,7 +5,7 @@ use std::io::ErrorKind;
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -47,6 +47,7 @@ fn refuses_to_clobber_active_server() {
     let sink = Arc::new(NoopResultSink);
     let shutdown = AtomicBool::new(false);
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let tty_lock = Arc::new(Mutex::new(()));
 
     let result = server::run(
         &path,
@@ -55,6 +56,7 @@ fn refuses_to_clobber_active_server() {
         sink,
         &shutdown,
         in_flight,
+        tty_lock,
     );
 
     let err = result.expect_err("second bind to active socket should fail");
@@ -84,10 +86,12 @@ fn replaces_stale_socket_file() {
     let prompter = Arc::new(common::ScriptedPrompter::new());
     let shutdown = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let tty_lock = Arc::new(Mutex::new(()));
 
     let p_for_thread = Arc::clone(&prompter);
     let s_for_thread = Arc::clone(&shutdown);
     let inflight_thread = Arc::clone(&in_flight);
+    let tty_lock_thread = Arc::clone(&tty_lock);
     let path_for_thread = path.clone();
 
     let handle = thread::spawn(move || {
@@ -102,6 +106,7 @@ fn replaces_stale_socket_file() {
             Arc::new(NoopResultSink),
             &s_for_thread,
             inflight_thread,
+            tty_lock_thread,
         )
     });
 

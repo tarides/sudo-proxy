@@ -394,6 +394,7 @@ pub fn run(
     result_sink: Arc<dyn ResultSink>,
     shutdown: &AtomicBool,
     in_flight: Arc<AtomicUsize>,
+    tty_lock: Arc<Mutex<()>>,
 ) -> std::io::Result<()> {
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
@@ -408,7 +409,6 @@ pub fn run(
 
     let our_uid = unsafe { libc::getuid() };
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(Instant::now)));
-    let tty_lock = Arc::new(Mutex::new(()));
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -592,16 +592,21 @@ fn handle_connection(
     let resp = if req.privileged {
         if pkexec_only && mode == Mode::Local {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
-            exec_pkexec(&req, &env)
+            exec_pkexec(&req, &env, &tty_lock)
         } else {
-            // Hold the TTY lock only across the prompt; release it before exec
-            // so concurrent execs don't queue behind each other.
+            // The TTY lock is shared with `executor::ForegroundGuard`, so a
+            // prompt blocks until any in-flight exec has released the
+            // foreground pgrp. Without that, the daemon would be in a
+            // background pgrp on /dev/tty during the prompt and reads /
+            // writes would EIO (PR #22 turned the prior SIGTTIN stop into
+            // EIO). Released before exec so the same lock can be re-taken
+            // by ForegroundGuard for the swap.
             let prompt_result = {
                 let _g = lock_recover(&tty_lock);
                 prompter.prompt(&req, PROMPT_TIMEOUT)
             };
             match prompt_result {
-                Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env),
+                Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env, &tty_lock),
                 Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                 Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
                 Err(e) => {

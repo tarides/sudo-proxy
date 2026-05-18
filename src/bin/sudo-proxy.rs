@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use sudo_proxy::mode::Mode;
 use sudo_proxy::server;
@@ -73,6 +73,7 @@ fn main() {
     let sink: Arc<dyn ResultSink> = Arc::new(TtyResultSink);
     let shutdown = AtomicBool::new(false);
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let tty_lock = Arc::new(Mutex::new(()));
 
     let config = server::ServerConfig {
         mode,
@@ -89,6 +90,7 @@ fn main() {
         sink,
         &shutdown,
         in_flight,
+        tty_lock,
     ) {
         eprintln!("error: {e}");
         // Only remove the socket file if it is ours. AddrInUse means

@@ -156,6 +156,58 @@ fn unprivileged_runs_during_privileged_prompt() {
     assert_eq!(resp_a.status, Status::Denied);
 }
 
+/// Regression: a privileged prompt must not start while another request's
+/// privileged exec holds the controlling tty's foreground pgrp. Before the
+/// fix, the prompt's `tty_lock` and the executor's `fg_swap_lock` were
+/// separate mutexes, so prompt B could acquire its lock while exec A's
+/// ForegroundGuard had put the daemon in a background pgrp on /dev/tty —
+/// PR #22's SIG_IGN of SIGTTIN/SIGTTOU then turned the prompt's tty I/O
+/// into EIO, surfaced to the client as "prompt error: I/O error (os
+/// error 5)". After the fix, both paths share the server's `tty_lock`
+/// so the prompt waits for the in-flight exec to release.
+#[test]
+fn privileged_prompt_waits_for_in_flight_exec() {
+    let s = start_test_server(TestServerOpts::default());
+    s.prompter
+        .set_response(|_| (Duration::ZERO, PromptResult::Denied));
+
+    // Hold the server's tty lock in a separate thread to stand in for an
+    // in-flight `exec_sudo` (whose ForegroundGuard would take the same
+    // lock). Real privileged exec is awkward in unit tests because it
+    // shells out to `sudo`; the lock itself is what we care about.
+    let hold = Duration::from_millis(500);
+    let lock_thread = {
+        let lock = Arc::clone(&s.tty_lock);
+        thread::spawn(move || {
+            let _g = lock.lock().unwrap_or_else(|e| e.into_inner());
+            thread::sleep(hold);
+        })
+    };
+
+    // Let the holder grab the lock before issuing the request.
+    thread::sleep(Duration::from_millis(50));
+
+    let sent_at = Instant::now();
+    let mut req = make_req("waits-B", vec![vec!["true"]]);
+    req.privileged = true;
+    let resp = s.send(&req);
+    lock_thread.join().unwrap();
+
+    assert_eq!(resp.status, Status::Denied);
+    let b_call = s
+        .prompter
+        .calls()
+        .into_iter()
+        .find(|c| c.req.id == "waits-B")
+        .expect("B prompter call recorded");
+    let wait = b_call.at.duration_since(sent_at);
+    assert!(
+        wait >= Duration::from_millis(300),
+        "B's prompt fired {:?} after send; expected ≥300ms because the tty lock was held for ~500ms",
+        wait
+    );
+}
+
 #[test]
 fn prompter_returns_timeout_propagates_to_client() {
     let s = start_test_server(TestServerOpts::default());

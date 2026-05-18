@@ -118,6 +118,7 @@ pub struct TestServer {
     pub prompter: Arc<ScriptedPrompter>,
     pub sink: Arc<RecordingSink>,
     pub in_flight: Arc<AtomicUsize>,
+    pub tty_lock: Arc<Mutex<()>>,
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     _tempdir: TempDir,
@@ -130,11 +131,13 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
     let sink = Arc::new(RecordingSink::new());
     let shutdown = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
+    let tty_lock = Arc::new(Mutex::new(()));
 
     let prompter_arc = Arc::clone(&prompter);
     let sink_arc = Arc::clone(&sink);
     let sh_arc = Arc::clone(&shutdown);
     let inflight_arc = Arc::clone(&in_flight);
+    let tty_lock_arc = Arc::clone(&tty_lock);
     let path = socket_path.clone();
 
     let handle = thread::spawn(move || {
@@ -154,6 +157,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             sink_arc,
             &sh_arc,
             inflight_arc,
+            tty_lock_arc,
         );
     });
 
@@ -180,6 +184,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
         prompter,
         sink,
         in_flight,
+        tty_lock,
         shutdown,
         handle: Some(handle),
         _tempdir: tempdir,
