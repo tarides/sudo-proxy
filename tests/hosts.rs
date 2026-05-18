@@ -153,12 +153,12 @@ mod instructions_format {
     fn host_line_renders_desc_os_version_last_in_order() {
         let mut cfg = HostsConfig::default();
         cfg.hosts.insert(
-            "argos.ci.dev".into(),
-            host("0.6.0", "Ubuntu 24.04", "2026-05-04T16:16:20Z", "BlockSci CI server"),
+            "host-a.example".into(),
+            host("0.6.0", "Ubuntu 24.04", "2026-05-04T16:16:20Z", "example CI server"),
         );
         let out = build_instructions(&cfg, true);
         let expected =
-            "- argos.ci.dev: BlockSci CI server (Ubuntu 24.04) [sudo-proxy 0.6.0] [last: 2026-05-04T16:16:20Z]";
+            "- host-a.example: example CI server (Ubuntu 24.04) [sudo-proxy 0.6.0] [last: 2026-05-04T16:16:20Z]";
         assert!(
             out.contains(expected),
             "expected substring not found.\nwant: {expected}\ngot:  {out}"
