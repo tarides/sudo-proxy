@@ -13,7 +13,9 @@ struct Opts {
     login: Option<String>,
     pkexec: bool,
     verbose: bool,
-    confirm_unprivileged: bool,
+    /// `None` = take the default from `hosts.json` (`policy.confirm_unprivileged`).
+    /// `Some(_)` = an explicit CLI flag was passed and overrides the file.
+    confirm_unprivileged: Option<bool>,
     forward_agent: bool,
 }
 
@@ -75,11 +77,20 @@ fn main() {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
+    // Resolve the per-host policy: explicit CLI flag wins; otherwise the
+    // persisted `policy.confirm_unprivileged` in hosts.json; otherwise the
+    // built-in default (on).
+    let confirm_unprivileged = opts.confirm_unprivileged.unwrap_or_else(|| {
+        sudo_proxy::hosts::HostsConfig::load()
+            .policy
+            .confirm_unprivileged
+    });
+
     let config = server::ServerConfig {
         mode,
         pkexec_only: opts.pkexec,
         verbose: opts.verbose,
-        confirm_unprivileged: opts.confirm_unprivileged,
+        confirm_unprivileged,
         ..Default::default()
     };
 
@@ -111,10 +122,9 @@ fn parse_args(args: &[String]) -> Opts {
     let mut login = None;
     let mut pkexec = false;
     let mut verbose = false;
-    // Confirmation for unprivileged commands is on by default. The
-    // `--confirm-unprivileged` flag is now a no-op kept for backwards
-    // compatibility; pass `--no-confirm-unprivileged` to skip the gate.
-    let mut confirm_unprivileged = true;
+    // Tri-state: None means "no CLI flag passed, use hosts.json policy",
+    // Some(_) means an explicit flag overrides the file.
+    let mut confirm_unprivileged: Option<bool> = None;
     let mut forward_agent = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -133,9 +143,8 @@ fn parse_args(args: &[String]) -> Opts {
             }
             "--pkexec" => pkexec = true,
             "--verbose" | "-v" => verbose = true,
-            // Accepted for backwards compat — confirmation is now on by default.
-            "--confirm-unprivileged" => confirm_unprivileged = true,
-            "--no-confirm-unprivileged" => confirm_unprivileged = false,
+            "--confirm-unprivileged" => confirm_unprivileged = Some(true),
+            "--no-confirm-unprivileged" => confirm_unprivileged = Some(false),
             "--forward-agent" => forward_agent = true,
             "--version" | "-V" => {
                 println!("sudo-proxy {}", env!("CARGO_PKG_VERSION"));
@@ -154,7 +163,7 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("  --pkexec                    Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
                 eprintln!("  --verbose, -v               Print startup info and log each request to stderr");
                 eprintln!("  --no-confirm-unprivileged   Skip the Y/N gate for unprivileged commands (batch/automation)");
-                eprintln!("  --confirm-unprivileged      No-op (kept for backwards compat — this is now the default)");
+                eprintln!("  --confirm-unprivileged      Force the Y/N gate for unprivileged commands even if hosts.json says otherwise");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 std::process::exit(0);

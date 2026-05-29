@@ -34,6 +34,10 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
 #[derive(Debug, PartialEq)]
 pub enum PromptResult {
     Approved,
+    /// Approve this request *and* grant log-only mode for unprivileged
+    /// commands going forward (until reverted). Only emitted for
+    /// unprivileged requests; privileged prompts never offer this.
+    ApprovedAlways,
     Denied,
     Timeout,
 }
@@ -135,9 +139,18 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
         writeln!(tty_w, "Env:     {}", env_display.join(" "))?;
     }
 
+    let (question, choices) = if req.privileged {
+        ("Execute as root?", "[y/N]")
+    } else {
+        writeln!(
+            tty_w,
+            "{dim}a = always allow unprivileged on this host (saved to hosts.json){reset}"
+        )?;
+        ("Execute?", "[y/N/a]")
+    };
     write!(
         tty_w,
-        "Execute as root? [y/N] ({}s timeout, default=N) ",
+        "{question} {choices} ({}s timeout, default=N) ",
         timeout.as_secs()
     )?;
     tty_w.flush()?;
@@ -151,6 +164,10 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
         Some(b'y' | b'Y') => {
             writeln!(tty_w, "\n→ Approved")?;
             PromptResult::Approved
+        }
+        Some(b'a' | b'A') if !req.privileged => {
+            writeln!(tty_w, "\n→ Approved (always for this host)")?;
+            PromptResult::ApprovedAlways
         }
         Some(_) => {
             writeln!(tty_w, "\n→ Denied")?;

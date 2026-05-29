@@ -11,6 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
+use crate::hosts::HostsConfig;
 use crate::mode::Mode;
 use crate::protocol::{Request, Response};
 use crate::tui::{self, Prompter, ResultSink};
@@ -409,6 +410,9 @@ pub fn run(
 
     let our_uid = unsafe { libc::getuid() };
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(Instant::now)));
+    // Shared across handler threads so an interactive `a` (ApprovedAlways)
+    // can flip the gate for subsequent requests without restarting.
+    let confirm_unprivileged = Arc::new(AtomicBool::new(config.confirm_unprivileged));
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -460,7 +464,7 @@ pub fn run(
         let mode = config.mode;
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
-        let confirm_unprivileged = config.confirm_unprivileged;
+        let confirm_unprivileged = Arc::clone(&confirm_unprivileged);
         thread::spawn(move || {
             let _guard = guard;
             handle_connection(
@@ -486,7 +490,7 @@ fn handle_connection(
     mode: Mode,
     pkexec_only: bool,
     verbose: bool,
-    confirm_unprivileged: bool,
+    confirm_unprivileged: Arc<AtomicBool>,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
     seen_ids: Arc<Mutex<SeenIds>>,
@@ -607,7 +611,11 @@ fn handle_connection(
             };
             match prompt_result {
                 Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env, &tty_lock),
-                Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
+                // The TUI never emits ApprovedAlways for privileged
+                // requests; treat defensively as denial if it ever
+                // appears here so no policy can pre-grant root.
+                Ok(tui::PromptResult::ApprovedAlways)
+                | Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
                 Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
                 Err(e) => {
                     log_prompt_io_error(verbose, &req.id, &e);
@@ -615,13 +623,20 @@ fn handle_connection(
                 }
             }
         }
-    } else if confirm_unprivileged {
+    } else if confirm_unprivileged.load(Ordering::Relaxed) {
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
             prompter.prompt(&req, PROMPT_TIMEOUT)
         };
         match prompt_result {
             Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
+            Ok(tui::PromptResult::ApprovedAlways) => {
+                confirm_unprivileged.store(false, Ordering::Relaxed);
+                let mut hosts = HostsConfig::load();
+                hosts.policy.confirm_unprivileged = false;
+                hosts.save();
+                exec_direct(&req, &env)
+            }
             Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
             Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
             Err(e) => {

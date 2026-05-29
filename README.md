@@ -25,9 +25,15 @@ This flow is identical for local and remote hosts.
 **Non-privileged mode** (`privileged: false` in the request):
 runs the command directly as the current user, without sudo. The TUI Y/N
 gate fires by default — same human review as the privileged path, just
-no password step. Pass `--no-confirm-unprivileged` to the server to skip
-the gate (useful for batch/automation flows where the operator has
-already accepted the risk).
+no password step. The prompt offers three keys: `y` to approve once,
+`N` (default) to deny, `a` to approve **and** mark the host as trusted
+for unprivileged commands. Picking `a` writes a `policy` block into
+`~/.config/sudo-proxy/hosts.json` (`{"confirm_unprivileged": false}`)
+and from that point on unprivileged commands just print a one-line
+banner — privileged commands still require a Y/N. Pass
+`--no-confirm-unprivileged` to skip the gate without persisting, or
+`--confirm-unprivileged` to force the gate even if the file says
+otherwise.
 
 ## Why not just use the Bash tool?
 
@@ -226,8 +232,11 @@ sudo-proxy --host remotehost
 sudo-proxy --host remotehost -v     # prints the ssh command before connecting
 
 # Skip the confirmation prompt for unprivileged commands
-# (default is to prompt for both privileged and unprivileged)
+# (default is to prompt for both; press `a` at a prompt to persist this
+# choice in hosts.json so future runs of the daemon skip the gate too)
 sudo-proxy --no-confirm-unprivileged
+# Force the gate even if hosts.json says otherwise
+sudo-proxy --confirm-unprivileged
 
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock
@@ -504,8 +513,11 @@ Functional but minimal.
 - TUI approval prompt + sudo for privilege escalation (local and remote)
 - Non-privileged mode (direct execution, no escalation) — also TUI-gated by default
 - `--verbose` / `-v` on server: prints startup info, logs each request
-- `--no-confirm-unprivileged` on server: skip the Y/N gate for unprivileged commands
-  (`--confirm-unprivileged` is accepted as a no-op for backwards compat)
+- Per-host policy in `hosts.json`: pressing `a` at an unprivileged prompt
+  writes `policy.confirm_unprivileged=false` so the daemon skips the gate
+  on this host from then on
+- `--no-confirm-unprivileged` / `--confirm-unprivileged` on server:
+  explicit overrides of the persisted policy
 - `--no-privilege` on client: sends request with `privileged: false`
 - `--host` flag on server: SSHs into remote, starts sudo-proxy, tunnels socket (used by MCP `start_server`)
 - `--print` mode for human-readable output on stdout

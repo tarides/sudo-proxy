@@ -23,9 +23,33 @@ pub struct HostInfo {
     pub version: String,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct Policy {
+    /// When `true`, unprivileged commands hit the TTY Y/N gate (today's
+    /// default). When `false`, they take the banner-only path. The
+    /// interactive `a` answer flips this to `false` and persists.
+    #[serde(default = "default_true")]
+    pub confirm_unprivileged: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            confirm_unprivileged: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct HostsConfig {
+    #[serde(default)]
     pub hosts: HashMap<String, HostInfo>,
+    #[serde(default)]
+    pub policy: Policy,
 }
 
 impl HostsConfig {
@@ -172,6 +196,53 @@ mod tests {
         assert!(!is_valid_uid("1000 "), "trailing space (caller must trim)");
         assert!(!is_valid_uid("abc"), "letters");
         assert!(!is_valid_uid("12345678901"), "11 digits exceeds cap");
+    }
+
+    #[test]
+    fn policy_defaults_to_confirm_when_field_absent() {
+        // An older hosts.json (no `policy` block) must round-trip with
+        // confirm_unprivileged=true so behaviour matches pre-policy builds.
+        let cfg: HostsConfig = serde_json::from_str(r#"{"hosts":{}}"#).unwrap();
+        assert!(cfg.policy.confirm_unprivileged);
+    }
+
+    #[test]
+    fn policy_with_confirm_false_loads() {
+        let cfg: HostsConfig = serde_json::from_str(
+            r#"{"hosts":{},"policy":{"confirm_unprivileged":false}}"#,
+        )
+        .unwrap();
+        assert!(!cfg.policy.confirm_unprivileged);
+    }
+
+    #[test]
+    fn policy_round_trips_through_serde() {
+        let mut cfg = HostsConfig::default();
+        assert!(cfg.policy.confirm_unprivileged);
+        cfg.policy.confirm_unprivileged = false;
+        let s = serde_json::to_string(&cfg).unwrap();
+        let back: HostsConfig = serde_json::from_str(&s).unwrap();
+        assert!(!back.policy.confirm_unprivileged);
+    }
+
+    #[test]
+    fn policy_save_load_round_trip_on_disk() {
+        let dir = std::env::temp_dir().join(format!(
+            "sudo-proxy-policy-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hosts.json");
+
+        let mut cfg = HostsConfig::default();
+        cfg.policy.confirm_unprivileged = false;
+        save_to(&path, &cfg).unwrap();
+
+        let s = std::fs::read_to_string(&path).unwrap();
+        let back: HostsConfig = serde_json::from_str(&s).unwrap();
+        assert!(!back.policy.confirm_unprivileged);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
