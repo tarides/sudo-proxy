@@ -1,6 +1,6 @@
 [package]
 name = "sudo-proxy"
-version = "0.10.2"
+version = "0.11.0"
 edition = "2021"
 license = "MIT"
 description = "Privileged command execution proxy with human approval via pkexec or sudo"
