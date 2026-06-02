@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use sudo_proxy::executor::{exec_direct, exec_timeout, MAX_OUTPUT_BYTES};
+use sudo_proxy::executor::{apply_login_env_defaults, exec_direct, exec_timeout, MAX_OUTPUT_BYTES};
 use sudo_proxy::protocol::{Request, Status};
 
 fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
@@ -159,6 +159,62 @@ fn pipeline_succeeds_without_guard_interference() {
     // "hi\n" is 3 bytes → wc -c outputs "3\n" (or similar).
     let s = String::from_utf8_lossy(&stdout);
     assert!(s.trim() == "3", "got: {:?}", s);
+}
+
+/// Issue #23: command-mode SSH skips PAM session, so the daemon's
+/// children would otherwise see no HOME/USER/LOGNAME/PATH. The helper
+/// populates them from /etc/passwd.
+#[test]
+fn login_env_defaults_populate_missing_keys() {
+    let mut env = HashMap::new();
+    apply_login_env_defaults(&mut env);
+
+    for key in ["HOME", "USER", "LOGNAME", "PATH"] {
+        let v = env.get(key).unwrap_or_else(|| panic!("missing {key}"));
+        assert!(!v.is_empty(), "{key} is empty");
+    }
+    assert_eq!(env["USER"], env["LOGNAME"], "USER and LOGNAME should match");
+    assert!(
+        env["PATH"].contains("/usr/bin"),
+        "PATH should contain a sane default, got {:?}",
+        env["PATH"]
+    );
+}
+
+/// Caller-supplied HOME must win over the daemon-derived default.
+#[test]
+fn login_env_defaults_do_not_clobber_caller_home() {
+    let mut env = HashMap::new();
+    env.insert("HOME".into(), "/sentinel/home".into());
+    apply_login_env_defaults(&mut env);
+    assert_eq!(env["HOME"], "/sentinel/home");
+    assert!(env.contains_key("USER"));
+    assert!(env.contains_key("PATH"));
+}
+
+/// End-to-end: an unprivileged exec receiving the daemon's defaults
+/// must see HOME/USER/LOGNAME/PATH in its environment.
+#[test]
+fn exec_direct_sees_login_env_defaults() {
+    if which_or_skip("env").is_none() {
+        eprintln!("skipping: env not on PATH");
+        return;
+    }
+
+    let req = make_req(vec![vec!["env"]]);
+    let mut env = HashMap::new();
+    apply_login_env_defaults(&mut env);
+    let resp = exec_direct(&req, &env);
+
+    assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
+    let stdout = String::from_utf8_lossy(&base64_decode(resp.stdout.as_deref().unwrap_or("")))
+        .into_owned();
+    for key in ["HOME=", "USER=", "LOGNAME=", "PATH="] {
+        assert!(
+            stdout.lines().any(|l| l.starts_with(key)),
+            "child env missing {key}; full output:\n{stdout}"
+        );
+    }
 }
 
 // -- helpers ----------------------------------------------------------------
