@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -68,6 +68,52 @@ pub fn sanitize_env(env: &HashMap<String, String>) -> Result<HashMap<String, Str
         out.insert(k.clone(), v.clone());
     }
     Ok(out)
+}
+
+/// Default PATH injected when none is set in the request. Mirrors
+/// `/etc/login.defs`'s ENV_PATH on Debian/Ubuntu.
+const DEFAULT_LOGIN_PATH: &str =
+    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+
+/// Login-shell env (HOME/USER/LOGNAME/PATH) for the daemon's effective
+/// uid. PAM's `session` stack would set these on an interactive SSH
+/// login, but command-mode SSH (`ssh host sudo-proxy`) bypasses it —
+/// so the daemon inherits a stripped env and any `env_clear()`'d child
+/// sees nothing. Computed once via getpwuid; cached in `OnceLock`.
+fn login_env_defaults() -> &'static HashMap<String, String> {
+    static CACHE: OnceLock<HashMap<String, String>> = OnceLock::new();
+    CACHE.get_or_init(|| {
+        let mut out = HashMap::new();
+        let pw = unsafe { libc::getpwuid(libc::geteuid()) };
+        if !pw.is_null() {
+            unsafe {
+                if let Ok(name) = std::ffi::CStr::from_ptr((*pw).pw_name).to_str() {
+                    if !name.is_empty() {
+                        out.insert("USER".into(), name.to_string());
+                        out.insert("LOGNAME".into(), name.to_string());
+                    }
+                }
+                if let Ok(dir) = std::ffi::CStr::from_ptr((*pw).pw_dir).to_str() {
+                    if !dir.is_empty() {
+                        out.insert("HOME".into(), dir.to_string());
+                    }
+                }
+            }
+        }
+        out.insert("PATH".into(), DEFAULT_LOGIN_PATH.into());
+        out
+    })
+}
+
+/// Fill in missing login env (HOME / USER / LOGNAME / PATH) from the
+/// daemon's /etc/passwd entry. Only inserts keys that aren't already
+/// set, so a caller-supplied HOME wins. Callers can't currently supply
+/// USER / LOGNAME / PATH (allowlist rejects them), so those are
+/// effectively always daemon-derived.
+pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
+    for (k, v) in login_env_defaults() {
+        env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
 }
 
 /// Resolve a command name to an absolute path by searching PATH.

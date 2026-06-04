@@ -564,7 +564,7 @@ fn handle_connection(
         return;
     }
 
-    let env = match sanitize_env(&req.env) {
+    let mut env = match sanitize_env(&req.env) {
         Ok(e) => e,
         Err(msg) => {
             let resp = Response::error(&req.id, &msg);
@@ -572,6 +572,11 @@ fn handle_connection(
             return;
         }
     };
+    // Command-mode SSH skips PAM session, so the daemon (and every
+    // env_clear()'d child) starts with no HOME/USER/LOGNAME/PATH.
+    // Inject defaults from /etc/passwd so opam/git/ssh stop silently
+    // misbehaving — see issue #23.
+    crate::executor::apply_login_env_defaults(&mut env);
 
     // Atomic check-and-insert: closes the TOCTOU window between
     // contains() and insert() that exists when two threads race the
