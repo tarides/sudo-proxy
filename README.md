@@ -79,13 +79,19 @@ Detailed write-ups in [COMPARISON.md](COMPARISON.md). One-liners:
 
 ## Installation
 
-### From source (with Rust toolchain)
+### From crates.io (with Rust toolchain)
 
 ```bash
 # Core binaries only (sudo-proxy, sudo-request, pkexec-cache)
-cargo install --git ssh://git@github.com/tarides/sudo-proxy.git
+cargo install sudo-proxy
 
 # Everything including the MCP server
+cargo install sudo-proxy --features mcp
+```
+
+### From git (development version)
+
+```bash
 cargo install --git ssh://git@github.com/tarides/sudo-proxy.git --features mcp
 ```
 
@@ -125,7 +131,7 @@ remote side are SSH access and the `sudo-proxy` binary in `$PATH`.
 Install all binaries and optionally set up polkit auth caching:
 
 ```bash
-cargo install --git ssh://git@github.com/tarides/sudo-proxy.git --features mcp
+cargo install sudo-proxy --features mcp
 
 # Optional: cache pkexec auth for ~5 minutes (like sudo)
 sudo pkexec-cache --create
