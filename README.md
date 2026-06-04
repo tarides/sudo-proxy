@@ -548,6 +548,21 @@ Functional but minimal.
 - Audit log to file
 - Per-session socket isolation
 
+## AI-assisted development
+
+sudo-proxy was developed with substantial AI assistance using
+[Claude Code](https://claude.com/claude-code). Commits where AI
+contributed materially carry a `Co-Authored-By` trailer naming the
+specific model. All design decisions, threat modeling, and the final
+form of every committed change were reviewed and approved by the
+human maintainer, who takes responsibility for the codebase.
+
+This disclosure is provided in line with emerging industry practice
+around transparency about generative-AI involvement in software
+development. It is not a statement that the project is "AI-generated":
+the human-in-the-loop principle that the tool itself enforces at
+runtime is also the principle under which it was built.
+
 ## License
 
 [MIT](LICENSE)
