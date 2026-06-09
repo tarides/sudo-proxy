@@ -6,17 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Rung 1 — CI mechanization of static analysis
-
-Add a GitHub Actions workflow (the repo currently has only `release.yml`, so
-clippy/audit run only by hand) that runs on push/PR: `cargo clippy --all-targets
---all-features -D warnings`, `cargo audit`, and `cargo deny` (license/ban/source
-+ advisories — flagged missing in the audit). Optionally track the `unsafe`
-surface with `cargo geiger`. Goal: an F1-class regression (e.g. a display field
-that skips `has_dangerous_chars`) becomes a build failure, not a finding in the
-next audit. Strengthens assurance-case leaves under G3/G4/G6. Highest
-leverage-per-effort remaining step.
-
 ## Rung 2 — Reframe fuzz harnesses as named properties
 
 The existing ad-hoc fuzz tests in `src/executor.rs` / `src/server.rs`
