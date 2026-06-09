@@ -42,6 +42,36 @@ fn dangerous_argv_chars_rejected() {
     assert!(resp.message.as_deref().unwrap().contains("forbidden"));
 }
 
+// Fields rendered on the approval prompt (reason/host/session/id/version)
+// must be held to the same control-char/bidi sanitization as argv — an
+// attacker-controlled `reason` (the MCP `description`) carrying raw ANSI or
+// newlines could otherwise redraw the prompt and misrepresent the command.
+#[test]
+fn dangerous_reason_chars_rejected() {
+    let s = server();
+    let mut req = make_req("v-reason-ansi", vec![vec!["true"]]);
+    // ESC (0x1B) would let an attacker emit ANSI sequences on the prompt.
+    req.reason = "install updates\u{1b}[8mhidden".into();
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("reason"));
+    assert!(resp.message.as_deref().unwrap().contains("forbidden"));
+}
+
+#[test]
+fn dangerous_host_and_session_chars_rejected() {
+    let s = server();
+    // A direct socket client bypasses client-side validate_host, so the
+    // daemon must reject control/bidi in host and session itself.
+    let mut req = make_req("v-host-ctrl", vec![vec!["true"]]);
+    req.host = "evil\rhost".into();
+    assert_eq!(s.send(&req).status, Status::Error);
+
+    let mut req = make_req("v-session-bidi", vec![vec!["true"]]);
+    req.session = "ses\u{202e}sion".into();
+    assert_eq!(s.send(&req).status, Status::Error);
+}
+
 #[test]
 fn dangerous_env_key_rejected() {
     let s = server();

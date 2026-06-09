@@ -31,6 +31,26 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
         .join(" | ")
 }
 
+/// Upper bound on the command string shown at the approval prompt. A caller
+/// could otherwise submit a multi-kilobyte argument that wraps over dozens of
+/// lines and pushes the `[y/N]` question off-screen, so the human approves
+/// without it in view. Bounded display keeps the prompt anchored; the marker
+/// makes truncation explicit so an over-long command reads as suspicious
+/// rather than benign.
+const MAX_DISPLAY_CMD_CHARS: usize = 1024;
+
+/// Truncate an approval-prompt command string to a bounded number of
+/// characters, appending an explicit marker when it was shortened.
+pub fn truncate_for_display(s: &str) -> String {
+    let count = s.chars().count();
+    if count <= MAX_DISPLAY_CMD_CHARS {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(MAX_DISPLAY_CMD_CHARS).collect();
+    let hidden = count - MAX_DISPLAY_CMD_CHARS;
+    format!("{head}… [{hidden} more chars hidden — full command not shown]")
+}
+
 #[derive(Debug, PartialEq)]
 pub enum PromptResult {
     Approved,
@@ -109,7 +129,7 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     writeln!(
         tty_w,
         "Command: {bold}{}{reset}{agent_tag}",
-        pipeline_join(&req.pipeline)
+        truncate_for_display(&pipeline_join(&req.pipeline))
     )?;
 
     // Show resolved path for the first stage's command. Symlinks are
@@ -418,6 +438,20 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         write_resolves_line(&mut buf, cmd_name, "B", "D", "R").expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn truncate_for_display_bounds_long_commands() {
+        let short = "ls -l /tmp";
+        assert_eq!(truncate_for_display(short), short);
+
+        let long: String = std::iter::repeat('x').take(MAX_DISPLAY_CMD_CHARS + 500).collect();
+        let out = truncate_for_display(&long);
+        assert!(out.chars().count() < long.chars().count());
+        assert!(out.contains("more chars hidden"));
+        // Exactly at the boundary is not truncated.
+        let exact: String = std::iter::repeat('y').take(MAX_DISPLAY_CMD_CHARS).collect();
+        assert_eq!(truncate_for_display(&exact), exact);
     }
 
     #[test]

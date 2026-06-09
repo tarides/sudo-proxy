@@ -45,6 +45,32 @@ fn concurrent_save_is_atomic_and_loses_no_data() {
     }
 }
 
+/// hosts.json carries the host inventory, cached UIDs, and the
+/// confirm_unprivileged policy — it must be owner-only (0600), and its
+/// directory owner-only (0700), regardless of the caller's umask.
+#[test]
+fn saved_hosts_file_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Permissive umask: without explicit hardening the file would land 0644.
+    let prev = unsafe { libc::umask(0o022) };
+    let dir = tempfile::tempdir_in("/tmp").unwrap();
+    let path = dir.path().join("sub").join("hosts.json");
+
+    save_to(&path, &HostsConfig::default()).expect("save");
+
+    let file_mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    let dir_mode = std::fs::metadata(path.parent().unwrap())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    unsafe { libc::umask(prev) };
+
+    assert_eq!(file_mode, 0o600, "hosts.json must be 0600, got {file_mode:o}");
+    assert_eq!(dir_mode, 0o700, "config dir must be 0700, got {dir_mode:o}");
+}
+
 /// Sanity-check: the saved file matches what we wrote.
 #[test]
 fn save_then_load_roundtrips() {

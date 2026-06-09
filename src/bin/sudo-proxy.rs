@@ -200,19 +200,23 @@ fn ctrlc_cleanup(socket_path: PathBuf) -> Result<(), Box<dyn std::error::Error>>
 /// Register a signal handler that cleans up the socket file on
 /// SIGINT/SIGTERM/SIGHUP. Uses raw libc since we want minimal dependencies.
 unsafe fn signal_hook_cleanup(path: PathBuf) {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
     use std::sync::OnceLock;
 
-    static SOCKET_PATH: OnceLock<PathBuf> = OnceLock::new();
-    SOCKET_PATH.get_or_init(|| path);
+    // Store the NUL-terminated path built ONCE, at registration time. The
+    // handler must do no allocation: CString::new / to_string_lossy call
+    // malloc, which is not async-signal-safe and can deadlock if a signal
+    // interrupts an in-progress allocation.
+    static SOCKET_PATH: OnceLock<CString> = OnceLock::new();
+    if let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) {
+        SOCKET_PATH.get_or_init(|| c_path);
+    }
 
     unsafe extern "C" fn handler(sig: libc::c_int) {
-        // Only async-signal-safe operations here
-        if let Some(path) = SOCKET_PATH.get() {
-            // Best-effort removal using libc::unlink
-            let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes().to_vec());
-            if let Ok(c_path) = c_path {
-                libc::unlink(c_path.as_ptr());
-            }
+        // Only async-signal-safe operations here: a pointer read and unlink().
+        if let Some(c_path) = SOCKET_PATH.get() {
+            libc::unlink(c_path.as_ptr());
         }
         // Re-raise with default handler so wait status reflects the real signal
         libc::signal(sig, libc::SIG_DFL);

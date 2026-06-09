@@ -852,4 +852,95 @@ mod tests {
             let _ = c.wait();
         }
     }
+
+    // --- Security audit: randomized fuzz of shell_escape -----------------
+    //
+    // Invariant: for any input `s`, the string produced by shell_escape(s),
+    // when evaluated by /bin/sh as a single word, must reproduce `s`
+    // byte-for-byte. A break here is a pipeline command-injection (multi-
+    // stage requests are assembled into `sh -c '<stage> | <stage>'`).
+    //
+    // We feed a metacharacter-heavy alphabet (quotes, $, backticks,
+    // backslash, |, ;, &, spaces, parens, braces) — exactly the bytes that
+    // could break out of single-quoting. Newline/NUL/control chars are
+    // excluded because validate_request rejects them before shell_escape is
+    // ever reached, so they are not part of this function's input domain.
+    #[test]
+    fn fuzz_shell_escape_roundtrips_through_sh() {
+        use std::process::Command;
+
+        // Deterministic xorshift64* PRNG — reproducible, no external dep.
+        let mut state: u64 = 0x9E3779B97F4A7C15;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state = state.wrapping_mul(0x2545F4914F6CDD1D);
+            state
+        };
+
+        // Alphabet of shell-significant characters plus a few benign ones.
+        let alphabet: &[u8] = b"abc01 '\"\\$`|;&()<>*?{}[]=:,.-_/!#%^~@ \t";
+        let mut failures = Vec::new();
+
+        for _ in 0..5000 {
+            let len = (next() % 24) as usize;
+            let mut s = String::new();
+            for _ in 0..len {
+                let c = alphabet[(next() as usize) % alphabet.len()] as char;
+                s.push(c);
+            }
+            let esc = shell_escape(&s);
+            // Use printf %s so the escaped word is the sole argument.
+            let script = format!("printf %s {esc}");
+            let out = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(&script)
+                // Empty PATH: even if escaping failed, an injected word
+                // resolves to nothing executable rather than a real command.
+                .env("PATH", "")
+                .current_dir("/")
+                .output()
+                .expect("spawn /bin/sh");
+            if out.stdout != s.as_bytes() {
+                failures.push((s.clone(), esc.clone(), out.stdout.clone()));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "shell_escape round-trip failures (input, escaped, sh-output): {:?}",
+            &failures[..failures.len().min(5)]
+        );
+    }
+
+    // Targeted regression cases alongside the random sweep.
+    #[test]
+    fn shell_escape_known_injection_vectors_are_inert() {
+        use std::process::Command;
+        let vectors = [
+            "'; touch /tmp/sudo_proxy_pwned; '",
+            "$(touch /tmp/sudo_proxy_pwned)",
+            "`touch /tmp/sudo_proxy_pwned`",
+            "a'b\"c\\d",
+            "'\''",
+            "",
+            "$IFS",
+            "x|y",
+        ];
+        for v in vectors {
+            let esc = shell_escape(v);
+            let out = Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("printf %s {esc}"))
+                .env("PATH", "")
+                .current_dir("/")
+                .output()
+                .expect("spawn /bin/sh");
+            assert_eq!(
+                out.stdout,
+                v.as_bytes(),
+                "shell_escape failed to neutralize {v:?} -> {esc:?}"
+            );
+        }
+    }
 }

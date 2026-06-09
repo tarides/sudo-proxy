@@ -94,6 +94,24 @@ fn validate_request(req: &Request) -> Result<(), String> {
             return Err("env value contains forbidden characters".to_string());
         }
     }
+    // Every request-derived string rendered on the approval prompt must be
+    // held to the same control-char/bidi sanitization as argv and env. The
+    // prompt is the security gate; a field carrying raw ANSI/escape/newline
+    // bytes (e.g. `reason` from the MCP `description`, or `host`/`session`/
+    // `id`/`version` from a direct same-UID socket client that bypasses the
+    // client-side validate_host) could redraw the terminal and misrepresent
+    // the command being approved. See tui.rs::prompt_tty for the render.
+    for (field, value) in [
+        ("reason", &req.reason),
+        ("session", &req.session),
+        ("host", &req.host),
+        ("version", &req.version),
+        ("id", &req.id),
+    ] {
+        if has_dangerous_chars(value) {
+            return Err(format!("{field} contains forbidden control/bidi characters"));
+        }
+    }
     Ok(())
 }
 
@@ -913,5 +931,60 @@ mod tests {
         // the parser caps the age at zero.
         let age = parse_age("3000-01-01T00:00:00Z");
         assert_eq!(age, Some(Duration::from_secs(0)));
+    }
+
+    // --- Security audit: randomized fuzz of parse_age -------------------
+    //
+    // parse_age handles attacker-controlled `time` strings (the freshness /
+    // anti-replay gate). It must never panic and must never accept a stale
+    // timestamp as fresh via integer wrap (issue #11/#14 were exactly that).
+    // This sweep throws garbage and near-valid timestamps at it and asserts
+    // it stays panic-free and internally consistent.
+    #[test]
+    fn fuzz_parse_age_never_panics() {
+        let mut state: u64 = 0xDEADBEEFCAFEF00D;
+        let mut next = || {
+            state ^= state >> 12;
+            state ^= state << 25;
+            state ^= state >> 27;
+            state = state.wrapping_mul(0x2545F4914F6CDD1D);
+            state
+        };
+
+        let alphabet: &[u8] = b"0123456789-:TZ +.eE/\\\0\tx";
+        for _ in 0..20000 {
+            let len = (next() % 40) as usize;
+            let mut s = String::new();
+            for _ in 0..len {
+                s.push(alphabet[(next() as usize) % alphabet.len()] as char);
+            }
+            // Must not panic for any input.
+            let _ = parse_age(&s);
+        }
+
+        // Structured near-valid timestamps with extreme components: still
+        // must not panic and must not under/overflow into a bogus age.
+        for &(y, mo, d, h, mi, se) in &[
+            (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
+            (1969, 12, 31, 23, 59, 59),
+            (u64::MAX, 12, 31, 23, 59, 60),
+            (1970, 13, 32, 24, 60, 61),
+            (1970, 1, 1, 0, 0, 0),
+            (9_999_999_999, 1, 1, 0, 0, 0),
+        ] {
+            let ts = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z");
+            let _ = parse_age(&ts); // no panic, no wrap
+        }
+    }
+
+    // A clearly-stale timestamp must be classified as old (well outside the
+    // freshness window) — i.e. integer-wrap must not make it look fresh.
+    #[test]
+    fn fuzz_parse_age_stale_is_not_fresh() {
+        let stale = parse_age("2000-01-01T00:00:00Z").expect("valid ts");
+        assert!(
+            stale.as_secs() > MAX_REQUEST_AGE.as_secs(),
+            "a year-2000 timestamp must be classified stale, got {stale:?}"
+        );
     }
 }
