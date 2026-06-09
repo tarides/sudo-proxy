@@ -473,12 +473,12 @@ mod tests {
         let short = "ls -l /tmp";
         assert_eq!(truncate_for_display(short), short);
 
-        let long: String = std::iter::repeat('x').take(MAX_DISPLAY_CMD_CHARS + 500).collect();
+        let long: String = "x".repeat(MAX_DISPLAY_CMD_CHARS + 500);
         let out = truncate_for_display(&long);
         assert!(out.chars().count() < long.chars().count());
         assert!(out.contains("more chars hidden"));
         // Exactly at the boundary is not truncated.
-        let exact: String = std::iter::repeat('y').take(MAX_DISPLAY_CMD_CHARS).collect();
+        let exact: String = "y".repeat(MAX_DISPLAY_CMD_CHARS);
         assert_eq!(truncate_for_display(&exact), exact);
     }
 

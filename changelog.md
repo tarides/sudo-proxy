@@ -21,6 +21,14 @@ leaves under G3/G4/G6.
   sources) over the full `--all-features` dependency tree, with a tight
   license allowlist so a new dependency license forces a review. Closes the
   audit's "cargo deny missing" gap.
+- `rust-toolchain.toml` — pins the toolchain (currently 1.96.0) so CI,
+  release builds, and local dev share one compiler. Without it, floating
+  `stable` + `-D warnings` lets each Rust release introduce lints that break
+  CI on unrelated PRs; bump deliberately. Pinning surfaced and fixed a handful
+  of newer-clippy findings in `src/` and `tests/` (manual `is_multiple_of`,
+  `new_without_default`, `items_after_test_module`, `useless_conversion`,
+  `collapsible_if`, manual `str::repeat`, `field_reassign_with_default`) — no
+  behaviour change.
 - The flaky `burst_connections_above_cap_get_busy_response` concurrency test is
   `--skip`ped in CI (its *setup* assertion is timing-flaky, not its security
   assertion); stabilizing it remains a separate backlog item.

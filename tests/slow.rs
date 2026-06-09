@@ -30,8 +30,10 @@ use common::*;
 #[test]
 #[ignore]
 fn request_queued_behind_slow_prompt_completes_normally() {
-    let mut opts = TestServerOpts::default();
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     s.prompter

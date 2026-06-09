@@ -12,15 +12,16 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# The Rust toolchain (and the clippy/rustfmt components) is pinned by
+# rust-toolchain.toml; rustup installs it automatically on the first cargo
+# invocation, so the compiling jobs below need no explicit toolchain step.
+
 jobs:
   lint:
     name: clippy
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
       - uses: Swatinem/rust-cache@v2
       # --all-features enables `mcp`, so the MCP server is linted too.
       - run: cargo clippy --all-targets --all-features -- -D warnings
@@ -30,7 +31,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Core build (no MCP) guards the no-feature path used by release.yml.
       - run: cargo build --release
@@ -63,13 +63,14 @@ jobs:
   geiger:
     name: cargo geiger (unsafe surface, informational)
     runs-on: ubuntu-latest
-    # Non-blocking: reports the unsafe surface without gating the build.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-geiger
+      # Informational only: geiger exits non-zero whenever it finds `unsafe`
+      # (this crate has plenty), so the step is allowed to fail without
+      # gating the build — the report stays visible in the job log.
       - run: cargo geiger --all-features
+        continue-on-error: true
