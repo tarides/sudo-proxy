@@ -1,0 +1,7 @@
+# Pinned toolchain so CI, release builds, and local dev all agree.
+# `clippy --all-targets --all-features -- -D warnings` runs in CI (see
+# .github/workflows/ci.yml), and a floating `stable` would let each new Rust
+# release introduce lints that break CI on unrelated PRs. Bump deliberately.
+[toolchain]
+channel = "1.96.0"
+components = ["clippy", "rustfmt"]

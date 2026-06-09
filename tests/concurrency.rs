@@ -69,8 +69,10 @@ fn long_exec_does_not_wedge_loop() {
         eprintln!("skipping: /bin/sleep not in PATH");
         return;
     }
-    let mut opts = TestServerOpts::default();
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     let path_a = s.socket_path.clone();
@@ -115,8 +117,10 @@ fn long_exec_does_not_wedge_loop() {
 /// no longer serializes ALL traffic behind the TTY.
 #[test]
 fn unprivileged_runs_during_privileged_prompt() {
-    let mut opts = TestServerOpts::default();
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     // Returning Denied avoids triggering exec_sudo for A (which would
@@ -228,8 +232,10 @@ fn prompter_returns_denied_propagates_to_client() {
 
 #[test]
 fn unprivileged_no_confirm_skips_prompter() {
-    let mut opts = TestServerOpts::default();
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     let resp = s.send(&make_req("noprompt-1", vec![vec!["true"]]));
@@ -308,8 +314,10 @@ fn concurrent_distinct_ids_succeed() {
         eprintln!("skipping: /bin/sleep not in PATH");
         return;
     }
-    let mut opts = TestServerOpts::default();
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     let n = 8;
@@ -343,9 +351,11 @@ fn concurrent_distinct_ids_succeed() {
 /// process from spawning thousands of threads by opening connections.
 #[test]
 fn burst_connections_above_cap_get_busy_response() {
-    let mut opts = TestServerOpts::default();
-    opts.max_in_flight = 4;
-    opts.confirm_unprivileged = false;
+    let opts = TestServerOpts {
+        max_in_flight: 4,
+        confirm_unprivileged: false,
+        ..Default::default()
+    };
     let s = start_test_server(opts);
 
     // Hold-until-released prompter so the test isn't racing the prompt

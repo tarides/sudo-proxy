@@ -152,6 +152,62 @@ fn is_valid_uid(s: &str) -> bool {
     !s.is_empty() && s.len() <= 10 && s.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// Compute the SSH target string from a host and an optional login user.
+/// Returns `login@host` if login is provided, otherwise just `host`.
+pub fn ssh_target(host: &str, login: Option<&str>) -> String {
+    match login {
+        Some(l) if !l.is_empty() => format!("{l}@{host}"),
+        _ => host.to_string(),
+    }
+}
+
+/// Atomic save: serialize, write to a per-process tempfile in the same
+/// directory, fsync, then rename over the destination. Concurrent writers
+/// won't tear the file — every reader sees either the previous valid
+/// contents or this writer's complete output.
+pub fn save_to(path: &Path, config: &HostsConfig) -> io::Result<()> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        // hosts.json holds the host inventory, cached remote UIDs, and the
+        // confirm_unprivileged policy — owner-private data. Keep the
+        // directory owner-only (0700) so other local users can't enumerate
+        // or read it, mirroring the socket-bind hardening in server.rs.
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+    let json = serde_json::to_string_pretty(config)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("hosts.json");
+    // Per-(pid, counter) tmp name so concurrent writers in the same
+    // process don't clobber each other's tmpfile before rename.
+    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
+
+    {
+        use std::io::Write;
+        // Create the tempfile 0600 up front (mode is applied subject to the
+        // umask) so the contents are never momentarily world-readable, then
+        // enforce 0600 explicitly to defeat a permissive umask. The mode
+        // survives the rename onto `path`.
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(json.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,60 +275,4 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-/// Compute the SSH target string from a host and an optional login user.
-/// Returns `login@host` if login is provided, otherwise just `host`.
-pub fn ssh_target(host: &str, login: Option<&str>) -> String {
-    match login {
-        Some(l) if !l.is_empty() => format!("{l}@{host}"),
-        _ => host.to_string(),
-    }
-}
-
-/// Atomic save: serialize, write to a per-process tempfile in the same
-/// directory, fsync, then rename over the destination. Concurrent writers
-/// won't tear the file — every reader sees either the previous valid
-/// contents or this writer's complete output.
-pub fn save_to(path: &Path, config: &HostsConfig) -> io::Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-        // hosts.json holds the host inventory, cached remote UIDs, and the
-        // confirm_unprivileged policy — owner-private data. Keep the
-        // directory owner-only (0700) so other local users can't enumerate
-        // or read it, mirroring the socket-bind hardening in server.rs.
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
-    }
-    let json = serde_json::to_string_pretty(config)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("hosts.json");
-    // Per-(pid, counter) tmp name so concurrent writers in the same
-    // process don't clobber each other's tmpfile before rename.
-    let seq = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!(".{stem}.tmp.{}.{seq}", std::process::id()));
-
-    {
-        use std::io::Write;
-        // Create the tempfile 0600 up front (mode is applied subject to the
-        // umask) so the contents are never momentarily world-readable, then
-        // enforce 0600 explicitly to defeat a permissive umask. The mode
-        // survives the rename onto `path`.
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)?;
-        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
-        f.write_all(json.as_bytes())?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)
 }

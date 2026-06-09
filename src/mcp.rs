@@ -125,6 +125,12 @@ pub struct McpProxy {
     tool_router: ToolRouter<Self>,
 }
 
+impl Default for McpProxy {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[tool_router]
 impl McpProxy {
     pub fn new() -> Self {
@@ -306,7 +312,7 @@ impl ServerHandler for McpProxy {
         let instructions = build_instructions(&config, have_proxy_binary);
 
         ServerInfo {
-            instructions: Some(instructions.into()),
+            instructions: Some(instructions),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -429,15 +435,13 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     let socket_path = default_socket_path();
     mcp_trace!("start_local: socket={}", socket_path.display());
 
-    // Check if already running
-    if socket_path.exists() {
-        if remote_socket_ready(&socket_path).await {
-            return Ok(CallToolResult::success(vec![Content::text(format!(
-                "sudo-proxy is already running at {}",
-                socket_path.display()
-            ))]));
-        }
-        // Stale socket — sudo-proxy will clean it up on start
+    // If a live socket already exists, report it. A stale socket falls
+    // through here and sudo-proxy cleans it up on start.
+    if socket_path.exists() && remote_socket_ready(&socket_path).await {
+        return Ok(CallToolResult::success(vec![Content::text(format!(
+            "sudo-proxy is already running at {}",
+            socket_path.display()
+        ))]));
     }
 
     // Find the sudo-proxy binary next to our own executable, or in PATH
