@@ -1,5 +1,7 @@
 # Security Audit — sudo-proxy
 
+[← README](../README.md) · see also [security.md](security.md)
+
 **Date:** 2026-06-09
 **Scope:** Full source tree (`src/`, binaries, dependencies). Comprehensive +
 adversarial methodology: per-boundary finders, each candidate finding attacked by
