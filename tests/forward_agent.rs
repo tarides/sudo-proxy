@@ -3,8 +3,6 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
 use sudo_proxy::executor::{exec_direct, sanitize_env};
 use sudo_proxy::protocol::{Request, Status};
 
@@ -28,12 +26,6 @@ fn unpriv_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
     let mut r = make_req(id, pipeline);
     r.privileged = false;
     r
-}
-
-fn decode_stdout(resp: &sudo_proxy::protocol::Response) -> String {
-    let b64 = resp.stdout.as_deref().unwrap_or("");
-    let bytes = B64.decode(b64).unwrap_or_default();
-    String::from_utf8(bytes).unwrap_or_default()
 }
 
 #[test]
@@ -169,8 +161,4 @@ fn forward_agent_injects_into_pipeline_stages() {
 
     assert_eq!(resp.status, Status::Ok);
     assert_eq!(decode_stdout(&resp).trim(), sentinel);
-}
-
-fn which_or_skip(name: &str) -> Option<std::path::PathBuf> {
-    sudo_proxy::executor::which(name)
 }

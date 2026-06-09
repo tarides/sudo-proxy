@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use sudo_proxy::mode::Mode;
 use sudo_proxy::protocol::{Request, Response};
 use sudo_proxy::server;
@@ -273,48 +275,11 @@ pub fn iso_offset(delta_secs: i64) -> String {
     iso_format((secs + delta_secs).max(0) as u64)
 }
 
-/// Inverse of the parser in src/server.rs::parse_age. Both sides use the
-/// approximate leap-day formula `(year - 1969) / 4`, so they roundtrip
-/// exactly across the era we care about.
+/// Format a Unix timestamp as ISO 8601 UTC. Shares the crate's date logic
+/// (`sudo_proxy::datetime`); agrees with the `server::parse_age` reverse
+/// parser for every timestamp in the era these tests exercise.
 pub fn iso_format(epoch_secs: u64) -> String {
-    let days = epoch_secs / 86400;
-    let hms = epoch_secs % 86400;
-    let hour = hms / 3600;
-    let min = (hms % 3600) / 60;
-    let sec = hms % 60;
-
-    let mut year = 1970u64;
-    loop {
-        let next = year + 1;
-        let next_start = (next - 1970) * 365 + (next - 1969) / 4;
-        if next_start > days {
-            break;
-        }
-        year = next;
-    }
-    let year_start = (year - 1970) * 365 + (year - 1969) / 4;
-    let mut day_of_year = days - year_start;
-
-    let days_before_month: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let is_leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
-
-    let mut month: u64 = 1;
-    for m in (1u64..=12).rev() {
-        let mut start = days_before_month[(m - 1) as usize];
-        if m > 2 && is_leap {
-            start += 1;
-        }
-        if day_of_year >= start {
-            month = m;
-            day_of_year -= start;
-            break;
-        }
-    }
-    let day = day_of_year + 1;
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month, day, hour, min, sec
-    )
+    sudo_proxy::datetime::epoch_to_iso(epoch_secs)
 }
 
 /// Block until `cond` returns true, or `deadline` passes.
@@ -327,6 +292,22 @@ pub fn wait_until<F: Fn() -> bool>(deadline: Duration, cond: F) -> bool {
         thread::sleep(Duration::from_millis(5));
     }
     cond()
+}
+
+/// `executor::which`, wrapped so a test can `return` early when a binary it
+/// depends on isn't on PATH.
+pub fn which_or_skip(name: &str) -> Option<PathBuf> {
+    sudo_proxy::executor::which(name)
+}
+
+/// Base64-decode a wire `stdout` field to raw bytes (empty on error).
+pub fn b64_decode(s: &str) -> Vec<u8> {
+    B64.decode(s).unwrap_or_default()
+}
+
+/// Decode a response's base64 `stdout` to a UTF-8 string (empty on error).
+pub fn decode_stdout(resp: &Response) -> String {
+    String::from_utf8(b64_decode(resp.stdout.as_deref().unwrap_or(""))).unwrap_or_default()
 }
 
 pub fn skip_if_no_sleep_binary() -> bool {

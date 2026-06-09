@@ -16,11 +16,10 @@ use sudo_proxy::server::default_socket_path;
 const DEFAULT_CLIENT_TIMEOUT_SECS: u64 = 600;
 
 fn client_timeout() -> Duration {
-    std::env::var("SUDO_REQUEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(Duration::from_secs(DEFAULT_CLIENT_TIMEOUT_SECS))
+    sudo_proxy::cli::env_timeout(
+        "SUDO_REQUEST_TIMEOUT_SECS",
+        Duration::from_secs(DEFAULT_CLIENT_TIMEOUT_SECS),
+    )
 }
 
 fn main() {
@@ -41,18 +40,15 @@ fn main() {
 
     let socket_path = opts.socket.unwrap_or_else(default_socket_path);
 
-    let req = Request {
-        id: uuid::Uuid::new_v4().to_string(),
-        host: hostname(),
-        session: opts.session,
-        time: now_iso8601(),
-        pipeline: opts.pipeline,
-        env: std::collections::HashMap::new(),
-        reason: opts.reason.unwrap_or_default(),
-        privileged: opts.privileged,
-        forward_agent: opts.forward_agent,
-        version: sudo_proxy::protocol::VERSION.to_string(),
-    };
+    let req = Request::new(
+        hostname(),
+        opts.session,
+        opts.pipeline,
+        std::collections::HashMap::new(),
+        opts.reason.unwrap_or_default(),
+        opts.privileged,
+        opts.forward_agent,
+    );
 
     // Connect and send
     let mut stream = match UnixStream::connect(&socket_path) {
@@ -175,10 +171,7 @@ fn parse_args() -> Result<Opts, String> {
 
     while i < args.len() {
         match args[i].as_str() {
-            "--version" | "-V" => {
-                println!("sudo-request {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
+            "--version" | "-V" => sudo_proxy::cli::print_version("sudo-request"),
             "--help" | "-h" => {
                 eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
                 eprintln!();
@@ -288,52 +281,3 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
-fn now_iso8601() -> String {
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    let secs = now.as_secs();
-
-    // Convert to UTC date/time
-    let days = secs / 86400;
-    let time_of_day = secs % 86400;
-    let hours = time_of_day / 3600;
-    let minutes = (time_of_day % 3600) / 60;
-    let seconds = time_of_day % 60;
-
-    // Date from days since epoch (simplified)
-    let (year, month, day) = days_to_ymd(days);
-
-    format!("{year:04}-{month:02}-{day:02}T{hours:02}:{minutes:02}:{seconds:02}Z")
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970;
-    loop {
-        let days_in_year = if is_leap(year) { 366 } else { 365 };
-        if days < days_in_year {
-            break;
-        }
-        days -= days_in_year;
-        year += 1;
-    }
-    let month_days: [u64; 12] = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 0;
-    for (i, &md) in month_days.iter().enumerate() {
-        if days < md {
-            month = i as u64 + 1;
-            break;
-        }
-        days -= md;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}

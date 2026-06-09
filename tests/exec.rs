@@ -6,6 +6,11 @@ use std::time::{Duration, Instant};
 use sudo_proxy::executor::{apply_login_env_defaults, exec_direct, exec_timeout, MAX_OUTPUT_BYTES};
 use sudo_proxy::protocol::{Request, Status};
 
+// Pulled in for the shared `which_or_skip` / `b64_decode` helpers only;
+// this binary keeps its own `make_req` (different signature), so we qualify
+// `common::` rather than glob-importing it.
+mod common;
+
 fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
     Request {
         id: format!("exec-{}", uuid::Uuid::new_v4()),
@@ -29,7 +34,7 @@ fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
 /// killed once the cap is hit.
 #[test]
 fn stdout_is_capped_at_max_output_bytes() {
-    if which_or_skip("yes").is_none() || which_or_skip("head").is_none() {
+    if common::which_or_skip("yes").is_none() || common::which_or_skip("head").is_none() {
         eprintln!("skipping: yes/head not on PATH");
         return;
     }
@@ -47,7 +52,7 @@ fn stdout_is_capped_at_max_output_bytes() {
 
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
     assert!(resp.stdout_truncated, "expected stdout_truncated=true");
-    let stdout = base64_decode(resp.stdout.as_deref().unwrap_or(""));
+    let stdout = common::b64_decode(resp.stdout.as_deref().unwrap_or(""));
     assert_eq!(
         stdout.len(),
         MAX_OUTPUT_BYTES,
@@ -66,7 +71,7 @@ fn stdout_is_capped_at_max_output_bytes() {
 /// EXEC_TIMEOUT. We override the env var so the test isn't 5 minutes.
 #[test]
 fn long_running_child_killed_after_timeout() {
-    if which_or_skip("sleep").is_none() {
+    if common::which_or_skip("sleep").is_none() {
         eprintln!("skipping: sleep not on PATH");
         return;
     }
@@ -102,7 +107,7 @@ fn long_running_child_killed_after_timeout() {
 /// and not orphan any of the children to PID 1.
 #[test]
 fn pipeline_timeout_kills_all_stages() {
-    if which_or_skip("sleep").is_none() {
+    if common::which_or_skip("sleep").is_none() {
         eprintln!("skipping: sleep not on PATH");
         return;
     }
@@ -155,7 +160,7 @@ fn pipeline_succeeds_without_guard_interference() {
     assert_eq!(resp.status, Status::Ok);
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.exit_code(), 0);
-    let stdout = base64_decode(resp.stdout.as_deref().unwrap_or(""));
+    let stdout = common::b64_decode(resp.stdout.as_deref().unwrap_or(""));
     // "hi\n" is 3 bytes → wc -c outputs "3\n" (or similar).
     let s = String::from_utf8_lossy(&stdout);
     assert!(s.trim() == "3", "got: {:?}", s);
@@ -196,7 +201,7 @@ fn login_env_defaults_do_not_clobber_caller_home() {
 /// must see HOME/USER/LOGNAME/PATH in its environment.
 #[test]
 fn exec_direct_sees_login_env_defaults() {
-    if which_or_skip("env").is_none() {
+    if common::which_or_skip("env").is_none() {
         eprintln!("skipping: env not on PATH");
         return;
     }
@@ -207,7 +212,7 @@ fn exec_direct_sees_login_env_defaults() {
     let resp = exec_direct(&req, &env);
 
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
-    let stdout = String::from_utf8_lossy(&base64_decode(resp.stdout.as_deref().unwrap_or("")))
+    let stdout = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or("")))
         .into_owned();
     for key in ["HOME=", "USER=", "LOGNAME=", "PATH="] {
         assert!(
@@ -218,16 +223,6 @@ fn exec_direct_sees_login_env_defaults() {
 }
 
 // -- helpers ----------------------------------------------------------------
-
-fn base64_decode(s: &str) -> Vec<u8> {
-    use base64::engine::general_purpose::STANDARD as B64;
-    use base64::Engine;
-    B64.decode(s).unwrap_or_default()
-}
-
-fn which_or_skip(name: &str) -> Option<std::path::PathBuf> {
-    sudo_proxy::executor::which(name)
-}
 
 struct EnvRestore(&'static str, Option<String>);
 impl Drop for EnvRestore {

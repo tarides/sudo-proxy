@@ -218,7 +218,7 @@ fn parse_age(timestamp: &str) -> Option<Duration> {
         .checked_add(days_before_month[(month - 1) as usize])?
         .checked_add(day - 1)?;
     // Leap year correction for current year
-    if month > 2 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+    if month > 2 && crate::datetime::is_leap(year) {
         days = days.checked_add(1)?;
     }
     let ts_secs = days

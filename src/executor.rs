@@ -29,11 +29,7 @@ const WAIT_POLL_INTERVAL: Duration = Duration::from_millis(20);
 /// Resolve the per-command execution timeout from the environment, or
 /// fall back to DEFAULT_EXEC_TIMEOUT.
 pub fn exec_timeout() -> Duration {
-    std::env::var("SUDO_PROXY_EXEC_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .map(Duration::from_secs)
-        .unwrap_or(DEFAULT_EXEC_TIMEOUT)
+    crate::cli::env_timeout("SUDO_PROXY_EXEC_TIMEOUT_SECS", DEFAULT_EXEC_TIMEOUT)
 }
 
 /// Only these env var names (or prefixes) are allowed through.

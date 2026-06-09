@@ -75,7 +75,7 @@ pub struct ExecuteParams {
     pub description: Option<String>,
 
     /// Privilege escalation (default: true)
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::protocol::default_true")]
     pub privileged: bool,
 
     /// Environment variables
@@ -87,10 +87,6 @@ pub struct ExecuteParams {
     /// Useful for `git clone` of private repos via SSH on a remote host.
     #[serde(default)]
     pub forward_agent: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -178,18 +174,15 @@ impl McpProxy {
             ));
         }
 
-        let req = Request {
-            id: uuid::Uuid::new_v4().to_string(),
-            host: params.host.unwrap_or_default(),
-            session: "sudo-proxy-mcp".to_string(),
-            time: now_iso8601(),
+        let req = Request::new(
+            params.host.unwrap_or_default(),
+            "sudo-proxy-mcp".to_string(),
             pipeline,
-            env: params.env.unwrap_or_default(),
-            reason: params.description.unwrap_or_default(),
-            privileged: params.privileged,
-            forward_agent: params.forward_agent,
-            version: protocol::VERSION.to_string(),
-        };
+            params.env.unwrap_or_default(),
+            params.description.unwrap_or_default(),
+            params.privileged,
+            params.forward_agent,
+        );
 
         let total_timeout = Duration::from_millis(timeout_ms);
         let result = send_request(&socket_path, &req, total_timeout).await;
@@ -241,16 +234,7 @@ impl McpProxy {
             return Ok(error_result(format!("invalid host: {e}")));
         }
         let mut config = HostsConfig::load();
-        let info = config
-            .hosts
-            .entry(params.host.clone())
-            .or_insert_with(|| crate::hosts::HostInfo {
-                description: String::new(),
-                os: String::new(),
-                last_connected: String::new(),
-                uid: String::new(),
-                version: String::new(),
-            });
+        let info = config.hosts.entry(params.host.clone()).or_default();
         if let Some(desc) = params.description {
             info.description = desc;
         }
@@ -880,51 +864,3 @@ fn touch_host(host: &str, version: &str) {
     config.save();
 }
 
-fn now_iso8601() -> String {
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (year, month, day) = days_to_ymd(days);
-
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970;
-    loop {
-        let diy = if is_leap(year) { 366 } else { 365 };
-        if days < diy {
-            break;
-        }
-        days -= diy;
-        year += 1;
-    }
-    let md: [u64; 12] = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 0;
-    for (i, &m) in md.iter().enumerate() {
-        if days < m {
-            month = i as u64 + 1;
-            break;
-        }
-        days -= m;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
-}
