@@ -58,3 +58,20 @@ Functional but minimal.
 - Risk scoring display
 - Audit log to file
 - Per-session socket isolation
+
+### Design note: allowlisting (when it lands)
+
+When command/argument allowlisting is built, allowlist concrete **argument
+patterns**, not command-name prefixes. CVE-2025-66032 (the "8 ways to pwn
+Claude Code" research) showed that prefix matching on allowlisted binaries is
+escapable because the binary does more than its name implies: `man --html=CMD`,
+`sort --compress-program=sh`, `sed s///e`, git abbreviated flags
+(`--upload-pa=`), `rg --pre=sh`, and bash `@P`/`$IFS` expansion all turn an
+innocuous-looking prefix into arbitrary execution. A policy framework must
+account for each binary's own flag parsing (abbreviations, `=value` forms, and
+exec-capable options) rather than trusting the leading tokens. This does not
+affect sudo-proxy today: there is no auto-approve path — every command hits the
+human TUI gate — and requests carry structured argv (never a shell string), so
+there is no prefix matcher or shell expansion to defeat. The risk reappears
+only if allowlisting (or a "remember this command" per-host policy) introduces
+an auto-approve surface.

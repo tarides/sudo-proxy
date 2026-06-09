@@ -3,7 +3,11 @@
 [← README](../README.md)
 
 For a point-in-time adversarial audit of the source tree, see
-[security-audit.md](security-audit.md).
+[security-audit.md](security-audit.md). For the longer-term plan to formalise
+this security model — from code review up to mechanized verification — see
+[formalisation-roadmap.md](formalisation-roadmap.md), the structured
+[threat-model.md](threat-model.md) (STRIDE + attack tree), and the GSN
+[assurance-case.md](assurance-case.md).
 
 **Environment:** the request `env` is gated by a hard allowlist
 (`LANG`, `LC_*`, `TZ`, `HOME`, `DEBIAN_FRONTEND`, `TERM`). Anything else —
