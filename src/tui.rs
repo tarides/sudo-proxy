@@ -31,6 +31,30 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
         .join(" | ")
 }
 
+/// Bold/dim/reset styling for the approval prompt — no color. All escapes are
+/// empty when NO_COLOR is set (https://no-color.org), so the prompt degrades to
+/// plain text. Output always targets /dev/tty, so this is the only gate needed.
+#[derive(Clone, Copy)]
+struct Style {
+    bold: &'static str,
+    dim: &'static str,
+    reset: &'static str,
+}
+
+fn style() -> Style {
+    style_for(std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()))
+}
+
+/// Pure split so the NO_COLOR mapping is unit-testable without mutating the
+/// process-wide environment.
+fn style_for(no_color: bool) -> Style {
+    if no_color {
+        Style { bold: "", dim: "", reset: "" }
+    } else {
+        Style { bold: "\x1b[1m", dim: "\x1b[2m", reset: "\x1b[0m" }
+    }
+}
+
 /// Upper bound on the command string shown at the approval prompt. A caller
 /// could otherwise submit a multi-kilobyte argument that wraps over dozens of
 /// lines and pushes the `[y/N]` question off-screen, so the human approves
@@ -101,8 +125,8 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;
     let tty_r = File::open("/dev/tty")?;
 
-    let bold = "\x1b[1m";
-    let reset = "\x1b[0m";
+    let st = style();
+    let Style { bold, dim, reset } = st;
 
     writeln!(tty_w, "\n{bold}━━━ Privilege Request ━━━{reset}")?;
     writeln!(
@@ -120,7 +144,6 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     if !req.reason.is_empty() {
         writeln!(tty_w, "Reason:  {bold}{}{reset}", req.reason)?;
     }
-    let dim = "\x1b[2m";
     let agent_tag = if req.forward_agent {
         format!(" {dim}(agent forwarded){reset}")
     } else {
@@ -138,7 +161,7 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     // the prompt.
     if let Some(first_argv) = req.pipeline.first() {
         if let Some(cmd_name) = first_argv.first() {
-            write_resolves_line(&mut tty_w, cmd_name, bold, dim, reset)?;
+            write_resolves_line(&mut tty_w, cmd_name, &st)?;
         }
 
         // Warn if later stages have commands not in PATH
@@ -213,13 +236,8 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
 /// - canonicalize fails (broken symlink, EACCES): show what we know and
 ///   flag `(canonicalize failed)` so the prompt is honest about not
 ///   having verified the target.
-fn write_resolves_line<W: Write>(
-    w: &mut W,
-    cmd_name: &str,
-    bold: &str,
-    dim: &str,
-    reset: &str,
-) -> io::Result<()> {
+fn write_resolves_line<W: Write>(w: &mut W, cmd_name: &str, style: &Style) -> io::Result<()> {
+    let Style { bold, dim, reset } = *style;
     let resolved = match which(cmd_name) {
         Some(p) => p,
         None => {
@@ -263,8 +281,7 @@ pub fn display_banner(req: &Request) -> io::Result<()> {
         Ok(f) => f,
         Err(_) => return Ok(()),
     };
-    let dim = "\x1b[2m";
-    let reset = "\x1b[0m";
+    let Style { dim, reset, .. } = style();
     let cmd = pipeline_join(&req.pipeline);
     if req.forward_agent {
         writeln!(tty, "{dim}\u{25b6}{reset} {cmd} {dim}(agent forwarded){reset}")?;
@@ -282,9 +299,7 @@ pub fn display_result(resp: &Response) -> io::Result<()> {
 
 /// Write the command result to any writer. Truncate stdout/stderr to 3 lines.
 pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
-    let dim = "\x1b[2m";
-    let bold = "\x1b[1m";
-    let reset = "\x1b[0m";
+    let Style { bold, dim, reset } = style();
 
     match resp.status {
         Status::Ok => {
@@ -346,8 +361,7 @@ fn print_truncated(tty: &mut impl Write, bytes: &[u8], label: &str) -> io::Resul
     }
     let text = String::from_utf8_lossy(bytes);
     let lines: Vec<&str> = text.lines().collect();
-    let dim = "\x1b[2m";
-    let reset = "\x1b[0m";
+    let Style { dim, reset, .. } = style();
     let truncated = lines.len() > MAX_DISPLAY_LINES;
     let shown = if truncated { &lines[..MAX_DISPLAY_LINES] } else { &lines };
 
@@ -436,8 +450,22 @@ mod tests {
 
     fn render_resolves(cmd_name: &str) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        write_resolves_line(&mut buf, cmd_name, "B", "D", "R").expect("write");
+        let st = Style { bold: "B", dim: "D", reset: "R" };
+        write_resolves_line(&mut buf, cmd_name, &st).expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn style_for_honors_no_color() {
+        let on = style_for(false);
+        assert_eq!(on.bold, "\x1b[1m");
+        assert_eq!(on.dim, "\x1b[2m");
+        assert_eq!(on.reset, "\x1b[0m");
+
+        let off = style_for(true);
+        assert_eq!(off.bold, "");
+        assert_eq!(off.dim, "");
+        assert_eq!(off.reset, "");
     }
 
     #[test]
