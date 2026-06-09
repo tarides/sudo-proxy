@@ -4,12 +4,8 @@ use sudo_proxy::mcp::McpProxy;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(arg) = std::env::args().nth(1) {
-        match arg.as_str() {
-            "--version" | "-V" => {
-                println!("sudo-proxy-mcp {}", env!("CARGO_PKG_VERSION"));
-                return Ok(());
-            }
-            _ => {}
+        if matches!(arg.as_str(), "--version" | "-V") {
+            sudo_proxy::cli::print_version("sudo-proxy-mcp");
         }
     }
     let service = McpProxy::new().serve(stdio()).await?;

@@ -218,10 +218,7 @@ fn parse_args() -> Action {
     match args[0].as_str() {
         "--create" => Action::Create,
         "--delete" => Action::Delete,
-        "--version" | "-V" => {
-            println!("pkexec-cache {}", env!("CARGO_PKG_VERSION"));
-            process::exit(0);
-        }
+        "--version" | "-V" => sudo_proxy::cli::print_version("pkexec-cache"),
         "--help" | "-h" => {
             usage();
         }

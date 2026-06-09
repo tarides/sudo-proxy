@@ -146,10 +146,7 @@ fn parse_args(args: &[String]) -> Opts {
             "--confirm-unprivileged" => confirm_unprivileged = Some(true),
             "--no-confirm-unprivileged" => confirm_unprivileged = Some(false),
             "--forward-agent" => forward_agent = true,
-            "--version" | "-V" => {
-                println!("sudo-proxy {}", env!("CARGO_PKG_VERSION"));
-                std::process::exit(0);
-            }
+            "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
                 eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--no-confirm-unprivileged] [--forward-agent]");
                 eprintln!();

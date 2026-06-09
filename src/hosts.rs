@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct HostInfo {
     #[serde(default)]
     pub description: String,
@@ -28,7 +28,7 @@ pub struct Policy {
     /// When `true`, unprivileged commands hit the TTY Y/N gate (today's
     /// default). When `false`, they take the banner-only path. The
     /// interactive `a` answer flips this to `false` and persists.
-    #[serde(default = "default_true")]
+    #[serde(default = "crate::protocol::default_true")]
     pub confirm_unprivileged: bool,
 }
 
@@ -38,10 +38,6 @@ impl Default for Policy {
             confirm_unprivileged: true,
         }
     }
-}
-
-fn default_true() -> bool {
-    true
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -77,16 +73,13 @@ impl HostsConfig {
     }
 
     pub fn touch(&mut self, host: &str) {
-        let now = now_iso8601();
+        let now = crate::datetime::now_iso8601();
         self.hosts
             .entry(host.to_string())
             .and_modify(|info| info.last_connected = now.clone())
             .or_insert_with(|| HostInfo {
-                description: String::new(),
-                os: String::new(),
                 last_connected: now,
-                uid: String::new(),
-                version: String::new(),
+                ..Default::default()
             });
     }
 
@@ -98,16 +91,7 @@ impl HostsConfig {
         if version.is_empty() {
             return false;
         }
-        let info = self
-            .hosts
-            .entry(host.to_string())
-            .or_insert_with(|| HostInfo {
-                description: String::new(),
-                os: String::new(),
-                last_connected: String::new(),
-                uid: String::new(),
-                version: String::new(),
-            });
+        let info = self.hosts.entry(host.to_string()).or_default();
         if info.version == version {
             false
         } else {
@@ -151,16 +135,7 @@ impl HostsConfig {
             ));
         }
 
-        let info = self
-            .hosts
-            .entry(host.to_string())
-            .or_insert_with(|| HostInfo {
-                description: String::new(),
-                os: String::new(),
-                last_connected: String::new(),
-                uid: String::new(),
-                version: String::new(),
-            });
+        let info = self.hosts.entry(host.to_string()).or_default();
         info.uid = uid.clone();
         self.save();
 
@@ -244,55 +219,6 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
-}
-
-fn now_iso8601() -> String {
-    use std::time::SystemTime;
-    let secs = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
-    let days = secs / 86400;
-    let tod = secs % 86400;
-    let (year, month, day) = days_to_ymd(days);
-
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        tod / 3600,
-        (tod % 3600) / 60,
-        tod % 60
-    )
-}
-
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
-    let mut year = 1970;
-    loop {
-        let diy = if is_leap(year) { 366 } else { 365 };
-        if days < diy {
-            break;
-        }
-        days -= diy;
-        year += 1;
-    }
-    let md: [u64; 12] = if is_leap(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-    let mut month = 0;
-    for (i, &m) in md.iter().enumerate() {
-        if days < m {
-            month = i as u64 + 1;
-            break;
-        }
-        days -= m;
-    }
-    (year, month, days + 1)
-}
-
-fn is_leap(year: u64) -> bool {
-    year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
 }
 
 /// Compute the SSH target string from a host and an optional login user.

@@ -35,12 +35,41 @@ pub struct Request {
     pub version: String,
 }
 
-fn default_true() -> bool {
+pub(crate) fn default_true() -> bool {
     true
 }
 
 fn default_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+impl Request {
+    /// Build an outgoing request, stamping the fields every sender fills the
+    /// same way: a fresh random `id`, the current time, and this binary's
+    /// `version`. Callers supply only what actually varies between sites.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        host: String,
+        session: String,
+        pipeline: Vec<Vec<String>>,
+        env: HashMap<String, String>,
+        reason: String,
+        privileged: bool,
+        forward_agent: bool,
+    ) -> Self {
+        Self {
+            id: default_id(),
+            host,
+            session,
+            time: crate::datetime::now_iso8601(),
+            pipeline,
+            env,
+            reason,
+            privileged,
+            forward_agent,
+            version: VERSION.to_string(),
+        }
+    }
 }
 
 fn default_session() -> String {
