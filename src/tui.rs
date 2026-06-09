@@ -120,6 +120,22 @@ impl ResultSink for NoopResultSink {
     }
 }
 
+/// Classify a single keypress into an approval decision. Pure (no I/O): the
+/// sole source of `ApprovedAlways` is `'a'`/`'A'` on an *unprivileged* request;
+/// the sole source of `Approved` is `'y'`/`'Y'`; `None` (the read timed out) is
+/// `Timeout`; every other byte denies. This is the transition function the
+/// Rung 4 state-machine model and the Rung 5 dispatch contract both target —
+/// keeping it free of the TTY writes lets the property test cover it
+/// exhaustively over the whole `(Option<u8>, bool)` input domain.
+pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
+    match key {
+        None => PromptResult::Timeout,
+        Some(b'y' | b'Y') => PromptResult::Approved,
+        Some(b'a' | b'A') if !privileged => PromptResult::ApprovedAlways,
+        Some(_) => PromptResult::Denied,
+    }
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> {
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;
@@ -198,25 +214,17 @@ pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> 
     )?;
     tty_w.flush()?;
 
-    // Read single keypress with timeout (no Enter needed)
-    let result = match read_key_timeout(&tty_r, timeout)? {
-        None => {
-            writeln!(tty_w, "\n→ Timeout")?;
-            PromptResult::Timeout
-        }
-        Some(b'y' | b'Y') => {
-            writeln!(tty_w, "\n→ Approved")?;
-            PromptResult::Approved
-        }
-        Some(b'a' | b'A') if !req.privileged => {
-            writeln!(tty_w, "\n→ Approved (always for this host)")?;
-            PromptResult::ApprovedAlways
-        }
-        Some(_) => {
-            writeln!(tty_w, "\n→ Denied")?;
-            PromptResult::Denied
-        }
+    // Read single keypress with timeout (no Enter needed), then classify it
+    // with the pure decision function so the TTY echo and the security-
+    // relevant mapping cannot drift apart.
+    let result = classify_key(read_key_timeout(&tty_r, timeout)?, req.privileged);
+    let label = match result {
+        PromptResult::Timeout => "Timeout",
+        PromptResult::Approved => "Approved",
+        PromptResult::ApprovedAlways => "Approved (always for this host)",
+        PromptResult::Denied => "Denied",
     };
+    writeln!(tty_w, "\n→ {label}")?;
     writeln!(tty_w, "{bold}━━━━━━━━━━━━━━━━━━━━━━━━━{reset}")?;
 
     Ok(result)
@@ -447,6 +455,51 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // === Property: confirm_unprivileged flips only on an interactive keypress
+    //
+    // Spec clause (Rung 2; proof obligation for the Rung 4 state-machine model
+    // and the Rung 5 dispatch contract): the *only* signal that can flip the
+    // `confirm_unprivileged` policy off is `ApprovedAlways`, and `classify_key`
+    // emits `ApprovedAlways` iff the keypress is `'a'`/`'A'` AND the request is
+    // unprivileged. No timeout, no other key, and no privileged request can
+    // produce it. The dispatch side of this clause (only `ApprovedAlways`
+    // stores the flag) is covered by tests/approval.rs.
+    //
+    // The input domain `(Option<u8>, bool)` is tiny, so this is checked
+    // exhaustively rather than sampled.
+    #[test]
+    fn prop_approved_always_only_from_a_key_when_unprivileged() {
+        let approved_always = |key: Option<u8>, privileged: bool| {
+            matches!(classify_key(key, privileged), PromptResult::ApprovedAlways)
+        };
+        for privileged in [false, true] {
+            // Timeout (None) never approves-always.
+            assert!(!approved_always(None, privileged));
+            for byte in 0u8..=255 {
+                let is_a = byte == b'a' || byte == b'A';
+                assert_eq!(
+                    approved_always(Some(byte), privileged),
+                    is_a && !privileged,
+                    "classify_key({byte:?}, privileged={privileged}) ApprovedAlways mismatch"
+                );
+            }
+        }
+
+        // Corollary: a privileged request can never yield ApprovedAlways, and
+        // 'y' is the only Approved source.
+        for byte in 0u8..=255 {
+            assert!(!matches!(
+                classify_key(Some(byte), true),
+                PromptResult::ApprovedAlways
+            ));
+            let is_y = byte == b'y' || byte == b'Y';
+            assert_eq!(
+                matches!(classify_key(Some(byte), true), PromptResult::Approved),
+                is_y
+            );
+        }
+    }
 
     fn render_resolves(cmd_name: &str) -> String {
         let mut buf: Vec<u8> = Vec::new();

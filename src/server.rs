@@ -773,6 +773,7 @@ fn read_request_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
 
     fn fake_clock() -> (Arc<Mutex<Instant>>, impl Fn() -> Instant + Send + 'static) {
@@ -933,37 +934,32 @@ mod tests {
         assert_eq!(age, Some(Duration::from_secs(0)));
     }
 
-    // --- Security audit: randomized fuzz of parse_age -------------------
+    // === Property: parse_age is total and panic-free ====================
     //
-    // parse_age handles attacker-controlled `time` strings (the freshness /
-    // anti-replay gate). It must never panic and must never accept a stale
-    // timestamp as fresh via integer wrap (issue #11/#14 were exactly that).
-    // This sweep throws garbage and near-valid timestamps at it and asserts
-    // it stays panic-free and internally consistent.
-    #[test]
-    fn fuzz_parse_age_never_panics() {
-        let mut state: u64 = 0xDEADBEEFCAFEF00D;
-        let mut next = || {
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            state = state.wrapping_mul(0x2545F4914F6CDD1D);
-            state
-        };
+    // Spec clause (Rung 2; proof obligation for Rung 3 Kani over the
+    // attacker-controlled parsers): `parse_age` handles attacker-controlled
+    // `time` strings (the freshness / anti-replay gate). It must return for
+    // every input — never panic — and never wrap into a bogus age (issues
+    // #11/#14 were exactly an integer underflow on out-of-range components).
+    // The `checked_*` arithmetic enforces no-wrap by yielding `None`.
 
+    /// The predicate: `parse_age(s)` returns without panicking for any input.
+    /// (No-wrap is structural — every arithmetic step is `checked_*`.)
+    fn parse_age_total_and_panic_free(s: &str) {
+        let _ = parse_age(s);
+    }
+
+    // Driver: garbage and near-valid timestamps from the same alphabet the
+    // freshness gate sees on the wire, plus structured extreme components.
+    #[test]
+    fn prop_parse_age_total_and_panic_free() {
         let alphabet: &[u8] = b"0123456789-:TZ +.eE/\\\0\tx";
+        let mut rng = Rng::new(0xDEADBEEFCAFEF00D);
         for _ in 0..20000 {
-            let len = (next() % 40) as usize;
-            let mut s = String::new();
-            for _ in 0..len {
-                s.push(alphabet[(next() as usize) % alphabet.len()] as char);
-            }
-            // Must not panic for any input.
-            let _ = parse_age(&s);
+            parse_age_total_and_panic_free(&rng.string(alphabet, 39));
         }
 
-        // Structured near-valid timestamps with extreme components: still
-        // must not panic and must not under/overflow into a bogus age.
+        // Structured near-valid timestamps with extreme components.
         for &(y, mo, d, h, mi, se) in &[
             (0u64, 0u64, 0u64, 0u64, 0u64, 0u64),
             (1969, 12, 31, 23, 59, 59),
@@ -973,18 +969,177 @@ mod tests {
             (9_999_999_999, 1, 1, 0, 0, 0),
         ] {
             let ts = format!("{y:04}-{mo:02}-{d:02}T{h:02}:{mi:02}:{se:02}Z");
-            let _ = parse_age(&ts); // no panic, no wrap
+            parse_age_total_and_panic_free(&ts);
         }
     }
 
-    // A clearly-stale timestamp must be classified as old (well outside the
-    // freshness window) — i.e. integer-wrap must not make it look fresh.
+    // === Property: freshness is monotone ================================
+    //
+    // Spec clause (Rung 2; proof obligation for Rung 3 Kani): making a
+    // request's timestamp *earlier* must never make it look *fresher*. An
+    // integer-wrap bug violates this by mapping an ancient timestamp to a tiny
+    // age; monotonicity is the general invariant the targeted stale-not-fresh
+    // case (year 2000) is one witness of.
+
+    /// The predicate, given `earlier <= later` (epoch seconds): the age of the
+    /// earlier timestamp is never below the age of the later one. Both call
+    /// `parse_age` micro-seconds apart, so the wall-clock `now` they read
+    /// differs by at most one whole second; a `gap >= 1s` between the two
+    /// timestamps dominates that drift, keeping the comparison exact.
+    fn freshness_is_monotone(earlier: u64, later: u64) -> bool {
+        debug_assert!(earlier <= later);
+        match (
+            parse_age(&crate::datetime::epoch_to_iso(earlier)),
+            parse_age(&crate::datetime::epoch_to_iso(later)),
+        ) {
+            // epoch_to_iso emits well-formed timestamps, so both must parse.
+            (Some(age_earlier), Some(age_later)) => age_earlier >= age_later,
+            _ => false,
+        }
+    }
+
     #[test]
-    fn fuzz_parse_age_stale_is_not_fresh() {
+    fn prop_freshness_is_monotone() {
+        use std::time::SystemTime;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let mut rng = Rng::new(0xF00DF00DF00DF00D);
+        for _ in 0..5000 {
+            // Span stale (deep past) through future (age clamps to 0); the
+            // earlier endpoint ranges from 2001 up to ~now, the gap is always
+            // at least one second so the now-drift between the two reads of
+            // the clock cannot invert the ordering.
+            let earlier = 1_000_000_000 + (rng.next_u64() % (now - 1_000_000_000 + 50_000_000));
+            let gap = 1 + (rng.next_u64() % 50_000_000);
+            assert!(
+                freshness_is_monotone(earlier, earlier + gap),
+                "freshness non-monotone: earlier={earlier} later={}",
+                earlier + gap
+            );
+        }
+
+        // Witness of the clause: a clearly-stale timestamp is outside the
+        // freshness window — integer-wrap must not make it look fresh.
         let stale = parse_age("2000-01-01T00:00:00Z").expect("valid ts");
         assert!(
             stale.as_secs() > MAX_REQUEST_AGE.as_secs(),
             "a year-2000 timestamp must be classified stale, got {stale:?}"
         );
+    }
+
+    // === Property: an accepted request has no dangerous displayed field ==
+    //
+    // Spec clause (Rung 2; proof obligation for Rung 3 Flux / Rung 5 Creusot,
+    // which will make "a Request reaching dispatch has passed validate_request"
+    // true by construction): if `validate_request` accepts a request, then
+    // every request-derived string later rendered on the approval prompt —
+    // each argv element, every env key and value, and reason/session/host/
+    // version/id — is free of the control/bidi characters `has_dangerous_chars`
+    // forbids. A field carrying raw ANSI/escape/newline bytes could redraw the
+    // terminal and misrepresent the command being approved.
+
+    /// The predicate. Vacuously true for rejected requests — the clause
+    /// constrains only those that pass the gate.
+    fn accepted_request_has_no_dangerous_displayed_field(req: &Request) -> bool {
+        if validate_request(req).is_err() {
+            return true;
+        }
+        let argv_clean = req.pipeline.iter().flatten().all(|a| !has_dangerous_chars(a));
+        let env_clean = req
+            .env
+            .iter()
+            .all(|(k, v)| !has_dangerous_chars(k) && !has_dangerous_chars(v));
+        let fields_clean = [&req.reason, &req.session, &req.host, &req.version, &req.id]
+            .iter()
+            .all(|f| !has_dangerous_chars(f));
+        argv_clean && env_clean && fields_clean
+    }
+
+    /// Build a string of length `0..=max_len` from a benign `char` alphabet —
+    /// every one of these passes `has_dangerous_chars`.
+    fn rand_chars(rng: &mut Rng, max_len: usize) -> String {
+        const BENIGN: &[char] = &['a', 'b', 'c', '0', '1', ' ', '/', '-', '.', '_', '=', ':', ','];
+        let len = rng.below(max_len + 1);
+        (0..len).map(|_| BENIGN[rng.below(BENIGN.len())]).collect()
+    }
+
+    // The exact danger classes `has_dangerous_chars` forbids: control chars
+    // (NUL, ESC, newline, CR) and zero-width / bidi overrides.
+    const DANGEROUS: &[char] = &['\u{0}', '\u{1b}', '\n', '\r', '\u{200b}', '\u{202e}', '\u{2066}'];
+
+    /// Generate a request whose fields are all benign, then with probability
+    /// 1/2 splice one dangerous char into one randomly-chosen displayed field.
+    /// This guarantees the generator yields both accepted and rejected
+    /// requests — so the implication is exercised in both directions, not
+    /// vacuously satisfied — while covering every field `validate_request`
+    /// guards (argv, env key, env value, and reason/host/session/version/id).
+    fn random_request(rng: &mut Rng) -> Request {
+        let stages = 1 + rng.below(3);
+        let mut pipeline: Vec<Vec<String>> = (0..stages)
+            .map(|_| {
+                let args = 1 + rng.below(3);
+                (0..args).map(|_| rand_chars(rng, 6)).collect()
+            })
+            .collect();
+        let mut env = std::collections::HashMap::new();
+        // Always at least one entry so the env branch is reachable.
+        for _ in 0..(1 + rng.below(2)) {
+            env.insert(rand_chars(rng, 5), rand_chars(rng, 5));
+        }
+        let mut req = Request {
+            id: rand_chars(rng, 6),
+            host: rand_chars(rng, 6),
+            session: rand_chars(rng, 6),
+            time: crate::datetime::now_iso8601(),
+            pipeline: std::mem::take(&mut pipeline),
+            env,
+            reason: rand_chars(rng, 8),
+            privileged: rng.next_u64() & 1 == 0,
+            forward_agent: false,
+            version: rand_chars(rng, 5),
+        };
+
+        if rng.next_u64() & 1 == 0 {
+            let danger = DANGEROUS[rng.below(DANGEROUS.len())];
+            match rng.below(7) {
+                0 => req.reason.push(danger),
+                1 => req.host.push(danger),
+                2 => req.session.push(danger),
+                3 => req.version.push(danger),
+                4 => req.id.push(danger),
+                5 => req.pipeline[0][0].push(danger),
+                _ => {
+                    // Corrupt an env value (rebuild the one entry we know exists).
+                    let key = req.env.keys().next().cloned().unwrap();
+                    let mut val = req.env.remove(&key).unwrap();
+                    val.push(danger);
+                    req.env.insert(key, val);
+                }
+            }
+        }
+        req
+    }
+
+    #[test]
+    fn prop_accepted_request_has_no_dangerous_displayed_field() {
+        let mut rng = Rng::new(0x51ED5EEDC0FFEE11);
+        let (mut accepted, mut rejected) = (0u32, 0u32);
+        for _ in 0..5000 {
+            let req = random_request(&mut rng);
+            assert!(
+                accepted_request_has_no_dangerous_displayed_field(&req),
+                "validate_request accepted a request with a dangerous displayed field: {req:?}"
+            );
+            if validate_request(&req).is_ok() {
+                accepted += 1;
+            } else {
+                rejected += 1;
+            }
+        }
+        // Both directions exercised: the implication is not vacuous.
+        assert!(accepted > 0, "generator never produced an accepted request");
+        assert!(rejected > 0, "generator never produced a rejected request");
     }
 }
