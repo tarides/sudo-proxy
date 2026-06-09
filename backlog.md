@@ -6,16 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Rung 2 — Reframe fuzz harnesses as named properties
-
-The existing ad-hoc fuzz tests in `src/executor.rs` / `src/server.rs`
-(`fuzz_shell_escape_*`, `fuzz_parse_age_*`) become named proptest/quickcheck
-properties that read as spec clauses: freshness is monotone; `shell_escape`
-round-trips through `/bin/sh` byte-for-byte; every displayed field is
-dangerous-char-free; `privileged:true` ⇒ a keypress occurred; the
-`confirm_unprivileged` flag flips only via an interactive keypress. These
-properties become the proof obligations for Rungs 3–5.
-
 ## Rung 3 — Kani + Flux on the validation boundary
 
 Kani (bounded model checker) over the attacker-controlled parsers — `parse_age`,
