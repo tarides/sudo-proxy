@@ -1,5 +1,7 @@
 # Comparison with other tools
 
+[← README](../README.md)
+
 How sudo-proxy relates to neighboring tools that show up in the same
 search ("approval gate for AI-driven command execution", "MCP security",
 "human-in-the-loop for agents"). Each section places the tool on the
@@ -394,7 +396,7 @@ gate.
 [polkit reference (polkit.8)](https://www.freedesktop.org/software/polkit/docs/latest/polkit.8.html)
 — polkit's textual authentication agent, the off-the-shelf "TUI
 prompt for privilege" piece. The sudo-proxy README has a full
-section ([pkexec mode](README.md#pkexec-mode)) explaining why it
+section ([pkexec mode](pkexec.md)) explaining why it
 doesn't go this route: polkit conflates authentication and
 authorization, so cached auth means commands run silently —
 defeating the human gate. Building block, not alternative.
