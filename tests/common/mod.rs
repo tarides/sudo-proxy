@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use sudo_proxy::mode::Mode;
-use sudo_proxy::protocol::{Request, Response};
+use sudo_proxy::protocol::{Request, Response, ValidatedRequest};
 use sudo_proxy::server;
 use sudo_proxy::tui::{Prompter, PromptResult, ResultSink};
 use tempfile::TempDir;
@@ -61,9 +61,9 @@ impl ScriptedPrompter {
 }
 
 impl Prompter for ScriptedPrompter {
-    fn prompt(&self, req: &Request, _timeout: Duration) -> std::io::Result<PromptResult> {
+    fn prompt(&self, req: &ValidatedRequest, _timeout: Duration) -> std::io::Result<PromptResult> {
         self.calls.lock().unwrap().push(RecordedCall {
-            req: req.clone(),
+            req: req.inner().clone(),
             at: Instant::now(),
         });
         let (delay, result) = (self.response.lock().unwrap())(req);

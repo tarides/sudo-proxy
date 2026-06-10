@@ -1,0 +1,30 @@
+name: Kani
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: kani-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  kani:
+    name: kani (bounded proofs, informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # Kani manages its own toolchain (it downloads a pinned nightly + CBMC),
+      # independent of rust-toolchain.toml, so it does not affect the gating
+      # CI jobs. The #[cfg(kani)] proof harnesses in src/proofs.rs are compiled
+      # only here, never by a normal `cargo build`.
+      #
+      # Informational only, like the geiger job in ci.yml: this surfaces the
+      # Rung 3 bounded proofs in the job log without gating merge while the
+      # proof set is still growing. Promote to a required check once stable.
+      - uses: model-checking/kani-github-action@v1
+        continue-on-error: true

@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::executor::which;
-use crate::protocol::Request;
+use crate::protocol::ValidatedRequest;
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -11,14 +11,14 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct GuiPrompter;
 
 impl Prompter for GuiPrompter {
-    fn prompt(&self, req: &Request, _timeout: Duration) -> io::Result<PromptResult> {
+    fn prompt(&self, req: &ValidatedRequest, _timeout: Duration) -> io::Result<PromptResult> {
         prompt_gui(req)
     }
 }
 
 /// Show a Y/N confirmation dialog for a command request.
 /// Auto-detects: zenity → kdialog → TUI (/dev/tty) fallback.
-pub fn prompt_gui(req: &Request) -> io::Result<PromptResult> {
+pub fn prompt_gui(req: &ValidatedRequest) -> io::Result<PromptResult> {
     let text = format_prompt_text(req);
 
     if which("zenity").is_some() {
@@ -37,7 +37,7 @@ pub fn prompt_gui(req: &Request) -> io::Result<PromptResult> {
     tui::prompt_tty(req, PROMPT_TIMEOUT)
 }
 
-fn format_prompt_text(req: &Request) -> String {
+fn format_prompt_text(req: &ValidatedRequest) -> String {
     let mut lines = Vec::new();
     lines.push(format!(
         "From: {} @ {}",

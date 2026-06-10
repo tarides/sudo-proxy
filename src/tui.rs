@@ -6,7 +6,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
 use crate::executor::which;
-use crate::protocol::{Request, Response, Status};
+use crate::protocol::{Response, Status, ValidatedRequest};
 
 /// Join argv into a shell-like display string, quoting args that contain spaces.
 pub fn shell_join(argv: &[String]) -> String {
@@ -88,7 +88,7 @@ pub enum PromptResult {
 
 /// Asks the user to approve or deny a privilege request.
 pub trait Prompter: Send + Sync {
-    fn prompt(&self, req: &Request, timeout: Duration) -> io::Result<PromptResult>;
+    fn prompt(&self, req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult>;
 }
 
 /// Echoes the result of a completed command back to the user.
@@ -99,7 +99,7 @@ pub trait ResultSink: Send + Sync {
 pub struct TtyPrompter;
 
 impl Prompter for TtyPrompter {
-    fn prompt(&self, req: &Request, timeout: Duration) -> io::Result<PromptResult> {
+    fn prompt(&self, req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult> {
         prompt_tty(req, timeout)
     }
 }
@@ -137,7 +137,7 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
 }
 
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
-pub fn prompt_tty(req: &Request, timeout: Duration) -> io::Result<PromptResult> {
+pub fn prompt_tty(req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult> {
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;
     let tty_r = File::open("/dev/tty")?;
 
@@ -284,7 +284,7 @@ const MAX_DISPLAY_LINES: usize = 3;
 /// Print a one-line non-interactive banner on /dev/tty announcing an
 /// unprivileged command that is about to run. Best-effort: silently
 /// returns Ok if /dev/tty cannot be opened (headless daemon).
-pub fn display_banner(req: &Request) -> io::Result<()> {
+pub fn display_banner(req: &ValidatedRequest) -> io::Result<()> {
     let mut tty = match OpenOptions::new().write(true).open("/dev/tty") {
         Ok(f) => f,
         Err(_) => return Ok(()),

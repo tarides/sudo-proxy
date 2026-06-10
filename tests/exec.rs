@@ -4,15 +4,17 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use sudo_proxy::executor::{apply_login_env_defaults, exec_direct, exec_timeout, MAX_OUTPUT_BYTES};
-use sudo_proxy::protocol::{Request, Status};
+use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 
 // Pulled in for the shared `which_or_skip` / `b64_decode` helpers only;
 // this binary keeps its own `make_req` (different signature), so we qualify
 // `common::` rather than glob-importing it.
 mod common;
 
-fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
-    Request {
+// Every test here feeds the request straight to `exec_direct`, which now takes
+// `&ValidatedRequest`, so validate at construction — exercising the typestate.
+fn make_req(pipeline: Vec<Vec<&str>>) -> ValidatedRequest {
+    let req = Request {
         id: format!("exec-{}", uuid::Uuid::new_v4()),
         host: String::new(),
         session: "test".into(),
@@ -26,7 +28,8 @@ fn make_req(pipeline: Vec<Vec<&str>>) -> Request {
         privileged: false,
         forward_agent: false,
         version: sudo_proxy::protocol::VERSION.to_string(),
-    }
+    };
+    ValidatedRequest::validate(req).expect("make_req builds a valid request")
 }
 
 /// E1: a privileged-equivalent that produces unbounded stdout must not

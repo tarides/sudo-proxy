@@ -145,6 +145,65 @@ Two tools fit sudo-proxy directly and require no proof-engineering background:
   `dispatch` has passed `validate_request`." This makes an F1-style omission (a
   field that skips sanitization) a *type error* rather than a runtime gap.
 
+**Status: done.** As built, Rung 3 keeps the Kani half and *replaces* the Flux
+half with a stable-Rust typestate (rationale below).
+
+- **Kani** — `src/proofs.rs` (a `#[cfg(kani)]` module, compiled only by
+  `cargo kani`) re-drives the Rung 2 predicates with `kani::any()`:
+  - `ymd_hms_to_epoch_is_total_and_panic_free` proves the `parse_age`
+    arithmetic core — extracted into `datetime::ymd_hms_to_epoch` precisely so
+    the `SystemTime::now()` side effect stays out of the proof — total and
+    panic/overflow/wrap-free over the *entire* `u64^6` domain (unbounded, so
+    strictly stronger than the Rung 2 fuzz). This is the machine-checked closure
+    of the issue-#11/#14 integer-underflow class.
+  - `ymd_hms_to_epoch_is_monotone_on_valid_dates` proves the parser is monotone
+    in calendar order — a later civil datetime never maps to a smaller epoch, so
+    an earlier timestamp can never be judged *fresher* (the general invariant the
+    issue-#11/#14 stale-not-fresh case is one witness of). Proven over well-formed
+    dates in `1970..=2099` (the window where the approximate leap rule is exact,
+    and the domain the freshness path's `epoch_to_iso` actually produces). This
+    discharges the Rung 2 `freshness_is_monotone` predicate, which only sampled
+    the round-trip.
+  - `has_dangerous_chars_matches_spec_per_char` proves the display-field scanner
+    panic-free and exactly matching its documented danger ranges, per character.
+  - *Scope, stated plainly:* Kani covers our arithmetic and our scanner. The
+    base64 and `serde_json` decode paths are **out of scope** — they are upstream
+    crates returning `Result`, and our call sites contain no `.unwrap()` on them
+    (`if let Ok`/`?` throughout), so their panic-freedom is the upstream
+    obligation; symbolically model-checking serde/base64 is intractable.
+  - CI: `.github/workflows/kani.yml` runs the proofs non-gating (geiger-style).
+    Kani manages its own toolchain, so the `rust-toolchain.toml` pin and the
+    gating jobs are untouched. Local run: `cargo install --locked kani-verifier
+    && cargo kani`.
+
+- **Flux — assessed and rejected for this rung.** Flux refinements reason over
+  integers, indices, and booleans, *not* string contents, so the actual F1
+  invariant ("every prompt-displayed field is free of control/bidi characters")
+  is not expressible as a Flux refinement; Flux also requires an experimental
+  private nightly toolchain that the Rung 1 pinned-toolchain / `cargo-deny` gates
+  would have to accommodate. The roadmap's stated *goal* — make "a request
+  reaching `dispatch` skipped validation" a type error — is instead met in stable
+  Rust by a **typestate newtype**: `protocol::ValidatedRequest` wraps a private
+  `Request`, its only constructor is the validating `ValidatedRequest::validate`,
+  and `executor::exec_*` plus `tui::Prompter::prompt` accept *only*
+  `&ValidatedRequest`. Reaching dispatch or the approval prompt with an
+  unvalidated request is therefore a compile error, not a runtime gap — the F1
+  closure "by construction" the rung asked for. Flux remains available to a later
+  rung for the numeric/index refinements it *is* suited to.
+
+- **Residuals carried past Rung 3** (recorded so the assurance argument stays
+  honest about proven-vs-tested):
+  - *`validate` field coverage.* The typestate proves `validate` is *invoked*
+    before dispatch, and Kani proves `has_dangerous_chars` is correct — but that
+    `validate` applies the scanner to *every* displayed field (argv, env
+    keys/values, reason/session/host/version/id) and rejects empty pipelines is
+    covered **only by the Rung 2 property test**, not by proof. A future edit
+    dropping a field from the loop would be caught by that test alone. Formal
+    discharge is a **Rung 5** Creusot contract on `validate`.
+  - *base64 / `serde_json` decoding.* Out of Kani scope as above; their
+    panic-freedom rests on the upstream crates' `Result`-returning APIs and our
+    `.unwrap()`-free call sites — an assumption, not a proof.
+
 ### Rung 4 — Protocol-level formal verification
 
 The most interesting properties are temporal and relational, not per-function:

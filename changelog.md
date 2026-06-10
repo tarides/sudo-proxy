@@ -3,6 +3,69 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-06-10 — Rung 3: Kani bounded proofs + validation-boundary typestate
+
+Discharged **Rung 3** of the assurance ladder. The Kani half proves the
+attacker-controlled arithmetic; the Flux half is replaced by a stable-Rust
+typestate that closes the F1-class gap by construction (rationale below).
+Strengthens assurance-case leaves under G3/G4/G6 with machine-checked rather
+than sampled evidence.
+
+- **Kani proofs** — `src/proofs.rs`, a `#[cfg(kani)]` module compiled only by
+  `cargo kani`, re-drives the Rung 2 predicates with `kani::any()`:
+  - `ymd_hms_to_epoch_is_total_and_panic_free` proves the `parse_age` arithmetic
+    core total and panic/overflow/wrap-free over the **entire `u64^6` domain**
+    (unbounded — strictly stronger than the Rung 2 fuzz). The core was extracted
+    into `datetime::ymd_hms_to_epoch` (the reverse of `epoch_to_iso`) precisely so
+    `SystemTime::now()` stays out of the proof; `parse_age` now just parses then
+    calls it. This is the machine-checked closure of the issue-#11/#14 integer
+    underflow.
+  - `ymd_hms_to_epoch_is_monotone_on_valid_dates` proves the parser monotone in
+    calendar order (a later datetime never maps to a smaller epoch, so an earlier
+    timestamp is never judged fresher), over well-formed dates in `1970..=2099` —
+    discharging the Rung 2 `freshness_is_monotone` predicate, which only sampled
+    the round-trip.
+  - `has_dangerous_chars_matches_spec_per_char` proves the display-field scanner
+    panic-free and exactly matching its danger ranges. Made tractable by encoding
+    into a stack `[u8; 4]` (no heap), bounding the codepoint `< 0x2100` (every
+    forbidden range is `<= 0x2069`; above the bound both sides are trivially
+    `false`), and `#[kani::unwind(5)]` to bound the `chars()` loop.
+  - **Scope, stated plainly:** Kani covers our arithmetic and our scanner. The
+    base64 / `serde_json` decode paths are out of scope — upstream `Result`-
+    returning crates with no `.unwrap()` at our call sites, so their panic-freedom
+    is the upstream obligation; symbolically checking serde/base64 is intractable.
+  - CI: `.github/workflows/kani.yml` runs the proofs **non-gating** (geiger-style).
+    Kani manages its own toolchain, so the `rust-toolchain.toml` pin and the
+    gating jobs are untouched. `Cargo.toml` registers `check-cfg = ['cfg(kani)']`
+    so the `-D warnings` clippy gate doesn't trip on the `#[cfg(kani)]` module.
+
+- **`ValidatedRequest` typestate (Flux replacement)** — `protocol::ValidatedRequest`
+  wraps a private `Request`; its only constructor is the validating
+  `ValidatedRequest::validate` (the former `validate_request` + `has_dangerous_chars`,
+  moved from `server.rs` to live with the type). `executor::exec_*` and
+  `tui::Prompter::prompt` now accept **only** `&ValidatedRequest`, so reaching
+  dispatch or the approval prompt with an unvalidated request is a *compile error*
+  — the F1 closure "by construction." `handle_connection` validates once and
+  shadows `req`; downstream reads go through `Deref`.
+  - **Decision:** Flux was assessed and rejected for this rung — its refinements
+    reason over ints/indices, not string contents, so the actual invariant ("no
+    dangerous char in any displayed field") is not expressible in Flux, and it
+    needs an experimental private nightly toolchain. The typestate meets the
+    roadmap's stated goal in stable Rust that the existing CI already builds.
+    Recorded in `docs/formalisation-roadmap.md`.
+
+- **Residuals (proven vs tested), logged in the roadmap:** that `validate`
+  applies the scanner to *every* displayed field is covered only by the Rung 2
+  property test, not by proof (a Rung 5 Creusot target); base64 / `serde_json`
+  panic-freedom rests on the upstream `Result` APIs, an assumption not a proof.
+
+- **Verified:** core + `--features mcp` builds, full test suite, and
+  `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo kani`
+  reports **3/3 harnesses SUCCESSFUL**. Negative controls each failed as required:
+  replacing a `checked_mul` with `*` turned the Kani proof red ("attempt to
+  multiply with overflow"); passing a raw `&Request` to `exec_sudo` is a compile
+  error (`expected &ValidatedRequest`).
+
 ## 2026-06-09 — Rung 2: fuzz harnesses reframed as named properties (PR #33)
 
 Turned the ad-hoc fuzz tests (`fuzz_shell_escape_*`, `fuzz_parse_age_*`) into

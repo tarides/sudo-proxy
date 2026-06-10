@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use sudo_proxy::executor::{exec_direct, sanitize_env};
-use sudo_proxy::protocol::{Request, Status};
+use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 
 mod common;
 use common::*;
@@ -89,6 +89,7 @@ fn forward_agent_injects_sock_when_daemon_has_one() {
     unsafe { std::env::set_var("SSH_AUTH_SOCK", sentinel) };
     let mut req = unpriv_req("fa-inject", vec![vec!["printenv", "SSH_AUTH_SOCK"]]);
     req.forward_agent = true;
+    let req = ValidatedRequest::validate(req).expect("valid request");
     let resp = exec_direct(&req, &HashMap::new());
     unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
 
@@ -112,6 +113,7 @@ fn no_forward_agent_does_not_inject() {
     unsafe { std::env::set_var("SSH_AUTH_SOCK", sentinel) };
     let mut req = unpriv_req("fa-no-inject", vec![vec!["printenv", "SSH_AUTH_SOCK"]]);
     req.forward_agent = false; // explicit
+    let req = ValidatedRequest::validate(req).expect("valid request");
     let resp = exec_direct(&req, &HashMap::new());
     unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
 
@@ -134,6 +136,7 @@ fn forward_agent_without_daemon_socket_is_noop() {
     unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
     let mut req = unpriv_req("fa-noop", vec![vec!["printenv", "SSH_AUTH_SOCK"]]);
     req.forward_agent = true;
+    let req = ValidatedRequest::validate(req).expect("valid request");
     let resp = exec_direct(&req, &HashMap::new());
 
     assert_eq!(resp.status, Status::Ok);
@@ -156,6 +159,7 @@ fn forward_agent_injects_into_pipeline_stages() {
         vec![vec!["printenv", "SSH_AUTH_SOCK"], vec!["cat"]],
     );
     req.forward_agent = true;
+    let req = ValidatedRequest::validate(req).expect("valid request");
     let resp = exec_direct(&req, &HashMap::new());
     unsafe { std::env::remove_var("SSH_AUTH_SOCK") };
 
