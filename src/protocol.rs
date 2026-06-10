@@ -2,6 +2,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Deref;
 
 /// Version stamped onto outgoing wire messages. All four binaries live in
 /// the same crate, so this resolves to the same value everywhere.
@@ -74,6 +75,103 @@ impl Request {
 
 fn default_session() -> String {
     "unknown".to_string()
+}
+
+/// True if `s` contains a character forbidden in any request-derived string
+/// that is rendered on the approval prompt: control chars (except tab), and
+/// zero-width / bidi-override characters. The prompt is the security gate, so
+/// a field carrying raw ANSI/escape/newline or bidi bytes could redraw the
+/// terminal and misrepresent the command being approved.
+///
+/// `pub(crate)` so the Rung 2 property test and the Rung 3 Kani harness can
+/// drive it directly; the only *enforcement* path is `ValidatedRequest::validate`.
+pub(crate) fn has_dangerous_chars(s: &str) -> bool {
+    for c in s.chars() {
+        // Control chars 0x00-0x1F except tab (0x09)
+        if c != '\t' && (c as u32) < 0x20 {
+            return true;
+        }
+        // Zero-width and bidi override characters
+        match c as u32 {
+            0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// A `Request` that has passed `ValidatedRequest::validate`.
+///
+/// The wrapped `Request` is private to this module, so the *only* way to obtain
+/// a `ValidatedRequest` is through the validating constructor below. The
+/// privileged execution path (`executor::exec_*`) and the approval prompt
+/// (`tui::Prompter`) take `&ValidatedRequest`, which makes "a request reaching
+/// dispatch skipped validation" a *compile error* rather than a runtime gap —
+/// the Rung 3 closure of the F1-class finding. See docs/formalisation-roadmap.md.
+#[derive(Clone, Debug)]
+pub struct ValidatedRequest(Request);
+
+impl ValidatedRequest {
+    /// Validate every attacker-controlled, prompt-rendered field of `req` and,
+    /// on success, consume it into a `ValidatedRequest`. The checks: a non-empty
+    /// pipeline of non-empty stages, and no dangerous character in any argv
+    /// element, env key/value, or in `reason`/`session`/`host`/`version`/`id`.
+    ///
+    /// `reason` may arrive from the MCP `description`, and `host`/`session`/
+    /// `id`/`version` from a direct same-UID socket client that bypasses the
+    /// client-side `validate_host`; all are held to the same sanitization as
+    /// argv and env. See `tui::prompt_tty` for the render this protects.
+    pub fn validate(req: Request) -> Result<Self, String> {
+        if req.pipeline.is_empty() {
+            return Err("pipeline must not be empty".to_string());
+        }
+        for (stage_idx, argv) in req.pipeline.iter().enumerate() {
+            if argv.is_empty() {
+                return Err(format!("pipeline stage {stage_idx} must not be empty"));
+            }
+            for (i, arg) in argv.iter().enumerate() {
+                if has_dangerous_chars(arg) {
+                    return Err(format!(
+                        "pipeline[{stage_idx}][{i}] contains forbidden control/bidi characters"
+                    ));
+                }
+            }
+        }
+        for key in req.env.keys() {
+            if has_dangerous_chars(key) {
+                return Err(format!("env key '{key}' contains forbidden characters"));
+            }
+        }
+        for val in req.env.values() {
+            if has_dangerous_chars(val) {
+                return Err("env value contains forbidden characters".to_string());
+            }
+        }
+        for (field, value) in [
+            ("reason", &req.reason),
+            ("session", &req.session),
+            ("host", &req.host),
+            ("version", &req.version),
+            ("id", &req.id),
+        ] {
+            if has_dangerous_chars(value) {
+                return Err(format!("{field} contains forbidden control/bidi characters"));
+            }
+        }
+        Ok(ValidatedRequest(req))
+    }
+
+    /// Borrow the validated request.
+    pub fn inner(&self) -> &Request {
+        &self.0
+    }
+}
+
+impl Deref for ValidatedRequest {
+    type Target = Request;
+    fn deref(&self) -> &Request {
+        &self.0
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

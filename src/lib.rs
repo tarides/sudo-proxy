@@ -6,6 +6,8 @@ pub mod hosts;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mode;
+#[cfg(kani)]
+mod proofs;
 #[cfg(test)]
 pub(crate) mod prop;
 pub mod protocol;

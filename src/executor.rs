@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::protocol::{Request, Response, StageResult};
+use crate::protocol::{Request, Response, StageResult, ValidatedRequest};
 
 /// Hard cap on captured stdout/stderr per stream. A privileged
 /// `cat /dev/zero` would otherwise OOM the daemon. When the cap is
@@ -135,7 +135,11 @@ pub fn which(name: &str) -> Option<PathBuf> {
 
 /// Execute a pipeline via pkexec (local/graphical mode).
 /// For multi-stage pipelines, wraps in `pkexec sh -c 'cmd1 | cmd2 | ...'`.
-pub fn exec_pkexec(req: &Request, env: &HashMap<String, String>, tty_lock: &Mutex<()>) -> Response {
+pub fn exec_pkexec(
+    req: &ValidatedRequest,
+    env: &HashMap<String, String>,
+    tty_lock: &Mutex<()>,
+) -> Response {
     if req.pipeline.len() == 1 {
         return exec_pkexec_stage(&req.pipeline[0], env, &req.id, tty_lock);
     }
@@ -164,21 +168,25 @@ pub fn exec_pkexec(req: &Request, env: &HashMap<String, String>, tty_lock: &Mute
 }
 
 /// Execute a pipeline via sudo (remote/TUI mode).
-pub fn exec_sudo(req: &Request, env: &HashMap<String, String>, tty_lock: &Mutex<()>) -> Response {
+pub fn exec_sudo(
+    req: &ValidatedRequest,
+    env: &HashMap<String, String>,
+    tty_lock: &Mutex<()>,
+) -> Response {
     if req.pipeline.len() == 1 {
         return exec_sudo_stage(&req.pipeline[0], env, &req.id, tty_lock);
     }
 
-    exec_pipeline(req, env, EscalationMode::Sudo)
+    exec_pipeline(req.inner(), env, EscalationMode::Sudo)
 }
 
 /// Execute a pipeline directly as the current user (no privilege escalation).
-pub fn exec_direct(req: &Request, env: &HashMap<String, String>) -> Response {
+pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Response {
     if req.pipeline.len() == 1 {
         return exec_direct_stage(&req.pipeline[0], env, &req.id, req.forward_agent);
     }
 
-    exec_pipeline(req, env, EscalationMode::Direct)
+    exec_pipeline(req.inner(), env, EscalationMode::Direct)
 }
 
 // ---------------------------------------------------------------------------

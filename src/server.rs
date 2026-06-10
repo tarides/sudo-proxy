@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
 use crate::hosts::HostsConfig;
 use crate::mode::Mode;
-use crate::protocol::{Request, Response};
+use crate::protocol::{Request, Response, ValidatedRequest};
 use crate::tui::{self, Prompter, ResultSink};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -49,70 +49,6 @@ pub const DEFAULT_MAX_IN_FLIGHT: usize = 64;
 /// stable value across the daemon's lifetime; we don't bother caching.
 pub fn forwarded_agent_socket() -> Option<String> {
     std::env::var("SSH_AUTH_SOCK").ok()
-}
-
-/// Characters forbidden in argv strings (control chars, bidi overrides, zero-width).
-fn has_dangerous_chars(s: &str) -> bool {
-    for c in s.chars() {
-        // Control chars 0x00-0x1F except tab (0x09)
-        if c != '\t' && (c as u32) < 0x20 {
-            return true;
-        }
-        // Zero-width and bidi override characters
-        match c as u32 {
-            0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn validate_request(req: &Request) -> Result<(), String> {
-    if req.pipeline.is_empty() {
-        return Err("pipeline must not be empty".to_string());
-    }
-    for (stage_idx, argv) in req.pipeline.iter().enumerate() {
-        if argv.is_empty() {
-            return Err(format!("pipeline stage {stage_idx} must not be empty"));
-        }
-        for (i, arg) in argv.iter().enumerate() {
-            if has_dangerous_chars(arg) {
-                return Err(format!(
-                    "pipeline[{stage_idx}][{i}] contains forbidden control/bidi characters"
-                ));
-            }
-        }
-    }
-    // Validate env keys too
-    for key in req.env.keys() {
-        if has_dangerous_chars(key) {
-            return Err(format!("env key '{key}' contains forbidden characters"));
-        }
-    }
-    for val in req.env.values() {
-        if has_dangerous_chars(val) {
-            return Err("env value contains forbidden characters".to_string());
-        }
-    }
-    // Every request-derived string rendered on the approval prompt must be
-    // held to the same control-char/bidi sanitization as argv and env. The
-    // prompt is the security gate; a field carrying raw ANSI/escape/newline
-    // bytes (e.g. `reason` from the MCP `description`, or `host`/`session`/
-    // `id`/`version` from a direct same-UID socket client that bypasses the
-    // client-side validate_host) could redraw the terminal and misrepresent
-    // the command being approved. See tui.rs::prompt_tty for the render.
-    for (field, value) in [
-        ("reason", &req.reason),
-        ("session", &req.session),
-        ("host", &req.host),
-        ("version", &req.version),
-        ("id", &req.id),
-    ] {
-        if has_dangerous_chars(value) {
-            return Err(format!("{field} contains forbidden control/bidi characters"));
-        }
-    }
-    Ok(())
 }
 
 /// Reject requests whose `time` is missing, malformed, or older than
@@ -194,38 +130,17 @@ fn parse_age(timestamp: &str) -> Option<Duration> {
         return None;
     }
 
-    let (year, month, day) = (date_parts[0], date_parts[1], date_parts[2]);
-    let (hour, min, sec) = (time_parts[0], time_parts[1], time_parts[2]);
-
-    // Reject out-of-range components up front. Defence in depth: without
-    // these guards, year < 1970 underflows `(year - 1970)`, day == 0
-    // underflows `(day - 1)`, and an out-of-range month would index
-    // `days_before_month` out of bounds. A wrapped value cascades into
-    // `ts_secs` and a stale request can appear fresh (issue #11).
-    if year < 1970 || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
-        return None;
-    }
-    // Allow sec == 60 for ISO 8601 leap-second tolerance.
-    if hour > 23 || min > 59 || sec > 60 {
-        return None;
-    }
-
-    // Days in each month (non-leap). Good enough for age checking.
-    let days_before_month: [u64; 12] = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334];
-    let mut days = year.checked_sub(1970)?.checked_mul(365)?
-        .checked_add(year.checked_sub(1969)? / 4)?;
-    days = days
-        .checked_add(days_before_month[(month - 1) as usize])?
-        .checked_add(day - 1)?;
-    // Leap year correction for current year
-    if month > 2 && crate::datetime::is_leap(year) {
-        days = days.checked_add(1)?;
-    }
-    let ts_secs = days
-        .checked_mul(86400)?
-        .checked_add(hour.checked_mul(3600)?)?
-        .checked_add(min.checked_mul(60)?)?
-        .checked_add(sec)?;
+    // The pure date-arithmetic core lives in `datetime::ymd_hms_to_epoch`
+    // (the reverse of `epoch_to_iso`), where Kani proves it panic/overflow/
+    // wrap-free over the whole u64 domain — see docs/formalisation-roadmap.md.
+    let ts_secs = crate::datetime::ymd_hms_to_epoch(
+        date_parts[0],
+        date_parts[1],
+        date_parts[2],
+        time_parts[0],
+        time_parts[1],
+        time_parts[2],
+    )?;
 
     let now_secs = now.as_secs();
     if ts_secs > now_secs {
@@ -554,11 +469,19 @@ fn handle_connection(
         }
     };
 
-    if let Err(msg) = validate_request(&req) {
-        let resp = Response::error(&req.id, &msg);
-        let _ = write_response(&mut stream, &resp);
-        return;
-    }
+    // Validate before anything privileged can touch the request. `exec_*` and
+    // `prompter.prompt` accept only `&ValidatedRequest`, so this conversion is
+    // the single, type-enforced gate between the wire and dispatch. `req` is
+    // shadowed by the validated value; field reads below go through its `Deref`.
+    let req_id = req.id.clone();
+    let req = match ValidatedRequest::validate(req) {
+        Ok(v) => v,
+        Err(msg) => {
+            let resp = Response::error(&req_id, &msg);
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
+    };
 
     // Agent forwarding is unprivileged-only. A privileged child runs under
     // sudo (which env_resets) or pkexec (which we env_clear), so the socket
@@ -1031,19 +954,36 @@ mod tests {
 
     // === Property: an accepted request has no dangerous displayed field ==
     //
-    // Spec clause (Rung 2; proof obligation for Rung 3 Flux / Rung 5 Creusot,
-    // which will make "a Request reaching dispatch has passed validate_request"
-    // true by construction): if `validate_request` accepts a request, then
-    // every request-derived string later rendered on the approval prompt —
+    // Spec clause (Rung 2): if `ValidatedRequest::validate` accepts a request,
+    // then every request-derived string later rendered on the approval prompt —
     // each argv element, every env key and value, and reason/session/host/
     // version/id — is free of the control/bidi characters `has_dangerous_chars`
     // forbids. A field carrying raw ANSI/escape/newline bytes could redraw the
     // terminal and misrepresent the command being approved.
+    //
+    // Rung 3 strengthens this from a sampled property into a structural one:
+    // `validate` is now the *only* constructor of `ValidatedRequest`, and
+    // `exec_*`/`prompt` accept only that type, so "a request reaching dispatch
+    // skipped validation" is a compile error.
+    //
+    // Residual (proven vs tested). The end-to-end guarantee decomposes into:
+    //   (1) the typestate proves `validate` is *invoked* before dispatch
+    //       [compile-time];
+    //   (2) Kani proves `has_dangerous_chars` is panic-free and matches its
+    //       range spec [`src/proofs.rs`];
+    //   (3) that `validate` applies (2) to *every* displayed field (argv, env
+    //       keys/values, reason/session/host/version/id) and rejects empty
+    //       pipelines — covered ONLY by this property test, not by proof.
+    // So if a future edit drops a field from `validate`'s loop, neither the
+    // typestate nor Kani catches it — only this test does (drop one field's
+    // check and it turns red). Discharging (3) formally is a Rung 5 Creusot
+    // target (a contract on `validate` enumerating the fields).
 
     /// The predicate. Vacuously true for rejected requests — the clause
     /// constrains only those that pass the gate.
     fn accepted_request_has_no_dangerous_displayed_field(req: &Request) -> bool {
-        if validate_request(req).is_err() {
+        use crate::protocol::has_dangerous_chars;
+        if ValidatedRequest::validate(req.clone()).is_err() {
             return true;
         }
         let argv_clean = req.pipeline.iter().flatten().all(|a| !has_dangerous_chars(a));
@@ -1132,7 +1072,7 @@ mod tests {
                 accepted_request_has_no_dangerous_displayed_field(&req),
                 "validate_request accepted a request with a dangerous displayed field: {req:?}"
             );
-            if validate_request(&req).is_ok() {
+            if ValidatedRequest::validate(req.clone()).is_ok() {
                 accepted += 1;
             } else {
                 rejected += 1;

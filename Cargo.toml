@@ -34,6 +34,12 @@ path = "src/lib.rs"
 [features]
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
+[lints.rust]
+# `kani` is set by the Kani model checker (cargo kani), never by a normal
+# build. Register it so the `-D warnings` clippy gate doesn't trip over the
+# `#[cfg(kani)]` proof module. See src/proofs.rs and docs/formalisation-roadmap.md.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(kani)'] }
+
 [dependencies]
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }

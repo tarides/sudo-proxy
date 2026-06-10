@@ -6,14 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Rung 3 — Kani + Flux on the validation boundary
-
-Kani (bounded model checker) over the attacker-controlled parsers — `parse_age`,
-base64 / request decoding — proving no panic/overflow/wrap for all inputs up to a
-bound (strengthens Sn2.2). Flux refinement types to make "a `Request` reaching
-`dispatch` has passed `validate_request`" a type error if violated (closes the
-F1-class gap by construction).
-
 ## Rung 4 — Protocol-level models
 
 TLA+/PlusCal or Alloy model of the approval + `confirm_unprivileged` policy state
