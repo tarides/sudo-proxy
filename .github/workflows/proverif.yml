@@ -1,0 +1,51 @@
+name: ProVerif
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: proverif-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proverif:
+    name: proverif (Rung 4 SSH channel, informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      # ProVerif brings its own toolchain (installed via opam / OCaml),
+      # independent of rust-toolchain.toml, so this does not affect the gating
+      # Rust jobs. m4 expands the single .m4.pv template into the two
+      # configurations.
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: '5'
+      # Refresh the apt index before opam pulls ProVerif's system deps (it
+      # depends on the GTK GUI libs). Without this the runner's mirror
+      # intermittently 404s on a superseded liblzma-dev version pin, which
+      # fails this otherwise non-gating job at install time (seen flapping on
+      # this branch -- same commit passing on one trigger, failing on another).
+      - name: Refresh apt package index
+        run: sudo apt-get update
+      - name: Install ProVerif
+        run: opam install -y proverif
+      # Informational only, like the kani / geiger jobs. Both configurations are
+      # run so the log shows both outcomes. The FIRST-CONTACT run is *expected*
+      # to report query (c) (payload secrecy) false with a key-substitution
+      # attack derivation -- that surfaced gap is the artifact's purpose
+      # (attack-tree leaf 4.2), so the job must not gate on ProVerif's exit code
+      # (continue-on-error + the `|| true` below).
+      - name: Check the SSH-channel model (pinned + first-contact)
+        continue-on-error: true
+        run: |
+          echo '================ PINNED (known_hosts populated) ================'
+          m4 -DPINNED proofs/proverif/ssh-channel.m4.pv > pinned.pv
+          opam exec -- proverif pinned.pv || true
+          echo '================ FIRST CONTACT (no pinning; MITM expected) ====='
+          m4 proofs/proverif/ssh-channel.m4.pv > unpinned.pv
+          opam exec -- proverif unpinned.pv || true

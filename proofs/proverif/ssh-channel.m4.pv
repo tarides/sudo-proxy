@@ -1,0 +1,177 @@
+(***************************************************************************)
+(* Rung 4 of the sudo-proxy formalisation roadmap: a ProVerif symbolic     *)
+(* (Dolev-Yao) model of the SSH-tunnel path.                               *)
+(*                                                                         *)
+(* Its job is to make assumption A4 load-bearing and EXPLICIT by DERIVING  *)
+(* the first-contact MITM (attack-tree leaf 4.2) rather than assuming it.  *)
+(* The earlier version of this model toggled the tunnel between a PRIVATE  *)
+(* and a public channel -- it therefore *declared* the channel secure when *)
+(* pinned instead of showing *why* pinning makes it so. This version       *)
+(* instead models the real key material: the remote has a host keypair,    *)
+(* the local daemon ACCEPTS a host key (the known-good one when pinned;    *)
+(* whatever the network offers on first contact), and encrypts the request *)
+(* to the accepted key. ProVerif then derives the MITM from the attacker   *)
+(* substituting its own key.                                               *)
+(*                                                                         *)
+(* Because modelling only the host key while ignoring client auth would    *)
+(* misrepresent the system (it would paint the honest remote as accepting  *)
+(* forged commands even when pinned -- which the remote's authorized_keys  *)
+(* check actually prevents), we model the REAL mutual-authentication       *)
+(* structure of the SSH use case:                                          *)
+(*   - host key  (server -> client): pinning + confidentiality (A4);        *)
+(*   - client key (client -> server): authorized_keys, request integrity.   *)
+(* The model then DISENTANGLES which assumption protects what:             *)
+(*   - confidentiality of the payload rides on HOST-KEY PINNING;           *)
+(*   - command authenticity at the remote rides on CLIENT AUTH -- and so   *)
+(*     holds even on first contact.                                        *)
+(*                                                                         *)
+(* TOGGLE (compile-time, via m4) -- flips only WHICH host key the daemon   *)
+(* accepts; the channel is the public network in BOTH configurations:      *)
+(*   m4 -DPINNED ssh-channel.m4.pv | proverif /dev/stdin   -- pinned       *)
+(*   m4          ssh-channel.m4.pv | proverif /dev/stdin   -- first contact*)
+(* See README.md for the expected outcomes and the scope statement.        *)
+(*                                                                         *)
+(* SCOPE (stated plainly, as the Kani/TLA+ artifacts do):                  *)
+(*  - Symbolic Dolev-Yao model: crypto PRIMITIVES are perfect (keys        *)
+(*    unguessable, aenc/sign unbreakable). We model the authentication     *)
+(*    STRUCTURE SSH realises (a confidential channel to whoever's host key *)
+(*    was accepted, plus client authentication by key), not SSH's          *)
+(*    transport/key-exchange internals -- those stay a black box.          *)
+(*  - Time is abstracted to nonce uniqueness + event ordering; the 60s     *)
+(*    freshness and 120s dedup windows are not modelled numerically (that  *)
+(*    arithmetic is Rung 3 Kani's domain, ymd_hms_to_epoch). App-layer     *)
+(*    replay dedup is the TLA+ ReplayImpossible invariant's domain.        *)
+(*  - The human keypress is a trusted local action (assumption A1): the    *)
+(*    approval channel is private and not attacker-injectable. This is     *)
+(*    what yields the separation theorem (d).                              *)
+(*  - DoS, traffic analysis, and side channels are out of scope.           *)
+(***************************************************************************)
+
+(* ----------------------------- channels ------------------------------- *)
+free pub:channel.                       (* the Dolev-Yao network           *)
+
+(* The trusted /dev/tty approval handshake (assumption A1): the daemon
+   shows a command, the human approves exactly that command. Private, so a
+   network attacker can neither read nor forge an approval. *)
+free ttyShow:channel [private].
+free ttyAck:channel  [private].
+
+(* --------------------------- cryptography ----------------------------- *)
+(* Host keypair (server -> client authentication + confidentiality): SSH's
+   host key, the one pinned in known_hosts. Asymmetric encryption to it
+   gives a confidential channel to its holder. *)
+type skey.
+type pkey.
+fun pk(skey):pkey.
+fun aenc(bitstring, pkey):bitstring.
+reduc forall m:bitstring, k:skey; adec(aenc(m, pk(k)), k) = m.
+
+(* Client keypair (client -> server authentication): the local daemon's key,
+   trusted by the remote's authorized_keys. A signature authenticates the
+   request and binds its integrity. *)
+type sskey.
+type spkey.
+fun spk(sskey):spkey.
+fun sign(bitstring, sskey):bitstring.
+reduc forall m:bitstring, k:sskey; checksign(sign(m, k), spk(k)) = m.
+
+(* The forwarded-agent secret / a stand-in for confidential tunnelled
+   payload. Secret unless the channel leaks it. *)
+free agentSecret:bitstring [private].
+
+(* ------------------------------ events -------------------------------- *)
+event RequestSent(bitstring, bitstring).    (* (id, cmd) emitted by local daemon  *)
+event RemoteAccept(bitstring, bitstring).   (* (id, cmd) accepted by honest remote *)
+event RemoteExec(bitstring).                (* cmd executed by honest remote       *)
+event Keypress(bitstring).                  (* human approved cmd at the TTY       *)
+
+(* ------------------------------ queries ------------------------------- *)
+
+(* (a) Authenticity / integrity: the honest remote accepts only a request
+       the local daemon actually sent. Rides on CLIENT AUTH (the signature
+       the remote checks against authorized_keys), so it holds INDEPENDENT
+       of host-key pinning -- the attacker cannot forge the daemon's
+       signature on a command of its choosing in either configuration.
+       PINNED: true.  FIRST CONTACT: true. *)
+query id:bitstring, c:bitstring;
+  event(RemoteAccept(id, c)) ==> event(RequestSent(id, c)).
+
+(* (b) Replay resistance (injective): each acceptance corresponds to a
+       DISTINCT send. The model has no application-layer dedup, so a captured
+       ciphertext can be replayed and the remote re-accepts it -- false in
+       BOTH configurations (a genuine public-channel replay, not a
+       private-channel over-approximation). App-layer injectivity is the
+       TLA+ ReplayImpossible invariant's domain (UUID dedup), and freshness
+       monotonicity is the Kani ymd_hms_to_epoch_is_monotone proof. *)
+query id:bitstring, c:bitstring;
+  inj-event(RemoteAccept(id, c)) ==> inj-event(RequestSent(id, c)).
+
+(* (c) Secrecy of the forwarded-agent secret / tunnelled payload. Rides on
+       HOST-KEY PINNING: the daemon encrypts to the ACCEPTED host key, so
+       confidentiality holds iff that key is the honest remote's.
+       PINNED: true (not derivable).
+       FIRST CONTACT: false -- the attacker substitutes its own host key,
+       the daemon encrypts to it, the attacker decrypts. THE DERIVED MITM. *)
+query attacker(agentSecret).
+
+(* (d) Separation theorem: the honest remote execs a command only after a
+       human keypress approving exactly that command -- holds in BOTH
+       configurations, i.e. even when the channel is fully compromised the
+       SSH compromise does NOT bypass the local human gate (A1, private TTY). *)
+query c:bitstring;
+  event(RemoteExec(c)) ==> event(Keypress(c)).
+
+(* ----------------------------- processes ------------------------------ *)
+
+(* Emit the request: signed by the client key (authorized_keys auth +
+   integrity) and encrypted to the accepted host key (confidentiality).
+   Factored out so the two toggle branches share one tail. *)
+let SendReq(skL:sskey, pkAccepted:pkey, id:bitstring, c:bitstring) =
+    out(pub, aenc((id, c, agentSecret, sign((id, c), skL)), pkAccepted)).
+
+(* The local daemon (run_remote): the MCP caller (adversary A1) chooses the
+   command; the daemon stamps a fresh UUID nonce, then ACCEPTS a host key --
+   the pinned known-good key, or (first contact) whatever the network offers,
+   which the attacker can answer with its own key. *)
+let LocalDaemon(skL:sskey, pkR:pkey) =
+    in(pub, c:bitstring);
+    new id:bitstring;
+    event RequestSent(id, c);
+ifdef(`PINNED',
+    (* pinned: use the known-good host key from known_hosts *)
+    SendReq(skL, pkR, id, c)
+,
+    (* first contact: accept whatever host key the network offers *)
+    in(pub, pkAccepted:pkey);
+    SendReq(skL, pkAccepted, id, c)
+).
+
+(* The honest remote daemon: decrypts with its host secret key, verifies the
+   client signature against the daemon's public key (authorized_keys) and
+   that it covers exactly (id, c), then runs the unconditional approval gate
+   -- shows the command on the trusted TTY and executes only once the human
+   approves exactly that command. *)
+let RemoteDaemon(skR:skey, pkL:spkey) =
+    in(pub, ct:bitstring);
+    let (id:bitstring, c:bitstring, s:bitstring, sg:bitstring) = adec(ct, skR) in
+    let (=id, =c) = checksign(sg, pkL) in
+    event RemoteAccept(id, c);
+    out(ttyShow, c);
+    in(ttyAck, =c);
+    event RemoteExec(c).
+
+(* The human at the trusted TTY: sees a command and approves it (worst case
+   -- approves whatever is shown; we prove exec=>keypress, not refusal). *)
+let Human =
+    in(ttyShow, c:bitstring);
+    event Keypress(c);
+    out(ttyAck, c).
+
+process
+    new skR:skey;                 (* honest remote host keypair *)
+    new skL:sskey;                (* local daemon client keypair *)
+    let pkR = pk(skR) in
+    let pkL = spk(skL) in
+    out(pub, pkR);                (* host public key is public knowledge *)
+    out(pub, pkL);                (* client public key is public knowledge *)
+    ( !LocalDaemon(skL, pkR) | !RemoteDaemon(skR, pkL) | !Human )

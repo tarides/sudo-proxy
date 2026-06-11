@@ -6,14 +6,20 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Rung 4 — Protocol-level models
+## Cap far-future request timestamps (replay-protection gap)
 
-TLA+/PlusCal or Alloy model of the approval + `confirm_unprivileged` policy state
-machine: replay impossible, no exec without approval, policy flag transitions
-only on an interactive keypress (pins down the F2 / attack-tree leaf 1.4/4.4
-residual). Tamarin/ProVerif model of the SSH path to make the channel
-assumptions explicit and surface the first-contact MITM gap (attack-tree leaf
-4.2 / assumption A4).
+Surfaced by the Extended Rung 4 `ReplayWindow` TLA+ model. `parse_age`
+(`server.rs:146`) clamps a future-dated timestamp to age 0 with **no upper
+bound**, so a request dated beyond `REPLAY_RETENTION` into the future passes the
+freshness gate indefinitely while its id ages out of `SeenIds` — making it
+replayable every retention window *regardless of how large retention is*. The
+60s↔120s window relationship does not help here. Low severity (needs the request
+onto the channel — SSH pinning guards that — and privileged commands still gate
+the first run on a keypress), but for auto-approved unprivileged commands it is a
+real repeatable replay. Fix: in `check_freshness` / `parse_age`, reject
+timestamps more than a small clock-skew allowance into the future instead of
+clamping to age 0; extend the Rung 2 freshness property and the `ReplayWindow`
+model's `NoFutureReplay` invariant to cover it.
 
 ## Rung 5 — Deductive verification of the trusted core
 
