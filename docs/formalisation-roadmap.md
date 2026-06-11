@@ -238,15 +238,24 @@ The most interesting properties are temporal and relational, not per-function:
     style fits structural questions less well here.
 
 - **SSH path — ProVerif** ([`proofs/proverif/`](../proofs/proverif/)). A symbolic
-  Dolev-Yao model with a compile-time `PINNED` toggle (via `m4`): the tunnel is a
-  private channel when the host key is pinned, public when not. It proves channel
-  authenticity and payload/agent secrecy hold **iff** the key is pinned, exhibits
-  a concrete **first-contact MITM** trace when it is not (leaf 4.2), and proves a
-  **separation theorem** — a privileged exec at the honest remote requires a human
-  keypress even with the channel fully compromised. This makes assumption A4
-  load-bearing and explicit. Scope and the honest note on injective replay (a
-  ProVerif private-channel over-approximation, discharged instead by the TLA+
-  `ReplayImpossible` + Kani freshness proofs) are in
+  Dolev-Yao model with a compile-time `PINNED` toggle (via `m4`). Rather than
+  *declaring* the tunnel private when pinned (which would assume the conclusion),
+  it models the real **key material** — a host keypair and a client keypair, the
+  mutual authentication of the SSH use case — and the toggle flips only **which
+  host key the daemon accepts** (the known-good one, or whatever the network
+  offers on first contact). ProVerif then **derives** the first-contact MITM from
+  the attacker substituting its own host key (payload secrecy `false` unpinned,
+  with a key-substitution trace — leaf 4.2). The model **disentangles** which
+  assumption protects what: payload **confidentiality** rides on host-key pinning
+  (A4), while **command authenticity** at the remote rides on **client auth**
+  (the remote's `authorized_keys`) and so holds even on first contact — correcting
+  the earlier channel-toggle model's conflation. It also proves a **separation
+  theorem** — a privileged exec at the honest remote requires a human keypress
+  even with the channel fully compromised — making assumption A4 load-bearing and
+  explicit. Scope, the per-assumption attribution, the three negative controls,
+  and the now-honest injective-replay result (a genuine public-channel replay, no
+  longer a private-channel over-approximation; app-layer dedup discharged by the
+  TLA+ `ReplayImpossible` + Kani freshness proofs) are in
   [`proofs/proverif/README.md`](../proofs/proverif/README.md).
   - **Decision: ProVerif over Tamarin.** The model's job is one binary toggle
     plus producing an attack derivation, which ProVerif's applied-pi calculus

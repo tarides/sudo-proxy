@@ -29,9 +29,10 @@ jobs:
         run: opam install -y proverif
       # Informational only, like the kani / geiger jobs. Both configurations are
       # run so the log shows both outcomes. The FIRST-CONTACT run is *expected*
-      # to report query (a)/(c) false with an attack trace -- that surfaced gap
-      # is the artifact's purpose (attack-tree leaf 4.2), so the job must not
-      # gate on ProVerif's exit code (continue-on-error + the `|| true` below).
+      # to report query (c) (payload secrecy) false with a key-substitution
+      # attack derivation -- that surfaced gap is the artifact's purpose
+      # (attack-tree leaf 4.2), so the job must not gate on ProVerif's exit code
+      # (continue-on-error + the `|| true` below).
       - name: Check the SSH-channel model (pinned + first-contact)
         continue-on-error: true
         run: |

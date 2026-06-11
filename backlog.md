@@ -6,17 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Extended Rung 4 — SSH key-acceptance model (ProVerif)
-
-The shipped `proofs/proverif/` model *declares* the tunnel private when pinned
-(channel-toggle), so it assumes rather than derives the MITM. Replace with the
-key-acceptance encoding: give the remote a host keypair, have the local daemon
-accept a key (pinned ⇒ only the honest key; unpinned ⇒ whatever arrives), and
-encrypt the request to the accepted key. ProVerif then *derives* the first-
-contact MITM from the attacker substituting its key, showing *why* pinning
-matters rather than *that* we assumed it — strengthening the model's whole point
-(make A4 load-bearing). Nice-to-have, not essential.
-
 ## Cap far-future request timestamps (replay-protection gap)
 
 Surfaced by the Extended Rung 4 `ReplayWindow` TLA+ model. `parse_age`

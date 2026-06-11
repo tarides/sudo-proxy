@@ -65,7 +65,7 @@ asserted, evidence not yet produced).
 | **A1** | Assumption | `/dev/tty` is trusted: what the daemon writes is what the human sees, and the keypress read is the human's. |
 | **A2** | Assumption | `sudo` (and `pkexec`) correctly enforce escalation and `env_reset`; the kernel enforces socket permissions and `SO_PEERCRED`. |
 | **A3** | Assumption | The host is effectively single-user *or* the operator accepts that any same-UID process is already inside the trust boundary for non-privileged actions (finding F2). |
-| **A4** | Assumption | For the SSH path, remote hosts are in `known_hosts` before first use (or `StrictHostKeyChecking=accept-new` is configured); the SSH channel provides confidentiality and integrity. |
+| **A4** | Assumption | For the SSH path, remote hosts are in `known_hosts` before first use (or `StrictHostKeyChecking=accept-new` is configured) — this gives payload confidentiality and lets the daemon reach the genuine remote; **and** the daemon authenticates to the remote by key (the remote's `authorized_keys`), which gives command authenticity at the remote. The ProVerif model ([`proofs/proverif/`](../proofs/proverif/)) makes both halves explicit and shows which guarantee rests on which. |
 | **J1** | Justification | The whole security model reduces to G1 (see [security-audit.md](security-audit.md#summary)); structuring the argument around the single invariant keeps every control traceable to it. |
 | **S1** | Strategy | Argue over the causal path from an inbound request to root execution: a request must be *authentic* (G2), what executes must be *the thing that was validated* (G3), the human must *see the real command* (G4), approval must be *necessary and binding* (G5), and no adversary may *bypass* the gate (G6). |
 
@@ -138,7 +138,7 @@ keypress binds to the command shown.*
 | **G6.2** | **A2** (same-UID direct socket): daemon-side validation does not depend on client-side `validate_host`; display fields validated at the daemon. | — | |
 | **Sn6.2** | F1 fix moves sanitization into `validate_request` (daemon side); `SO_PEERCRED` + 0600. | 2 | [discharged] |
 | **G6.3** | **A3** (network / remote): `validate_host` allowlist `[A-Za-z0-9._@:-]`, rejects leading `-` (ssh option injection); host is a trailing positional; remote UID digit-only + length-capped; ssh via argv. | — | |
-| **Sn6.3** | `src/server.rs`, `src/bin/sudo-proxy.rs`, `src/hosts.rs`. ProVerif model ([`proofs/proverif/`](../proofs/proverif/)) makes **A4 explicit**: channel authenticity/secrecy hold *iff* the host key is pinned, and the unpinned run exhibits the first-contact MITM (leaf 4.2); the separation theorem shows a channel compromise does not bypass the local keypress gate. Residual A4 (no `StrictHostKeyChecking`) now formally characterised, not closed. | 4 | [discharged] (residual A4 made explicit) |
+| **Sn6.3** | `src/server.rs`, `src/bin/sudo-proxy.rs`, `src/hosts.rs`. ProVerif model ([`proofs/proverif/`](../proofs/proverif/)) makes **A4 explicit** by modelling the real host-key + client-key material: it **derives** the first-contact MITM from host-key substitution (payload secrecy `false` unpinned — leaf 4.2), and disentangles confidentiality (rides on host-key pinning) from command authenticity (rides on client auth, so it holds even on first contact); the separation theorem shows a channel compromise does not bypass the local keypress gate. Residual A4 (no `StrictHostKeyChecking`) now formally characterised, not closed. | 4 | [discharged] (residual A4 made explicit) |
 | **G6.4** | Resource exhaustion cannot force-open the gate: 1 MiB request cap, 64 in-flight, 16 MiB output cap. | — | |
 | **Sn6.4** | `src/server.rs`, `src/executor.rs`; cap test (flaky **S2**, control sound). | 1–2 | [partial] |
 
@@ -152,8 +152,10 @@ These are the leaves where the argument is currently weakest, drawn from
   **TLC-checked** state machine ([`proofs/tla/`](../proofs/tla/), Rung 4).
 - **Sn6.3** — the A3 channel guarantees rest on assumption **A4**; the
   **ProVerif** model ([`proofs/proverif/`](../proofs/proverif/), Rung 4) now
-  makes that dependency explicit and surfaces the first-contact MITM gap (a
-  *characterised residual*, not a closed one — see leaf 4.2).
+  makes that dependency explicit by *deriving* the first-contact MITM from
+  host-key substitution (a *characterised residual*, not a closed one — see leaf
+  4.2), and attributes confidentiality to host-key pinning vs command
+  authenticity to client auth.
 - **Sn6.4 / S2** — stabilise the flaky resource-cap test so the cap stays
   covered in CI.
 - **Sn4.4 / Sn5.3** — accepted residual risks (look-alike `reason`, the

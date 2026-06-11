@@ -3,6 +3,67 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-06-11 — Extended Rung 4: SSH key-acceptance model, mutual auth (ProVerif)
+
+Reworked the Rung 4 ProVerif model (`proofs/proverif/ssh-channel.m4.pv`,
+**non-gating** in CI) from a channel-toggle that *declared* the tunnel private
+when pinned — assuming the MITM — to a **key-acceptance** encoding that
+**derives** it. The model now carries the real key material and the `PINNED`
+`m4` toggle flips only *which host key the daemon accepts*; the channel is the
+public Dolev-Yao network in both configurations. Strengthens assurance-case leaf
+Sn6.3 / G6.3 and makes assumption A4 genuinely load-bearing.
+
+- **Both-or-nothing design (mutual auth).** Modelling the host key alone while
+  ignoring client auth would misrepresent the system (it would paint the honest
+  remote as accepting forged commands even when pinned, which `authorized_keys`
+  prevents). So the model captures the real SSH mutual-authentication structure:
+  a **host keypair** (server→client: pinning + confidentiality, A4) and a
+  **client keypair** (client→server: `authorized_keys`, request integrity). The
+  crypto *primitives* stay a perfect black box — "under the hood" means the
+  authentication *structure*, not SSH's algorithms.
+
+- **The derived MITM.** Query **(c)** `not attacker(agentSecret)` is `true` when
+  pinned and **`false`** on first contact, with ProVerif's derivation being
+  exactly the key substitution: the attacker mints its own host key `pk(k)`, the
+  daemon accepts it and encrypts the payload to it, the attacker decrypts with
+  `k`. This is leaf 4.2 *derived* rather than assumed.
+
+- **The disentanglement (the payoff).** The four queries attribute each guarantee
+  to its assumption: **(a)** command authenticity (`RemoteAccept ⟹ RequestSent`)
+  is `true` in **both** configs — it rides on **client auth**, so a first-contact
+  eavesdropper still cannot forge or alter a command; **(c)** confidentiality
+  rides on **host-key pinning (A4)**; **(d)** separation
+  (`RemoteExec ⟹ Keypress`) is `true` in both — the private TTY (A1) is out of
+  the attacker's reach. The earlier model's "(a) holds iff pinned" was an
+  artifact of the assumed-private channel; the key-level model corrects it.
+
+- **Injective replay (b), now honest.** `false` in **both** configs with a real
+  public-channel replay trace — the earlier "cannot be proved when pinned"
+  private-channel over-approximation is **gone**. App-layer injective
+  replay-resistance stays discharged by the TLA+ `ReplayImpossible` invariant and
+  the Kani freshness-monotonicity proof.
+
+- **Teeth — three documented negative controls** (apply by hand, never
+  committed), each run and producing the expected result: **NC1** drops the
+  `checksign` client-auth check → **(a)** turns `false` even pinned (client auth
+  is load-bearing; confidentiality stays `true`, showing orthogonality); **NC2**
+  is the first-contact run itself → **(c)** `false`; **NC3** makes `ttyAck`
+  public → **(d)** no longer provable (the private TTY is load-bearing).
+
+- **Docs:** `proofs/proverif/README.md` rewritten (key-acceptance toggle, the
+  query table + "rides on" column, the disentanglement narrative, the three
+  controls, scope with the now-explicit client-auth assumption); `proverif.yml`
+  comment names **(c)** as the expected-`false` first-contact query;
+  `docs/threat-model.md` (leaf 4.2), `docs/assurance-case.md` (A4 + Sn6.3), and
+  `docs/formalisation-roadmap.md` updated for derived-not-assumed + the
+  per-assumption attribution. No Rust touched (`proofs/` is outside `src/`); the
+  three TLA+ sibling models are untouched.
+
+- **Verified:** ProVerif 2.05, both `m4` configs — pinned: (a) true, (b) false,
+  (c) true, (d) true; first contact: (a) true, (b) false, (c) **false** with the
+  key-substitution derivation, (d) true. All three negative controls fail as
+  required.
+
 ## 2026-06-11 — Extended Rung 4: concurrent-handler interleaving (TLA+)
 
 Added a third TLA+/PlusCal model, `proofs/tla/ConcurrentHandlers.tla` (checked by
