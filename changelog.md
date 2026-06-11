@@ -184,6 +184,13 @@ assurance-case leaf 1.1 / G2.1.
 
 ## 2026-06-11 — Rung 4: protocol-level formal models (TLA+ + ProVerif)
 
+> **Note (superseded in part):** the ProVerif description below reflects the
+> original *channel-toggle* model (private tunnel when pinned, with the
+> injective-replay over-approximation). It was reworked the same day into the
+> *key-acceptance* mutual-auth model — see the **"Extended Rung 4: SSH
+> key-acceptance model, mutual auth (ProVerif)"** entry at the top of this file.
+> The TLA+ half of this entry stands unchanged.
+
 Discharged **Rung 4** of the assurance ladder — the temporal/relational
 properties that are not per-function — with two machine-checked models under a
 new top-level `proofs/` dir (kept out of `src/` so cargo/clippy never see them).
