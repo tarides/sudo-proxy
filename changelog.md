@@ -3,6 +3,75 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-06-11 — Rung 4: protocol-level formal models (TLA+ + ProVerif)
+
+Discharged **Rung 4** of the assurance ladder — the temporal/relational
+properties that are not per-function — with two machine-checked models under a
+new top-level `proofs/` dir (kept out of `src/` so cargo/clippy never see them).
+Both run **non-gating** in CI, mirroring the Rung 3 Kani job. Strengthens the
+assurance-case leaves Sn5.1 / Sn5.3 (state machine) and Sn6.3 (SSH) from
+`[partial] → planned` to machine-checked / formally-characterised evidence.
+
+- **Approval state machine — TLA+/PlusCal** (`proofs/tla/`, checked by TLC). The
+  PlusCal transcribes the `handle_connection` gate chain and `tui::classify_key`;
+  a nondeterministic environment process quantifies over all attacker
+  field-forgeries/replays *and* all operator keypresses. Four safety properties
+  hold: `NoExecWithoutApproval`, `ReplayImpossible`, `PolicyFlipsOnlyOnKeypress`
+  (+ a `FlagMonotone` action property), `PrivilegedGateIndependentOfPolicy` —
+  the machine-checked closure of the 1.4/4.4 policy-transition residual (F2).
+  - Properties are tracked by bounded **monitor variables** (a violation flag
+    raised at each bad-event site), so the reachable state space is finite and
+    small (~9k states, sub-second) with *no* history-length constraint — the
+    first cut with a full event log blew up past 180M states. No `MaxLog` hack.
+  - **Teeth:** four documented negative-control mutations (exec on timeout; flag
+    wired into the privileged gate; dedup gate removed; flag flipped on a
+    non-`a` keypress) each produce the expected TLC counterexample.
+  - **Decision: TLA+/PlusCal over Alloy** — the properties are temporal/safety
+    over an evolving state machine, TLC's home turf; Alloy's relational style
+    fits less well. Recorded in `docs/formalisation-roadmap.md`.
+
+- **SSH path — ProVerif** (`proofs/proverif/`). A symbolic Dolev-Yao model with a
+  compile-time `PINNED` toggle (via `m4`): the SSH tunnel is a private channel
+  when the host key is pinned, public when not. It proves channel authenticity
+  `(a)` and payload/agent secrecy `(c)` hold **iff** the key is pinned, exhibits
+  a concrete **first-contact MITM** trace when it is not (attack-tree leaf 4.2),
+  and proves a **separation theorem** `(d)` — a privileged exec at the honest
+  remote requires a human keypress even with the channel fully compromised. This
+  makes assumption A4 load-bearing and explicit.
+  - **Honest note on injective replay `(b)`:** ProVerif reports it "cannot be
+    proved" on the *private* (pinned) channel — a known over-approximation of
+    its non-linear private-channel semantics, with **no** attack trace; on the
+    public channel it is genuinely `false` with a replay trace (the surfaced
+    gap). App-layer injectivity is discharged instead by the TLA+
+    `ReplayImpossible` invariant and the Kani freshness-monotonicity proof — a
+    coherent cross-rung split, and faithful to the threat model's "replay
+    protection rides on A4".
+  - **Decision: ProVerif over Tamarin** — one binary toggle + an attack
+    derivation, expressed with least ceremony and proved fully automatically;
+    Tamarin's unbounded-state/inductive strengths aren't needed. Recorded in the
+    roadmap.
+
+- **Scope, stated plainly** (per-model README "faithfulness ledger" / scope
+  notes): the TLA+ model abstracts the clock/env/decode to booleans, never-evicts
+  the replay set (conservative for replay), and leaves concurrency/TOCTOU and
+  per-field content scanning to their other rungs; the ProVerif model treats SSH
+  crypto as a perfect black box and abstracts time to nonces + ordering. The two
+  *accepted* residuals (by-design unprivileged auto-approve; A4 first-contact
+  dependency) are now formally **characterised**, not closed.
+
+- **CI:** `.github/workflows/tlc.yml` (fetches `tla2tools.jar`, runs TLC) and
+  `.github/workflows/proverif.yml` (installs ProVerif via opam, runs both `m4`
+  configurations) — both `continue-on-error`, like the Kani/geiger jobs. The
+  unpinned ProVerif run reporting `(a)/(c)` false is the *expected, desired*
+  output, so the job is not gated on ProVerif's exit code.
+
+- **Verified:** TLC reports no error (9072 distinct states) and each negative
+  control fails as required; ProVerif gives the pinned-vs-first-contact split
+  above. Core + `--features mcp` release build and
+  `cargo clippy --all-targets --all-features -- -D warnings` remain clean (no
+  Rust touched; `proofs/` is outside `src/` and not a workspace member, so cargo
+  ignores it).
+
 ## 2026-06-10 — Rung 3: Kani bounded proofs + validation-boundary typestate
 
 Discharged **Rung 3** of the assurance ladder. The Kani half proves the

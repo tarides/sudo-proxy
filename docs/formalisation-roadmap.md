@@ -219,6 +219,48 @@ The most interesting properties are temporal and relational, not per-function:
   will surface the first-contact MITM gap the audit noted (the ssh invocation
   sets no `StrictHostKeyChecking`).
 
+**Status: done.** Both halves are built and run non-gating in CI
+(`.github/workflows/tlc.yml`, `proverif.yml`), mirroring the Rung 3 Kani job.
+
+- **Approval state machine — TLA+/PlusCal** ([`proofs/tla/`](../proofs/tla/),
+  checked by TLC). The PlusCal transcribes the `handle_connection` gate chain and
+  `tui::classify_key`; a nondeterministic environment process quantifies over all
+  attacker field-forgeries / replays *and* all operator keypresses. Four safety
+  properties hold: `NoExecWithoutApproval`, `ReplayImpossible`,
+  `PolicyFlipsOnlyOnKeypress` (+ a `FlagMonotone` action property), and
+  `PrivilegedGateIndependentOfPolicy` — discharging the 1.4/4.4 policy-transition
+  residual. Properties are tracked by bounded *monitor variables* so the state
+  space is finite without a history bound; four documented negative-control
+  mutations each produce the expected counterexample (the model has teeth). Full
+  faithfulness ledger in [`proofs/tla/README.md`](../proofs/tla/README.md).
+  - **Decision: TLA+/PlusCal over Alloy.** The properties are temporal/safety
+    over an evolving state machine, which TLC checks directly; Alloy's relational
+    style fits structural questions less well here.
+
+- **SSH path — ProVerif** ([`proofs/proverif/`](../proofs/proverif/)). A symbolic
+  Dolev-Yao model with a compile-time `PINNED` toggle (via `m4`): the tunnel is a
+  private channel when the host key is pinned, public when not. It proves channel
+  authenticity and payload/agent secrecy hold **iff** the key is pinned, exhibits
+  a concrete **first-contact MITM** trace when it is not (leaf 4.2), and proves a
+  **separation theorem** — a privileged exec at the honest remote requires a human
+  keypress even with the channel fully compromised. This makes assumption A4
+  load-bearing and explicit. Scope and the honest note on injective replay (a
+  ProVerif private-channel over-approximation, discharged instead by the TLA+
+  `ReplayImpossible` + Kani freshness proofs) are in
+  [`proofs/proverif/README.md`](../proofs/proverif/README.md).
+  - **Decision: ProVerif over Tamarin.** The model's job is one binary toggle
+    plus producing an attack derivation, which ProVerif's applied-pi calculus
+    expresses with least ceremony and proves fully automatically; Tamarin's
+    unbounded-state / inductive strengths aren't needed.
+
+- **Scope / residuals carried past Rung 4:** the TLA+ model abstracts the clock,
+  env contents and decode to booleans and never-evicts the replay set
+  (conservative for replay); concurrency/TOCTOU and per-field content scanning
+  stay with their other rungs. The ProVerif model treats SSH crypto as a perfect
+  black box and abstracts time to nonces + ordering. The two *accepted* residuals
+  (the by-design unprivileged auto-approve, and the A4 first-contact dependency)
+  are now formally **characterised**, not closed.
+
 ### Rung 5 — Deductive verification of the core (EAL5–7 territory)
 
 For the few functions that *are* the invariant, prove functional correctness
@@ -263,11 +305,12 @@ prefix-matching escapes documented in the
    the existing `security.md` / `security-audit.md` prose into the formal
    model / threats / requirements / constraints artifact, with no code change. A
    full CC-structured **Security Target** document is the remaining paper step.
-2. CI-ify Rung 1 and turn the existing fuzz tests into **named properties**
-   (Rung 2).
-3. Add **Kani** on the parsers and a **TLA+/Alloy** model of the approval +
-   policy state machine (Rungs 3–4) — the highest assurance-per-effort steps,
-   and they directly target findings F1/F2 and the replay invariant.
+2. **Done** — CI-ified Rung 1 and turned the existing fuzz tests into **named
+   properties** (Rung 2).
+3. **Done** — **Kani** on the parsers (Rung 3) and a **TLA+/PlusCal** model of
+   the approval + policy state machine plus a **ProVerif** model of the SSH path
+   (Rung 4) — the highest assurance-per-effort steps, directly targeting findings
+   F1/F2, the replay invariant, and the A4 first-contact gap.
 4. Treat **Creusot / Verus** (Rung 5) and **seL4-style refinement** (Rung 6) as
    a stated long-horizon goal in the assurance case, with the trust assumptions
    written down now.
@@ -280,7 +323,7 @@ prefix-matching escapes documented in the
 | 1 | Review + static analysis | clippy, cargo-audit, cargo-deny, cargo-geiger, Semgrep/MIRAI | display sanitization, `unsafe` surface | EAL1–3 |
 | 2 | Property-based testing | proptest, quickcheck | `shell_escape`, `parse_age`, display fields, policy flag | EAL3–4 |
 | 3 | Automated formal | Kani, Flux | parsers (no panic/overflow), validation boundary | EAL4–5 |
-| 4 | Protocol verification | TLA+/PlusCal, Alloy, Tamarin/ProVerif | approval state machine, replay, SSH path | EAL5–6 |
+| 4 ✓ | Protocol verification | TLA+/PlusCal (TLC), ProVerif ([`proofs/`](../proofs/)) | approval state machine, replay, SSH path | EAL5–6 |
 | 5 | Deductive verification | Creusot, Verus, Prusti | `validate_request`, dispatch, env allowlist | EAL6–7 |
 | 6 | Machine-checked refinement | seL4-style (Isabelle/Coq, Iris) | daemon logic refines abstract approval spec | EAL7 |
 

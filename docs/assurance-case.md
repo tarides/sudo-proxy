@@ -121,11 +121,11 @@ keypress binds to the command shown.*
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
 | **G5.1** | `privileged:true` always reaches the Y/N gate regardless of any policy. | — | |
-| **Sn5.1** | Verified in audit: only an interactive keypress sets policy; no request field, replay, or MCP tool flips it. `src/server.rs`. | 2 | [partial] → TLA+/Alloy state-machine model (Rung 4) |
+| **Sn5.1** | TLC-checked: the `PolicyFlipsOnlyOnKeypress` invariant of [`proofs/tla/`](../proofs/tla/) proves the policy flag flips only via an interactive `a` keypress on an unprivileged request — never a request field, replay, MCP flag, or timeout — over all attacker forgeries/replays and operator choices. `src/server.rs`. | 4 | [discharged] (model-checked) |
 | **G5.2** | The prompt reads a single keypress in non-canonical mode and times out after 60 s (default **deny**). | — | |
 | **Sn5.2** | `src/tui.rs` prompt; timeout test. | 1 | [discharged] |
 | **G5.3** | The `confirm_unprivileged=false` policy relaxes only the **non-privileged** gate, never the privileged one, and only via an interactive `a` keypress. | — | |
-| **Sn5.3** | Audit finding **F2**: by-design trade-off, residual risk documented; `display_banner` reliability improvement recommended. | 0 | [partial] → model-check transition (Rung 4) |
+| **Sn5.3** | TLC-checked: `NoExecWithoutApproval` + `PrivilegedGateIndependentOfPolicy` ([`proofs/tla/`](../proofs/tla/)) prove the privileged gate requires a `y` keypress for *any* value the policy flag took, so `confirm_unprivileged` relaxes only the non-privileged gate. Audit finding **F2** by-design trade-off still documented; `display_banner` reliability is a separate backlog item. | 4 | [discharged] (model-checked) |
 
 ### G6 — Adversary cannot bypass the gate
 
@@ -138,7 +138,7 @@ keypress binds to the command shown.*
 | **G6.2** | **A2** (same-UID direct socket): daemon-side validation does not depend on client-side `validate_host`; display fields validated at the daemon. | — | |
 | **Sn6.2** | F1 fix moves sanitization into `validate_request` (daemon side); `SO_PEERCRED` + 0600. | 2 | [discharged] |
 | **G6.3** | **A3** (network / remote): `validate_host` allowlist `[A-Za-z0-9._@:-]`, rejects leading `-` (ssh option injection); host is a trailing positional; remote UID digit-only + length-capped; ssh via argv. | — | |
-| **Sn6.3** | `src/server.rs`, `src/bin/sudo-proxy.rs`, `src/hosts.rs`. **Open:** no `StrictHostKeyChecking` → first-contact MITM depends on user config (A4). | 1 | [partial] → Tamarin/ProVerif (Rung 4) |
+| **Sn6.3** | `src/server.rs`, `src/bin/sudo-proxy.rs`, `src/hosts.rs`. ProVerif model ([`proofs/proverif/`](../proofs/proverif/)) makes **A4 explicit**: channel authenticity/secrecy hold *iff* the host key is pinned, and the unpinned run exhibits the first-contact MITM (leaf 4.2); the separation theorem shows a channel compromise does not bypass the local keypress gate. Residual A4 (no `StrictHostKeyChecking`) now formally characterised, not closed. | 4 | [discharged] (residual A4 made explicit) |
 | **G6.4** | Resource exhaustion cannot force-open the gate: 1 MiB request cap, 64 in-flight, 16 MiB output cap. | — | |
 | **Sn6.4** | `src/server.rs`, `src/executor.rs`; cap test (flaky **S2**, control sound). | 1–2 | [partial] |
 
@@ -147,13 +147,13 @@ keypress binds to the command shown.*
 These are the leaves where the argument is currently weakest, drawn from
 [security-audit.md](security-audit.md) and the rungs not yet climbed:
 
-- **Sn2.2 / Sn5.1 / Sn5.3** — the freshness and approval-state-machine claims
-  rest on fuzzing + manual reasoning; the intended strengthening is **Kani**
-  (Rung 3) for `parse_age` and a **TLA+/Alloy** model (Rung 4) of the
-  approval + policy transitions.
-- **Sn6.3** — the A3 channel guarantees rest on assumption **A4**; a
-  **Tamarin/ProVerif** model (Rung 4) would make the dependency explicit and
-  surface the first-contact MITM gap.
+- **Sn2.2** — the freshness arithmetic is discharged by **Kani** (Rung 3);
+  `Sn5.1 / Sn5.3` (the approval + policy transitions) are now discharged by the
+  **TLC-checked** state machine ([`proofs/tla/`](../proofs/tla/), Rung 4).
+- **Sn6.3** — the A3 channel guarantees rest on assumption **A4**; the
+  **ProVerif** model ([`proofs/proverif/`](../proofs/proverif/), Rung 4) now
+  makes that dependency explicit and surfaces the first-contact MITM gap (a
+  *characterised residual*, not a closed one — see leaf 4.2).
 - **Sn6.4 / S2** — stabilise the flaky resource-cap test so the cap stays
   covered in CI.
 - **Sn4.4 / Sn5.3** — accepted residual risks (look-alike `reason`, the

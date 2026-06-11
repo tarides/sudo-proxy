@@ -84,6 +84,7 @@ Each `execute` shows the exact command in the TUI; press `y` to approve,
 - [docs/usage.md](docs/usage.md) — CLI flags, non-privileged mode, SSH tunnels, agent forwarding
 - [docs/protocol.md](docs/protocol.md) — JSON-line wire protocol over the Unix socket
 - [docs/security.md](docs/security.md) — security model; [docs/security-audit.md](docs/security-audit.md) — point-in-time audit; [docs/threat-model.md](docs/threat-model.md) — STRIDE + attack tree; [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md) — graduated-assurance plan; [docs/assurance-case.md](docs/assurance-case.md) — GSN argument
+- [proofs/](proofs/) — machine-checked models: [TLA+/PlusCal approval state machine](proofs/tla/) (TLC, Rung 4) and [ProVerif SSH-channel model](proofs/proverif/) (Rung 4); Kani bounded proofs live in [src/proofs.rs](src/proofs.rs) (Rung 3)
 - [docs/pkexec.md](docs/pkexec.md) — `--pkexec` mode and polkit auth caching (not recommended)
 - [docs/architecture.md](docs/architecture.md) — source layout and implementation status
 - [docs/comparison.md](docs/comparison.md) — how sudo-proxy relates to other tools

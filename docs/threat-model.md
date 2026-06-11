@@ -169,7 +169,13 @@ is unaccounted for. The residuals — already on record and accepted — are:
   yet implemented" in [architecture.md](architecture.md)); the `-v` server log
   is the only record.
 
-These residuals are the natural inputs to the higher
-[roadmap rungs](formalisation-roadmap.md#the-rigor-ladder): the policy-transition
-residual (1.4/4.4) is what a TLA+/Alloy model (Rung 4) would pin down, and the
-SSH residual (4.2) is what a Tamarin/ProVerif model (Rung 4) would make explicit.
+These residuals were the inputs to **Rung 4**, now discharged
+([roadmap](formalisation-roadmap.md#the-rigor-ladder)): the policy-transition
+residual (1.4/4.4) is pinned by the TLC-checked state machine in
+[`proofs/tla/`](../proofs/tla/) (`PolicyFlipsOnlyOnKeypress`,
+`PrivilegedGateIndependentOfPolicy`), and the SSH residual (4.2) is made explicit
+by the ProVerif model in [`proofs/proverif/`](../proofs/proverif/), which proves
+the channel guarantees hold iff the host key is pinned and exhibits the
+first-contact MITM trace. The 1.4/4.4 *by-design* trade-off (unprivileged
+auto-approve) and the 4.2 A4 dependency remain accepted residuals — now formally
+characterised rather than only argued in prose.

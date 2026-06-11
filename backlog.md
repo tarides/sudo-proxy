@@ -6,15 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Rung 4 — Protocol-level models
-
-TLA+/PlusCal or Alloy model of the approval + `confirm_unprivileged` policy state
-machine: replay impossible, no exec without approval, policy flag transitions
-only on an interactive keypress (pins down the F2 / attack-tree leaf 1.4/4.4
-residual). Tamarin/ProVerif model of the SSH path to make the channel
-assumptions explicit and surface the first-contact MITM gap (attack-tree leaf
-4.2 / assumption A4).
-
 ## Rung 5 — Deductive verification of the trusted core
 
 Creusot / Verus / Prusti contracts on `validate_request`, the dispatch path, and

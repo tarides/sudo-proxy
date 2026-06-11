@@ -1,0 +1,42 @@
+name: TLC
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: tlc-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tlc:
+    name: tlc (Rung 4 approval state machine, informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      # TLA+ tools manage their own toolchain (a single jar), independent of
+      # rust-toolchain.toml, so this does not affect the gating Rust jobs. The
+      # committed .tla already contains the pcal.trans translation, so no
+      # PlusCal re-translation step is needed.
+      - name: Fetch TLA+ tools
+        run: |
+          curl -sSL -o tla2tools.jar \
+            https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+      # Informational only, like the kani / geiger jobs: surfaces the Rung 4
+      # model-check in the job log without gating merge while the property set
+      # is still growing. Promote to a required check once stable.
+      - name: Model-check the approval state machine
+        continue-on-error: true
+        run: |
+          java -cp tla2tools.jar tlc2.TLC -nowarning \
+            -config proofs/tla/ApprovalStateMachine.cfg \
+            -workers auto \
+            proofs/tla/ApprovalStateMachine.tla
