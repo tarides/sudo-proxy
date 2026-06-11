@@ -25,6 +25,13 @@ jobs:
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: '5'
+      # Refresh the apt index before opam pulls ProVerif's system deps (it
+      # depends on the GTK GUI libs). Without this the runner's mirror
+      # intermittently 404s on a superseded liblzma-dev version pin, which
+      # fails this otherwise non-gating job at install time (seen flapping on
+      # this branch -- same commit passing on one trigger, failing on another).
+      - name: Refresh apt package index
+        run: sudo apt-get update
       - name: Install ProVerif
         run: opam install -y proverif
       # Informational only, like the kani / geiger jobs. Both configurations are
