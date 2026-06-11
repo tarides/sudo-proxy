@@ -6,16 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Extended Rung 4 — Concurrent-handler interleaving (TLA+)
-
-The shipped state-machine model handles one request to completion atomically, so
-the concurrent dedup TOCTOU (which `SeenIds::try_insert`'s single critical
-section closes) and the TTY-lock serialisation are out of scope. Model 2+ daemon
-handlers interleaving on the shared `seen` set and the TTY lock, and check that
-no double-exec slips through the race and dedup stays correct under all
-interleavings — i.e. *verify* the atomicity fix is sufficient. This is the
-canonical model-checking use case; the current one-at-a-time model cannot see it.
-
 ## Extended Rung 4 — SSH key-acceptance model (ProVerif)
 
 The shipped `proofs/proverif/` model *declares* the tunnel private when pinned

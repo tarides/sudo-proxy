@@ -48,3 +48,12 @@ jobs:
             -config proofs/tla/ReplayWindow.cfg \
             -workers auto \
             proofs/tla/ReplayWindow.tla
+      # The Extended Rung 4 concurrent-handler interleaving model (shared `seen`
+      # set + TTY lock); checks the atomic try_insert closes the dedup TOCTOU.
+      - name: Model-check the concurrent handlers
+        continue-on-error: true
+        run: |
+          java -cp tla2tools.jar tlc2.TLC -nowarning \
+            -config proofs/tla/ConcurrentHandlers.cfg \
+            -workers auto \
+            proofs/tla/ConcurrentHandlers.tla

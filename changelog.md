@@ -3,6 +3,62 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-06-11 — Extended Rung 4: concurrent-handler interleaving (TLA+)
+
+Added a third TLA+/PlusCal model, `proofs/tla/ConcurrentHandlers.tla` (checked by
+TLC, **non-gating** in CI like its two siblings), discharging the *canonical*
+model-checking use case the two atomic, one-request-at-a-time models cannot
+express by construction: **concurrent** daemon handler threads interleaving on
+the two pieces of `Arc<Mutex<…>>`-shared state. It *verifies the atomicity fix is
+sufficient* — strengthening the concurrent half of assurance-case leaf 1.1 / G2.1.
+
+- **The two theorems.**
+  - **`NoDoubleExec`** — no request id ever executes twice under **any**
+    interleaving. This is the closure of the dedup TOCTOU: `SeenIds::try_insert`
+    (`server.rs:213`) folds the contains-check and the insert into one critical
+    section under the `seen_ids` mutex; the model proves that single critical
+    section is *sufficient* to serialise two threads racing the same id. Witnessed
+    by a monitor flag (`vDoubleExec`) raised at an exec site if the id already ran.
+  - **`TtyMutualExclusion`** — at most one handler is in the interactive TTY
+    region (prompt or foreground exec) at a time, so `tty_lock` serialises
+    /dev/tty across all interleavings (the PR #22 background-pgrp / EIO hazard).
+    Witnessed by a bounded counter (`ttyActive ≤ 1`).
+
+- **Faithful to the dispatch's lock discipline.** PlusCal labels are the
+  atomicity boundaries, so TLC interleaves exactly where the threads can. The
+  privileged path holds `tty_lock` for the prompt, **releases before exec**, then
+  `ForegroundGuard` **re-takes** it for the foreground swap (two critical
+  sections); `exec_direct` takes no lock; the no-confirm banner is best-effort
+  `try_lock`. So another handler may legitimately prompt in the released gap —
+  never *simultaneously*.
+
+- **Result.** TLC reports no error: **5116 distinct states** at `Handlers =
+  {h1, h2}` (sub-second), and **238 590** at `{h1, h2, h3}`. Two handlers is the
+  minimal witness for the pairwise dedup TOCTOU and the TTY race; a third only
+  adds symmetric interleavings (a one-line `.cfg` change, kept out of CI for
+  speed). The same-id race is genuinely exercised (one handler wins `try_insert`
+  and execs, the other is rejected as a duplicate), so the pass is non-vacuous.
+
+- **Teeth — two documented negative controls** (apply by hand, never committed):
+  **NC1** splits the atomic `TryInsert` into check-release-insert, re-introducing
+  the TOCTOU → `NoDoubleExec` violated (the load-bearing control: it proves the
+  model *sees* the race the atomicity closes); **NC2** drops the `tty_lock` around
+  the privileged prompt → `TtyMutualExclusion` violated (reproduces the PR #22
+  hazard). Both were run and produce the expected counterexample.
+
+- **Scope** (per the README faithfulness ledger): the shared `seen`/`tty_lock`
+  races and `try_insert`'s atomicity are modelled faithfully; the per-request gate
+  chain is assumed-passed (sequential, the `ApprovalStateMachine` model's job),
+  eviction is never-evict (the `ReplayWindow` model's job), and
+  `confirm_unprivileged` is read-only here (no `a` key). Handler count bounded to
+  2 (3 also checked).
+
+- **CI / docs:** `.github/workflows/tlc.yml` gains a third `continue-on-error`
+  TLC step; `proofs/tla/README.md` adds the model's section and updates the two
+  siblings' "out of scope" notes to point at it; the roadmap's Rung 4 scope note
+  is corrected (concurrency/TOCTOU is no longer "stays elsewhere"). No Rust
+  touched (`proofs/` is outside `src/`); the two sibling models re-check unchanged.
+
 ## 2026-06-11 — Extended Rung 4: freshness ↔ replay window-sizing (TLA+)
 
 Added a second TLA+/PlusCal model, `proofs/tla/ReplayWindow.tla` (checked by

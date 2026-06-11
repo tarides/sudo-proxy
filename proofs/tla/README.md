@@ -2,7 +2,7 @@
 
 [← formalisation roadmap](../../docs/formalisation-roadmap.md) · [threat model](../../docs/threat-model.md) · [assurance case](../../docs/assurance-case.md)
 
-This directory holds **two** TLA+/PlusCal models, both model-checked by TLC:
+This directory holds **three** TLA+/PlusCal models, all model-checked by TLC:
 
 1. **`ApprovalStateMachine`** (below) — the approval state machine: the four
    safety properties of the gate chain and `classify_key`.
@@ -10,6 +10,12 @@ This directory holds **two** TLA+/PlusCal models, both model-checked by TLC:
    the temporal freshness ↔ replay-retention **window-sizing** property that the
    first model deliberately abstracts away (it never evicts). Restores a small
    concrete clock + real TTL eviction and proves the genuinely temporal claim.
+3. **[`ConcurrentHandlers`](#concurrent-handlers--dedup-toctou--tty-lock-serialisation) (Extended Rung 4)** —
+   *concurrent* handler threads interleaving on the shared `seen` set and the TTY
+   lock. Proves the atomic `try_insert` critical section is *sufficient* (no
+   double-exec under any interleaving) and that the TTY lock serialises /dev/tty —
+   the canonical model-checking case the two atomic, one-request-at-a-time models
+   above cannot express.
 
 ---
 
@@ -121,8 +127,10 @@ note in the [roadmap](../../docs/formalisation-roadmap.md).
 
 **Out of scope (covered by other rungs)**
 
-- Concurrent TTY-lock interleavings and the `try_insert` TOCTOU — atomic by
-  construction and unit-tested; one request is handled to completion here.
+- Concurrent TTY-lock interleavings and the `try_insert` TOCTOU — one request is
+  handled to completion here; covered by the
+  [`ConcurrentHandlers`](#concurrent-handlers--dedup-toctou--tty-lock-serialisation)
+  sibling model.
 - Freshness arithmetic monotonicity (`ymd_hms_to_epoch`) — Rung 3 Kani.
 - Per-field dangerous-char scanning (`has_dangerous_chars`) — Rung 3 Kani.
 - The SSH first-contact MITM residual (leaf 4.2 / A4) — the separate Rung 4
@@ -242,7 +250,9 @@ Apply by hand to the model / cfg, re-check, then revert. **Do not commit.**
 
 **Out of scope**
 
-- Concurrent `try_insert` interleavings (atomic by construction; sibling model).
+- Concurrent `try_insert` interleavings — the
+  [`ConcurrentHandlers`](#concurrent-handlers--dedup-toctou--tty-lock-serialisation)
+  sibling model.
 - The approval/keypress gate (the approval-state-machine model).
 
 ### Running TLC
@@ -256,3 +266,120 @@ java -cp tla2tools.jar tlc2.TLC -nowarning \
 ```
 
 Expected: `No error has been found` (442 distinct states, sub-second).
+
+---
+
+## Concurrent handlers — dedup TOCTOU & TTY-lock serialisation
+
+[`ConcurrentHandlers.tla`](ConcurrentHandlers.tla) /
+[`ConcurrentHandlers.cfg`](ConcurrentHandlers.cfg) — the second **Extended Rung 4**
+model. The two models above each handle one request to completion *atomically*, so
+by construction they cannot see the hazards that only exist when the daemon runs
+many [`handle_connection`](../../src/server.rs) threads at once. This is the
+canonical model-checking use case: a property over *interleavings*, not over one
+sequential run.
+
+`server::run` spawns a thread per connection, all sharing two pieces of state via
+`Arc<Mutex<…>>`:
+
+| shared state | guarded by | the hazard if mishandled |
+|--------------|------------|--------------------------|
+| `seen` (`SeenIds`) | `seen_ids` mutex; `try_insert` is one critical section | two threads race the same id, both pass dedup, both exec (double-exec TOCTOU) |
+| `/dev/tty` | `tty_lock` (`Arc<Mutex<()>>`) | two threads drive the terminal at once → background-pgrp EIO (PR #22) |
+
+The model runs `Handlers = {h1, h2}` concurrent handlers, each picking its request
+(`id` ∈ `Ids`, `privileged`, key) nondeterministically — so TLC explores every
+interleaving, including both handlers racing the **same** id. PlusCal labels are
+the atomicity boundaries: the mutex acquire/release and each critical section are
+labelled steps, so TLC interleaves exactly where the real threads can.
+
+### The two properties
+
+| Invariant | Claim | Maps to |
+|-----------|-------|---------|
+| **`NoDoubleExec`** | No request id ever executes twice, under **any** interleaving — the atomic `try_insert` critical section is *sufficient* to serialise the same-id race. | leaf 1.1 · G2.1 (concurrent half of `ReplayImpossible`) |
+| **`TtyMutualExclusion`** | At most one handler is in the interactive TTY region (prompt or foreground exec) at a time — `tty_lock` serialises /dev/tty across all interleavings. | Sn5.x · G6 |
+
+**How they are witnessed.** `NoDoubleExec` is a monitor flag (`vDoubleExec`), raised
+at an exec site if the id already ran — the same idiom as the sibling models.
+`TtyMutualExclusion` is a bounded witness counter (`ttyActive`, 0..|Handlers|),
+incremented inside the lock on entering the interactive region and decremented on
+leaving; the invariant asserts it never exceeds 1. Both keep every variable
+bounded, so the state space is finite and small.
+
+**Faithful to the dispatch's lock discipline.** The privileged path takes
+`tty_lock` for the prompt, **releases it before exec**, then `ForegroundGuard`
+**re-takes** it for the foreground swap (two separate critical sections —
+`server.rs:553` / `executor.rs`). `exec_direct` (unprivileged) takes **no** TTY
+lock. The no-confirm banner uses a best-effort `try_lock` (modelled as a momentary,
+non-overlapping hold). So `ttyActive` legitimately goes 1→0→1 across a privileged
+request, and another handler may prompt in the released gap — never *simultaneously*.
+
+### Result — the atomic critical section is sufficient
+
+TLC checks both invariants exhaustively with **no error**: 5116 distinct states at
+`Handlers = {h1, h2}` (sub-second), 238 590 at `{h1, h2, h3}`. Two handlers is the
+minimal witness for the pairwise dedup TOCTOU and the TTY race; a third only adds
+symmetric interleavings (the larger run is a one-line `.cfg` change, kept out of CI
+for speed). The same-id race **is** exercised — both handlers can pick the same id,
+one wins `try_insert` and execs, the other sees `dup` and is rejected — so the
+property is non-vacuous, as NC1 below confirms by making it fail.
+
+### Negative controls — that the model has teeth
+
+Apply by hand to the PlusCal, re-run `pcal.trans`, re-check, then revert. **Do not
+commit the mutations.** Each was verified to violate exactly the listed invariant.
+
+| # | Mutation (in the PlusCal) | Violates |
+|---|---------------------------|----------|
+| **NC1** | Split the atomic `TryInsert` into `CheckSeen` (contains, then **release** the lock) and `InsertAcq`/`InsertSeen` (re-acquire, insert) — re-introducing the TOCTOU `try_insert` closes. | `NoDoubleExec` |
+| **NC2** | Drop the `tty_lock` acquire/release around `PrivPrompt` (prompt without the lock). | `TtyMutualExclusion` |
+
+NC1 is the load-bearing one: it shows the model genuinely *sees* the TOCTOU, so the
+clean run's `NoDoubleExec` is a real verification of the atomic critical section, not
+a vacuous pass. NC2 reproduces the PR #22 hazard the TTY lock exists to prevent.
+
+### Faithfulness ledger
+
+**Modelled faithfully**
+
+- Two pieces of `Arc<Mutex<…>>`-shared state (`seen`, `tty_lock`) and N handler
+  threads interleaving on them at mutex-acquire/release granularity.
+- `try_insert` as **one** critical section under the `seen_ids` lock (the atomicity
+  that closes the TOCTOU — the whole point of the model).
+- The dispatch's TTY-lock discipline: privileged prompt holds then **releases**
+  before exec, `ForegroundGuard` re-takes for the foreground swap, `exec_direct`
+  takes no lock, the no-confirm banner is best-effort `try_lock`.
+- Both handlers may race the **same** id (the TOCTOU) or handle distinct ids.
+
+**Abstracted (sound for these two properties)**
+
+- The per-request gate chain (validate → freshness → env allowlist) → assumed
+  passed: it is per-handler and sequential, covered by the
+  [`ApprovalStateMachine`](#the-four-properties) model. The focus here is the
+  shared-state races.
+- `SeenIds` eviction → never evict (the [`ReplayWindow`](#window-sizing--freshness--replay-retention)
+  model owns the TTL); irrelevant to a concurrency race within the model's horizon.
+- `confirm_unprivileged` → a read-only init-free boolean (no `a` key), so its flip
+  semantics stay with the `ApprovalStateMachine` model; both dispatch paths are
+  still covered.
+- Handler count bounded to 2 (3 also checked); the keypress set to `{y, other}`.
+
+**Out of scope**
+
+- The approval/keypress decision table and the flag-flip transition — the
+  [`ApprovalStateMachine`](#the-four-properties) model.
+- The freshness ↔ retention window sizing — the
+  [`ReplayWindow`](#window-sizing--freshness--replay-retention) model.
+
+### Running TLC
+
+```sh
+# (only if you edited the PlusCal) re-generate the translation, then commit both:
+java -cp tla2tools.jar pcal.trans ConcurrentHandlers.tla
+
+java -cp tla2tools.jar tlc2.TLC -nowarning \
+     -config ConcurrentHandlers.cfg -workers auto ConcurrentHandlers.tla
+```
+
+Expected: `No error has been found` (5116 distinct states, sub-second).

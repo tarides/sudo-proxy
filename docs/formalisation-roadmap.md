@@ -253,13 +253,19 @@ The most interesting properties are temporal and relational, not per-function:
     expresses with least ceremony and proves fully automatically; Tamarin's
     unbounded-state / inductive strengths aren't needed.
 
-- **Scope / residuals carried past Rung 4:** the TLA+ model abstracts the clock,
-  env contents and decode to booleans and never-evicts the replay set
-  (conservative for replay); concurrency/TOCTOU and per-field content scanning
-  stay with their other rungs. The ProVerif model treats SSH crypto as a perfect
-  black box and abstracts time to nonces + ordering. The two *accepted* residuals
-  (the by-design unprivileged auto-approve, and the A4 first-contact dependency)
-  are now formally **characterised**, not closed.
+- **Scope / residuals carried past Rung 4:** the `ApprovalStateMachine` model
+  abstracts the clock, env contents and decode to booleans and never-evicts the
+  replay set (conservative for replay); per-field content scanning stays with
+  Rung 3. The two **Extended Rung 4** TLA+ models lift the abstractions that
+  conservatism hides: [`ReplayWindow`](../proofs/tla/README.md#window-sizing--freshness--replay-retention)
+  restores a real clock + TTL eviction and proves the freshness ↔ retention
+  window relationship, and [`ConcurrentHandlers`](../proofs/tla/README.md#concurrent-handlers--dedup-toctou--tty-lock-serialisation)
+  runs concurrent handler threads to prove the atomic `try_insert` closes the
+  dedup TOCTOU and `tty_lock` serialises /dev/tty under all interleavings. The
+  ProVerif model treats SSH crypto as a perfect black box and abstracts time to
+  nonces + ordering. The two *accepted* residuals (the by-design unprivileged
+  auto-approve, and the A4 first-contact dependency) are now formally
+  **characterised**, not closed.
 
 ### Rung 5 — Deductive verification of the core (EAL5–7 territory)
 
