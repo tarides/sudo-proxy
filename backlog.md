@@ -6,18 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## Extended Rung 4 — Freshness ↔ replay window-sizing (TLA+)
-
-The shipped `proofs/tla/` model never-evicts the replay set, so "replay
-impossible" holds only under an assumption the real daemon doesn't (it evicts
-after `REPLAY_RETENTION`=120s). Add a small abstract clock + eviction to the
-PlusCal and prove the genuinely temporal invariant the current model hides: a
-captured request cannot evade dedup by waiting for eviction while still passing
-the 60s freshness gate, because retention (120s) ≥ 2× freshness (60s). Kani's
-arithmetic monotonicity does **not** cover this — it is about the parser, not
-the window relationship. Highest value-for-effort; tightens the headline
-`ReplayImpossible` claim from conditional to real.
-
 ## Extended Rung 4 — Concurrent-handler interleaving (TLA+)
 
 The shipped state-machine model handles one request to completion atomically, so
@@ -38,6 +26,21 @@ encrypt the request to the accepted key. ProVerif then *derives* the first-
 contact MITM from the attacker substituting its key, showing *why* pinning
 matters rather than *that* we assumed it — strengthening the model's whole point
 (make A4 load-bearing). Nice-to-have, not essential.
+
+## Cap far-future request timestamps (replay-protection gap)
+
+Surfaced by the Extended Rung 4 `ReplayWindow` TLA+ model. `parse_age`
+(`server.rs:146`) clamps a future-dated timestamp to age 0 with **no upper
+bound**, so a request dated beyond `REPLAY_RETENTION` into the future passes the
+freshness gate indefinitely while its id ages out of `SeenIds` — making it
+replayable every retention window *regardless of how large retention is*. The
+60s↔120s window relationship does not help here. Low severity (needs the request
+onto the channel — SSH pinning guards that — and privileged commands still gate
+the first run on a keypress), but for auto-approved unprivileged commands it is a
+real repeatable replay. Fix: in `check_freshness` / `parse_age`, reject
+timestamps more than a small clock-skew allowance into the future instead of
+clamping to age 0; extend the Rung 2 freshness property and the `ReplayWindow`
+model's `NoFutureReplay` invariant to cover it.
 
 ## Rung 5 — Deductive verification of the trusted core
 

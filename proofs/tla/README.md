@@ -1,6 +1,19 @@
-# Rung 4 — TLA+/PlusCal approval state machine
+# Rung 4 — TLA+/PlusCal models
 
 [← formalisation roadmap](../../docs/formalisation-roadmap.md) · [threat model](../../docs/threat-model.md) · [assurance case](../../docs/assurance-case.md)
+
+This directory holds **two** TLA+/PlusCal models, both model-checked by TLC:
+
+1. **`ApprovalStateMachine`** (below) — the approval state machine: the four
+   safety properties of the gate chain and `classify_key`.
+2. **[`ReplayWindow`](#window-sizing--freshness--replay-retention) (Extended Rung 4)** —
+   the temporal freshness ↔ replay-retention **window-sizing** property that the
+   first model deliberately abstracts away (it never evicts). Restores a small
+   concrete clock + real TTL eviction and proves the genuinely temporal claim.
+
+---
+
+## Approval state machine
 
 A TLA+/PlusCal model of sudo-proxy's approval state machine, model-checked by
 TLC. It discharges **Rung 4** (state-machine half) of the
@@ -100,7 +113,11 @@ note in the [roadmap](../../docs/formalisation-roadmap.md).
 - `SeenIds` retention/eviction → never evict. This is *conservative* for
   `ReplayImpossible`: remembering ids forever can only add rejections within the
   model's horizon, never remove one. A replay accepted *after* the 120 s
-  retention window is by-design and is not what leaves 1.4 / 4.4 are about.
+  retention window is by-design and is not what leaves 1.4 / 4.4 are about. The
+  **window relationship** that makes this safe — that an id stays remembered for
+  as long as a replay of it could still pass the freshness gate — is exactly what
+  the [`ReplayWindow`](#window-sizing--freshness--replay-retention) model proves,
+  lifting this abstraction.
 
 **Out of scope (covered by other rungs)**
 
@@ -110,3 +127,132 @@ note in the [roadmap](../../docs/formalisation-roadmap.md).
 - Per-field dangerous-char scanning (`has_dangerous_chars`) — Rung 3 Kani.
 - The SSH first-contact MITM residual (leaf 4.2 / A4) — the separate Rung 4
   ProVerif model in [`../proverif/`](../proverif/).
+
+---
+
+## Window-sizing — freshness ↔ replay retention
+
+[`ReplayWindow.tla`](ReplayWindow.tla) / [`ReplayWindow.cfg`](ReplayWindow.cfg) —
+the **Extended Rung 4** model. The approval-state-machine model above models
+`seen` as never evicting (conservative, by its own admission). That conservatism
+*hides* the one property the daemon genuinely depends on: the relationship
+between the two time windows in [`server.rs`](../../src/server.rs):
+
+| constant | value | role |
+|----------|-------|------|
+| `MAX_REQUEST_AGE` | 60 s | freshness gate (`check_freshness`) |
+| `REPLAY_RETENTION` | 120 s | seen-id eviction TTL (`SeenIds::evict_stale`) |
+
+This model restores a **small abstract clock** and the **real TTL eviction**, and
+proves the temporal claim: *a captured request cannot evade replay-dedup by
+waiting for its id to be evicted while still passing the freshness gate.* Only the
+window **relationship** matters, not the absolute seconds, so the constants are
+`Freshness = 2`, `Retention = 4` (= 2·Freshness), `MaxTime = 6`, `Ids = {r1}`.
+
+### The theorem
+
+| Invariant | Claim | Maps to |
+|-----------|-------|---------|
+| **`PastReplayImpossible`** | No captured **past-dated** request is ever re-executed. | leaf 1.1 · G2.1 (temporal half) |
+| `AcceptWasFresh` | The daemon only ever accepts a request that was fresh at acceptance. | modeling hygiene |
+| `TypeOK` | Type invariant. | — |
+
+**The window arithmetic.** An id is inserted at `acceptedAt ≥ firstTs` (you accept
+no earlier than the request was created) and evicted only once
+`clock − insertedAt > Retention`. A replay re-uses the fixed `firstTs`, so it
+passes freshness only while `clock − firstTs ≤ Freshness`. Since
+`insertedAt = acceptedAt ≥ firstTs` and `Retention ≥ Freshness`, eviction
+(`clock > firstTs + Retention ≥ firstTs + Freshness`) cannot co-occur with
+freshness (`clock ≤ firstTs + Freshness`). So a captured replay can never win the
+race — proved exhaustively by TLC (442 distinct states, sub-second).
+
+**Why a monitor, not a `seen`-membership invariant.** Eviction is **lazy** — an id
+is pruned only inside `try_insert`, and a replay-accept removes then re-inserts the
+id in one atomic step. A membership predicate (`∃ rec ∈ seen : …`) therefore can
+never observe the gap; the re-insertion masks it. Only an event monitor (`vReplay`
+raised at the re-exec site) is a robust witness — the same rationale behind the
+approval-state-machine model's monitor variables.
+
+### Finding 1 — the tight bound is `Retention ≥ Freshness`, not `2×`
+
+The code comment says retention is "twice `MAX_REQUEST_AGE` so that any id that
+could still pass the freshness check is also still in the set." The arithmetic
+above shows `Retention ≥ Freshness` already suffices (max acceptance lag only
+pushes eviction *later*, never earlier). TLC confirms it: the theorem **holds** at
+`Retention = Freshness` and **fails** at `Retention = Freshness − 1`. So the
+shipped `120 s = 2 × 60 s` is **conservative margin, not a necessity** — *not a
+bug*; the daemon is, if anything, safer than its comment claims.
+
+### Finding 2 — future-dated timestamps defeat replay protection after eviction
+
+`parse_age` **clamps future-dated timestamps to age 0** (`server.rs:146`) with no
+upper cap, so a request dated beyond `Retention` into the future keeps passing the
+freshness gate *forever* while its id ages out of `seen`. It is then replayable
+**every `Retention` units regardless of how large `Retention` is** — the
+window-sizing relationship does not help here at all. The model exposes this: with
+the past-dated guard dropped (`NoFutureReplay`), TLC returns a concrete trace —
+e.g. a request dated `ts = 3` accepted at `clock = 0`, evicted at `clock = 5`, then
+replayed and re-executed at `clock = 5` (still fresh: `5 − 3 = 2 ≤ Freshness`).
+
+How exploitable this is depends on the threat model (it needs the request onto the
+channel — which SSH pinning guards — and for privileged commands the human still
+gates the first run), but for auto-approved unprivileged commands it is a real
+repeatable replay. The fix is cheap: also reject timestamps too far in the
+*future* (a small clock-skew allowance, then reject rather than clamp). Logged as a
+**separate backlog item** — not fixed in this (proofs-only) session.
+
+### Negative controls — that the model has teeth
+
+Apply by hand to the model / cfg, re-check, then revert. **Do not commit.**
+
+| # | Mutation | Violates |
+|---|----------|----------|
+| **NC1** | `Retention = Freshness − 1` (window relationship broken) | `PastReplayImpossible` |
+| **Tight-bound** | run at `Retention = Freshness` (holds) vs `Freshness − 1` (fails) | confirms `Retention ≥ Freshness` is the tight threshold (finding 1) |
+| **NC2** | freshness gate disabled (`FreshAt(ts) == TRUE`) | `AcceptWasFresh` **and** `PastReplayImpossible` (freshness is load-bearing) |
+| **Finding 2** | add `NoFutureReplay` to `INVARIANTS` | future-dated counterexample (finding 2) — a real property of the code, not a model mutation |
+
+> Note NC2 is *disable freshness*, not *evict by the wrong field*: at
+> `Retention ≥ Freshness`, evicting by the request timestamp instead of the
+> insertion time is **also** safe for past-dated requests (it expires them up to
+> `Freshness` earlier, but freshness has already lapsed), so it is not a valid
+> negative control here — a small result the model also settles.
+
+### Faithfulness ledger
+
+**Modelled faithfully**
+
+- The gate order at acceptance: freshness → evict → dedup → insert, mirroring
+  `try_insert` (`evict_stale` runs first, then the membership check, then the
+  stamped insert).
+- Eviction keyed on **insertion** time (`Live(rec) == ¬(clock − insertedAt > Retention)`).
+- `parse_age`'s future-timestamp **clamp** (`FreshAt(ts) == IF ts > clock THEN TRUE …`).
+- The attacker replays the **captured bytes** (same id, same timestamp); the honest
+  client submits the one genuine request. Both, plus the clock, are nondeterministic.
+
+**Abstracted (sound for the window property)**
+
+- The clock and the windows → small integers preserving `Retention = 2·Freshness`;
+  the property depends only on the *relationship*, exhaustively checked to `MaxTime`.
+- One id (`Ids = {r1}`): the property is per-id; the two-distinct-ids interaction is
+  the approval-state-machine model's job.
+- Atomic handling, no clock tick mid-request — faithful because `check_freshness`
+  runs at handler *entry*, before the TTY lock (`server.rs:499`), precisely so a
+  request cannot age past the gate while queued.
+
+**Out of scope**
+
+- Concurrent `try_insert` interleavings (atomic by construction; sibling model).
+- The approval/keypress gate (the approval-state-machine model).
+
+### Running TLC
+
+```sh
+# (only if you edited the PlusCal) re-generate the translation, then commit both:
+java -cp tla2tools.jar pcal.trans ReplayWindow.tla
+
+java -cp tla2tools.jar tlc2.TLC -nowarning \
+     -config ReplayWindow.cfg -workers auto ReplayWindow.tla
+```
+
+Expected: `No error has been found` (442 distinct states, sub-second).

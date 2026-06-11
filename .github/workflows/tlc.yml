@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   tlc:
-    name: tlc (Rung 4 approval state machine, informational)
+    name: tlc (Rung 4 TLA+ models, informational)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -40,3 +40,11 @@ jobs:
             -config proofs/tla/ApprovalStateMachine.cfg \
             -workers auto \
             proofs/tla/ApprovalStateMachine.tla
+      # The Extended Rung 4 freshness <-> replay-retention window-sizing model.
+      - name: Model-check the replay-window sizing
+        continue-on-error: true
+        run: |
+          java -cp tla2tools.jar tlc2.TLC -nowarning \
+            -config proofs/tla/ReplayWindow.cfg \
+            -workers auto \
+            proofs/tla/ReplayWindow.tla

@@ -3,6 +3,68 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-06-11 — Extended Rung 4: freshness ↔ replay window-sizing (TLA+)
+
+Added a second TLA+/PlusCal model, `proofs/tla/ReplayWindow.tla` (checked by
+TLC, **non-gating** in CI like its sibling), proving the temporal property the
+approval-state-machine model deliberately hides: it models `seen` as
+*never-evicting* ("conservative for `ReplayImpossible`"), which makes the
+headline replay claim conditional. The new model restores a small abstract clock
+and the **real TTL eviction** and discharges the genuinely temporal invariant —
+tightening `ReplayImpossible` from conditional to real and strengthening
+assurance-case leaf 1.1 / G2.1.
+
+- **The theorem — `PastReplayImpossible`.** No captured *past-dated* request is
+  ever re-executed. The window arithmetic: an id is stamped at acceptance
+  (`insertedAt ≥ firstTs`) and evicted only at `clock − insertedAt > Retention`;
+  a replay re-uses the fixed `firstTs` and stays fresh only while
+  `clock − firstTs ≤ Freshness`. With `insertedAt ≥ firstTs` and
+  `Retention ≥ Freshness`, eviction and freshness can never co-occur. TLC: no
+  error, 442 distinct states, sub-second.
+  - Constants abstract the two real windows (`MAX_REQUEST_AGE`=60s,
+    `REPLAY_RETENTION`=120s) to `Freshness=2`, `Retention=4` (=2F), `MaxTime=6`,
+    `Ids={r1}` — only the *relationship* matters. Bounded clock ⇒ finite, small
+    state space.
+  - **Why a monitor, not a `seen`-membership invariant:** eviction is *lazy*
+    (pruned only inside `try_insert`) and a replay-accept removes-then-reinserts
+    the id atomically, so a membership predicate can never observe the gap. Only
+    an event monitor (`vReplay`) is a robust witness — the same idiom the sibling
+    model uses.
+
+- **Finding 1 — the tight bound is `Retention ≥ Freshness`, not `2×`.** TLC
+  confirms the theorem holds at `Retention = Freshness` and fails at
+  `Freshness − 1`. The shipped `120s = 2×60s` is **conservative margin, not a
+  necessity** (max acceptance lag only pushes eviction later) — *not a bug*, and
+  the code is safer than its comment claims.
+
+- **Finding 2 — future-dated timestamps defeat replay protection after
+  eviction (new residual).** `parse_age` clamps future timestamps to age 0
+  (`server.rs:146`) with no upper cap, so a request dated beyond `Retention` into
+  the future stays fresh forever while its id ages out — replayable every
+  `Retention` units regardless of size. The model exposes a concrete trace via
+  the `NoFutureReplay` invariant (e.g. `ts=3` accepted at `clock=0`, evicted at
+  `clock=5`, re-executed). Logged as a backlog item (cap far-future timestamps);
+  not fixed in this proofs-only session.
+
+- **Teeth:** documented negative controls — `Retention < Freshness` (window
+  relationship broken → `PastReplayImpossible` fails) and freshness-gate-disabled
+  (→ `AcceptWasFresh` + `PastReplayImpossible` fail, showing freshness is
+  load-bearing). The originally-planned "evict by the wrong field" control turned
+  out *safe* at `Retention ≥ Freshness` — a small result the model also settles,
+  recorded in the README.
+
+- **Scope (per the README faithfulness ledger):** the gate order at acceptance
+  (freshness → evict → dedup → insert), eviction keyed on insertion time, and the
+  `parse_age` future-clamp are modelled faithfully; the clock/windows are
+  abstracted to small relationship-preserving integers; one id (per-id property),
+  atomic handling (justified by the entry-time freshness check, `server.rs:499`),
+  and concurrency/keypress gating are left to the sibling model.
+
+- **CI:** `.github/workflows/tlc.yml` gains a second `continue-on-error` TLC step
+  for `ReplayWindow`; added `proofs/tla/.gitignore` for TLC/`pcal.trans`
+  artifacts. The sibling `ApprovalStateMachine` re-checks unchanged (9072 states);
+  no Rust touched (`proofs/` is outside `src/`).
+
 ## 2026-06-11 — Rung 4: protocol-level formal models (TLA+ + ProVerif)
 
 Discharged **Rung 4** of the assurance ladder — the temporal/relational
