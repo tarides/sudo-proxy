@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.tarides/sudo-proxy",
+  "title": "sudo-proxy",
+  "description": "Privileged command execution proxy with human approval via pkexec or sudo",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/tarides/sudo-proxy",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "sudo-proxy",
+      "version": "1.0.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

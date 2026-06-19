@@ -32,14 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
-      # Core build (no MCP) guards the no-feature path used by release.yml.
+      # Core build (no MCP) guards the --no-default-features path used by release.yml.
+      - run: cargo build --release --no-default-features
+      # Default build now includes `mcp`, so this builds all binaries.
       - run: cargo build --release
-      - run: cargo build --release --features mcp
-      # --features mcp is required for tests/hosts.rs.
+      # `mcp` is a default feature, so tests/hosts.rs runs without an extra flag.
       # TODO: drop the --skip once "Stabilize the flaky S2 resource-cap test"
       # (backlog.md) lands — burst_connections_above_cap_get_busy_response is
       # timing-flaky in its setup assertion, not its security assertion.
-      - run: cargo test --features mcp -- --skip burst_connections_above_cap_get_busy_response
+      - run: cargo test -- --skip burst_connections_above_cap_get_busy_response
 
   audit:
     name: cargo audit

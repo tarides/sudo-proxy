@@ -1,6 +1,6 @@
 [package]
 name = "sudo-proxy"
-version = "0.12.0"
+version = "1.0.0"
 edition = "2021"
 license = "MIT"
 description = "Privileged command execution proxy with human approval via pkexec or sudo"
@@ -31,7 +31,11 @@ required-features = ["mcp"]
 name = "sudo_proxy"
 path = "src/lib.rs"
 
+# `mcp` is on by default so `cargo install sudo-proxy` builds the
+# `sudo-proxy-mcp` binary (the MCP Registry's cargo install path uses no extra
+# flags). Build the core binaries alone with `--no-default-features`.
 [features]
+default = ["mcp"]
 mcp = ["dep:rmcp", "dep:tokio", "dep:schemars"]
 
 [lints.rust]

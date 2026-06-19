@@ -49,7 +49,7 @@ Install the binaries (needs a Rust toolchain; prebuilt static binaries are
 on [Releases](https://github.com/tarides/sudo-proxy/releases)):
 
 ```bash
-cargo install sudo-proxy --features mcp
+cargo install sudo-proxy
 ```
 
 Point your MCP client at the server — add to the project's `.mcp.json` or
@@ -76,6 +76,11 @@ execute({"argv": ["apt", "install", "nginx"], "description": "Install nginx"})
 Each `execute` shows the exact command in the TUI; press `y` to approve,
 `N` (default) to deny. For remote hosts, pass `host` to `start_server` and
 `execute`.
+
+## MCP Registry
+
+Listed in the official [MCP Registry](https://registry.modelcontextprotocol.io)
+as `mcp-name: io.github.tarides/sudo-proxy`.
 
 ## Documentation
 
