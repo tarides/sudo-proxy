@@ -1,0 +1,61 @@
+name: Publish
+
+# Cut a release by pushing a `v*` tag (see CLAUDE.md). This publishes the crate
+# to crates.io via Trusted Publishing (OIDC, no stored token) and then registers
+# the server in the official MCP Registry via GitHub Actions OIDC, which grants
+# the `io.github.tarides` namespace from the repo owner. release.yml builds the
+# static tarball + GitHub release on the same tag, in parallel.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  id-token: write   # OIDC for both crates.io Trusted Publishing and mcp-publisher
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+
+      # crates.io Trusted Publishing: exchange the OIDC token for a short-lived
+      # publish token (configured at crates.io -> sudo-proxy -> Trusted Publishing).
+      - name: Authenticate to crates.io
+        uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      - name: Publish crate to crates.io
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      # The MCP Registry validates ownership by reading the `mcp-name:` marker
+      # and the version from the crate on crates.io, so the crate must be served
+      # before we publish the server. Poll until the index catches up.
+      - name: Wait for crate to be live on crates.io
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          for i in $(seq 1 30); do
+            if curl -fsS "https://crates.io/api/v1/crates/sudo-proxy/${VERSION}" >/dev/null; then
+              echo "sudo-proxy ${VERSION} is live"
+              exit 0
+            fi
+            echo "waiting for sudo-proxy ${VERSION} (attempt ${i})..."
+            sleep 10
+          done
+          echo "crate ${VERSION} did not appear on crates.io in time" >&2
+          exit 1
+
+      - name: Install mcp-publisher
+        run: |
+          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+
+      - name: Authenticate to MCP Registry
+        run: ./mcp-publisher login github-oidc
+
+      - name: Publish server to MCP Registry
+        run: ./mcp-publisher publish

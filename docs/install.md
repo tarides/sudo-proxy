@@ -5,22 +5,23 @@
 ## From crates.io (with Rust toolchain)
 
 ```bash
-# Core binaries only (sudo-proxy, sudo-request, pkexec-cache)
+# Everything including the MCP server (mcp is a default feature)
 cargo install sudo-proxy
 
-# Everything including the MCP server
-cargo install sudo-proxy --features mcp
+# Core binaries only (sudo-proxy, sudo-request, pkexec-cache)
+cargo install sudo-proxy --no-default-features
 ```
 
 ## From git (development version)
 
 ```bash
-cargo install --git ssh://git@github.com/tarides/sudo-proxy.git --features mcp
+cargo install --git ssh://git@github.com/tarides/sudo-proxy.git
 ```
 
-The MCP server depends on `rmcp`, `tokio`, and `schemars`. These are
-behind the `mcp` Cargo feature so the core binaries stay lean and compile
-fast.
+The MCP server depends on `rmcp`, `tokio`, and `schemars`. These are behind
+the `mcp` Cargo feature, which is **on by default**. Pass
+`--no-default-features` to build only the core binaries (no `rmcp`/`tokio`/
+`schemars`), e.g. on a remote host that just needs the `sudo-proxy` server.
 
 | Binary | Feature | Purpose |
 |---|---|---|
@@ -54,7 +55,7 @@ remote side are SSH access and the `sudo-proxy` binary in `$PATH`.
 Install all binaries and optionally set up polkit auth caching:
 
 ```bash
-cargo install sudo-proxy --features mcp
+cargo install sudo-proxy
 
 # Optional: cache pkexec auth for ~5 minutes (like sudo)
 sudo pkexec-cache --create
@@ -65,8 +66,8 @@ Then configure your MCP client — see [MCP server](mcp.md).
 ## Building locally
 
 ```bash
-cargo build --release                 # core only
-cargo build --release --features mcp  # all
+cargo build --release                        # all binaries (mcp is default)
+cargo build --release --no-default-features   # core only
 ```
 
 ## Cargo dependencies

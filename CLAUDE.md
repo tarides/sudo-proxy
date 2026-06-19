@@ -3,8 +3,8 @@
 ## Build
 
 ```bash
-cargo build --release --features mcp   # all binaries
-cargo build --release                  # core only (no MCP server)
+cargo build --release                       # all binaries (mcp is a default feature)
+cargo build --release --no-default-features  # core only (no MCP server)
 ```
 
 ## Version bumps

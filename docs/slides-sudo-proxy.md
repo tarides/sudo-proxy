@@ -21,7 +21,7 @@ Speaker notes are in HTML comments under each slide.
 
 A privileged-command proxy for the age of AI agents
 
-<small>Tarides · MIT · v0.12.0</small>
+<small>Tarides · MIT · v1.0.0</small>
 
 <!--
 One-line pitch: when you let an AI agent run commands on your machine, sudo-proxy
