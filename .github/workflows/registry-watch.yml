@@ -1,0 +1,36 @@
+name: Registry cargo-support watch
+
+# Temporary tripwire. The MCP Registry has cargo support in `main` (merged
+# 2026-06-03) but the deployed instance does not yet accept `registryType:
+# cargo`, so publish.yml's final step fails with HTTP 400 "unsupported registry
+# type: cargo". This job goes RED daily while that's true and turns GREEN once
+# the registry starts accepting cargo (detected by any cargo-type server
+# appearing in the public API — no auth needed).
+#
+# WHEN THIS TURNS GREEN: run publish.yml (`gh workflow run publish.yml --ref
+# main`) to register io.github.tarides/sudo-proxy, then delete this workflow.
+
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily, ~06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Does the MCP Registry accept cargo yet?
+        run: |
+          UA="sudo-proxy-watch (+https://github.com/tarides/sudo-proxy)"
+          n=$(curl -fsS -A "$UA" "https://registry.modelcontextprotocol.io/v0/servers?limit=100" \
+            | python3 -c "import sys,json; d=json.load(sys.stdin); print(sum(1 for s in d.get('servers',[]) for p in (s.get('packages') or []) if (p.get('registryType') or p.get('registry_type')) == 'cargo'))")
+          echo "cargo-type servers live in the registry: $n"
+          if [ "$n" -gt 0 ]; then
+            echo "::notice::cargo is supported — run publish.yml to register sudo-proxy, then delete registry-watch.yml"
+            exit 0   # GREEN: ready
+          fi
+          echo "cargo not supported by the deployed registry yet"
+          exit 1     # RED: keep waiting
