@@ -3,6 +3,40 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-09-07 — Published to the MCP Registry; retired the cargo-support watch; RUSTSEC-2026-0189 triaged
+
+Release/hygiene work, not an assurance-ladder rung.
+
+- **Published `io.github.tarides/sudo-proxy` 1.0.0 to the official MCP Registry.**
+  The registry added cargo (crates.io) as a package `registryType` in registry
+  v1.8.0 (2026-07-13, modelcontextprotocol/registry#1207), lifting the HTTP 400
+  "unsupported registry type: cargo" that had blocked `publish.yml`'s final
+  step. Ran `publish.yml`; the server is now listed with a `cargo` package
+  (status active, isLatest). The README's
+  `mcp-name: io.github.tarides/sudo-proxy` marker is deliberately **visible**
+  markdown text (a code span), which is required — crates.io strips HTML
+  comments during README rendering, so the hidden-comment form used for
+  PyPI/NuGet would not validate.
+
+- **Removed the temporary `registry-watch.yml` tripwire (PR #40).** It had gone
+  RED daily waiting for cargo support and was auto-disabled by GitHub for
+  inactivity on 2026-08-19. Its GREEN signal was also mis-wired — it counted
+  *pre-existing* cargo-type servers in the public listing, which was the wrong
+  heuristic (the registry accepts cargo regardless of whether any cargo server
+  is already listed), so it would never have fired. Deleted per its own header
+  instructions once the server was published.
+
+- **Triaged RUSTSEC-2026-0189 as not-applicable and suppressed it with a
+  documented rationale (PR #41).** The advisory is a DNS-rebinding flaw (missing
+  `Host`-header validation) in rmcp's Streamable HTTP server transport.
+  sudo-proxy is not affected: the advisory excludes non-HTTP transports, and
+  this crate enables only rmcp's `transport-io` feature and serves the MCP
+  server over stdio (`src/bin/sudo-proxy-mcp.rs`: `.serve(stdio())`) — the
+  vulnerable HTTP transport is never compiled in. Ignored the ID in both
+  advisory gates (`deny.toml` `[advisories].ignore` and the `cargo audit
+  --ignore` step) with the rationale inline; CI green again. Revisit if an HTTP
+  transport is ever added.
+
 ## 2026-06-11 — Extended Rung 4: SSH key-acceptance model, mutual auth (ProVerif)
 
 Reworked the Rung 4 ProVerif model (`proofs/proverif/ssh-channel.m4.pv`,
