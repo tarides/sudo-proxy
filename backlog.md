@@ -66,6 +66,14 @@ and may be dropped under TTY contention, so silent execution can be invisible.
 Make the banner reliable and state the residual risk plainly at the `a`-key
 prompt and in the README.
 
+## Re-evaluate the RUSTSEC-2026-0189 ignore if an HTTP transport is added
+
+`deny.toml` and the `cargo audit` step ignore RUSTSEC-2026-0189 (DNS rebinding
+in rmcp's Streamable HTTP server transport) because sudo-proxy enables only
+rmcp's `transport-io` feature and serves over stdio, so the vulnerable code is
+not compiled in. If an HTTP/streamable-http transport is ever added, drop the
+ignore and require a patched rmcp instead. Captured follow-up, not active work.
+
 ---
 
 ## Rung 6 — seL4-style end-to-end refinement (aspirational)
