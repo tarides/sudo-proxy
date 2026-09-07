@@ -14,6 +14,17 @@ all-features = true
 # this overlaps deliberately with the separate `cargo audit` job (the backlog
 # names both — deny is the policy gate, audit is the focused advisory check).
 yanked = "deny"
+ignore = [
+    # RUSTSEC-2026-0189: DNS rebinding in rmcp's Streamable HTTP server
+    # transport (missing Host-header validation). Not exploitable here: the
+    # advisory explicitly excludes non-HTTP transports ("stdio and
+    # child-process transports are not affected"), and sudo-proxy enables only
+    # rmcp's `transport-io` feature (Cargo.toml) and serves over stdio
+    # (src/bin/sudo-proxy-mcp.rs: `.serve(stdio())`). The vulnerable HTTP
+    # server transport is not compiled in. Mirrored in the `cargo audit` step
+    # (.github/workflows/ci.yml). Revisit if an HTTP transport is ever added.
+    "RUSTSEC-2026-0189",
+]
 
 [bans]
 # Duplicate versions are noise to track, not a hard failure (yet).
