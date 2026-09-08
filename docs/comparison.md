@@ -17,6 +17,15 @@ Tools covered:
 - [Anthropic sandbox-runtime](#anthropic-sandbox-runtime)
 - [AgentSudo](#agentsudo)
 
+**MCP Registry alternatives** (servers found on the registry)
+
+- [mcp-sudo](#mcp-sudo)
+- [agent-sudo-mcp](#agent-sudo-mcp)
+- [SSH command executors](#ssh-command-executors)
+- [Read-only SSH diagnostics](#read-only-ssh-diagnostics)
+- [Arbitrary command runners](#arbitrary-command-runners)
+- [Generic approval gates](#generic-approval-gates)
+
 **Adjacent and building-block tools** (short prose)
 
 - [LangGraph HITL middleware](#langgraph-hitl-middleware)
@@ -355,6 +364,106 @@ and both implement human-in-the-loop. The similarity ends there.
 - **MCP-aware human approval gate for shell/sudo commands** →
   sudo-proxy.
 - **Both** — they sit on different layers and don't conflict.
+
+---
+
+## MCP Registry alternatives
+
+A scan of the official
+[MCP Registry](https://registry.modelcontextprotocol.io) for servers
+tagged around `sudo`, `root`, `privilege`, `ssh`, and `command`
+surfaces the servers below. Only the first is a true head-to-head
+competitor; the rest either delegate the trust decision elsewhere,
+restrict themselves to read-only work, or don't escalate at all.
+sudo-proxy occupies the otherwise-empty quadrant: **privileged,
+mutating execution + a mandatory per-command human keypress + local or
+remote + no stored secret.**
+
+### mcp-sudo
+
+`io.github.KamaruSama/mcp-sudo`
+([github.com/KamaruSama/mcp-sudo](https://github.com/KamaruSama/mcp-sudo))
+— PyPI, Python. The closest analog on the registry, and a deliberate
+inversion of sudo-proxy's thesis: it caches the sudo password
+(Fernet-encrypted, keyed to machine-id + user, in
+`~/.config/claude-sudo-mcp/credential.enc`) so that a `sudo_exec` tool
+can run privileged commands *without prompting a human*. Convenience by
+removing the operator; sudo-proxy is accountability by keeping them.
+
+|                      | sudo-proxy                                                 | mcp-sudo                                                        |
+|----------------------|------------------------------------------------------------|-----------------------------------------------------------------|
+| Approval             | Single-keypress TUI on every command, no bypass            | None — auto-executes once the password is cached                |
+| Credential handling  | Typed live into the terminal; nothing stored               | Sudo password encrypted at rest on disk                         |
+| Threat surface       | No secret at rest to steal                                 | Author notes: copy the machine-id → recover the password        |
+| Remote hosts         | SSH tunnel, TUI on the remote terminal                     | Single-user local workstation only                              |
+| Audit                | `-v` logs each request                                     | None documented                                                 |
+
+The pitch writes itself the moment `--dangerously-skip-permissions` is
+in play: that is exactly when an unattended, disk-stored sudo password
+is most dangerous, and exactly when sudo-proxy's keypress still holds.
+
+### agent-sudo-mcp
+
+`io.github.Kisyntra/agent-sudo-mcp` — PyPI, Python. Despite the name,
+this is *not* an OS sudo. It bills itself as a "local permission
+gateway and security policy engine for MCP tool execution"
+(authorization, delegation, provenance, verifiable audit). It gates
+*other* tools' calls; it does not itself escalate privilege or run
+privileged commands. It sits in front of executors rather than being
+one — a policy layer that could wrap sudo-proxy-mcp, not a substitute
+for it. (Conceptually adjacent to the [AgentSudo](#agentsudo) decorator
+above, but at the MCP-transport layer.)
+
+### SSH command executors
+
+`com.browserssh/browser-ssh`
+([browserssh.com](https://browserssh.com)),
+`com.pulsemcp/ssh` (`ssh-agent-mcp-server`,
+[github.com/pulsemcp/mcp-servers](https://github.com/pulsemcp/mcp-servers)),
+and `dev.aicommander/mcp` ("an SSH/Ansible alternative") all give an
+agent the reach to run commands on remote hosts. What none of them add
+is a synchronous per-command human gate: the trust decision is
+delegated to the SSH ACL / agent key up front, and calls then flow
+unattended. sudo-proxy also reaches remote hosts over SSH, but keeps a
+keypress on every command and surfaces the TUI on the remote terminal.
+
+### Read-only SSH diagnostics
+
+`io.github.Areso/safe-ssh-mcp`
+([github.com/Areso/safe-ssh-mcp](https://github.com/Areso/safe-ssh-mcp))
+and `io.github.Easton-OU/rootpilot-ssh-diagnose`
+([github.com/Easton-OU/rootpilot-mcp](https://github.com/Easton-OU/rootpilot-mcp),
+a fixed 38-command whitelist, secrets redacted) buy their safety by
+being **read-only**: they run diagnostic commands and refuse anything
+mutating. That is a real safety story, but it means they cannot install
+a package, edit a config, or restart a service. sudo-proxy does that
+mutating, privileged work and gets its safety from the human gate
+instead of a read-only restriction.
+
+### Arbitrary command runners
+
+`io.github.bytedance/mcp-server-commands` (npm
+`@agent-infra/mcp-server-commands`, part of ByteDance's
+[UI-TARS-desktop](https://github.com/bytedance/UI-TARS-desktop/tree/main/packages/agent-infra/mcp-servers/commands)
+monorepo — "run arbitrary commands"),
+`io.github.domdomegg/shell-exec-mcp`
+([github.com/domdomegg/shell-exec-mcp](https://github.com/domdomegg/shell-exec-mcp)),
+and `app.desktopcommander/remote-desktop-commander` expose raw command
+execution with no approval step — the registry embodiment of the "Why
+not just use the Bash tool?" case in the README. They also typically
+run a script string through an interpreter rather than an explicit
+`argv`. sudo-proxy is the gated, no-shell counterpart.
+
+### Generic approval gates
+
+`dev.1pass/logi-approval`
+([docs.1pass.dev](https://docs.1pass.dev/agent-approval/quickstart),
+phone approval before high-risk actions) and the `com.clauxel.*`
+approval MCPs gate *arbitrary* agent actions with human sign-off and
+receipts, but they do not execute or escalate anything themselves. Like
+[agent-sudo-mcp](#agent-sudo-mcp), they are a wrappable consent layer,
+not a privileged executor — complementary to sudo-proxy rather than a
+replacement.
 
 ---
 

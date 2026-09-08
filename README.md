@@ -1,5 +1,9 @@
 # sudo-proxy
 
+> An MCP server that lets an agent run privileged, mutating commands —
+> locally or over SSH — with a human keypress required on every one and
+> no credential ever stored.
+
 Privileged command execution proxy with an **MCP server** for AI agent
 integration. Receives requests over a Unix socket, shows a **single-keypress
 TUI prompt** for human approval, then escalates via **sudo**. Configure
@@ -42,6 +46,43 @@ always in the loop, even when Claude Code is run with
 
 For how this relates to mcp-firewall, sandboxing, polkit, doas, and other
 neighboring tools, see [docs/comparison.md](docs/comparison.md).
+
+## Features and non-features
+
+What sudo-proxy does:
+
+- **Per-command human approval** — a single-keypress Y/N TUI gate on
+  every command, privileged and unprivileged, with no way to bypass it.
+- **Real privilege escalation** via `sudo` — installs packages, edits
+  system files, manages services; not limited to read-only diagnostics.
+- **Local and remote over one flow** — the same approval TUI whether the
+  command runs on this machine or on a remote host over an SSH tunnel.
+- **Stores no secret** — the `sudo` password is typed live into the
+  terminal; nothing is cached, encrypted-at-rest, or written to disk.
+- **Explicit `argv`** — commands are passed and displayed exactly as they
+  run, with no shell-string interpolation.
+- **Sanitized environment** — a fixed allowlist, not the inherited shell
+  environment.
+- **Audit trail** — each request is logged by the server (`-v`).
+- **Works under `--dangerously-skip-permissions`** — the human gate holds
+  even when the agent's own permission prompts are disabled.
+
+What sudo-proxy deliberately does *not* do:
+
+- **No stored or managed credentials** — it is not a password cache or a
+  secrets manager.
+- **No unattended execution** — there is no auto-approve mode; a human
+  approves each command or it does not run.
+- **Not a sandbox** — it grants real privilege rather than isolating or
+  faking it.
+- **Not a policy engine or ACL** — the human at the keypress is the
+  policy; there are no rules to write or maintain.
+- **Not read-only** — it is not restricted to a whitelist of safe
+  diagnostic commands.
+- **No hosted service** — it runs on your own machine; commands never
+  transit a third-party relay.
+- **Not a general remote shell** — no persistent interactive sessions,
+  SFTP browser, or fleet manager; just gated one-shot commands.
 
 ## Quickstart
 
