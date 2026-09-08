@@ -41,10 +41,27 @@ jobs:
           tar czf "${DIR}.tar.gz" "$DIR"
           echo "TARBALL=${DIR}.tar.gz" >> "$GITHUB_ENV"
 
+      - name: Install rsign2 (minisign signer)
+        run: cargo install rsign2 --locked
+
+      - name: Sign tarball (minisign)
+        run: |
+          umask 077
+          printf '%s\n' "$MINISIGN_SECRET_KEY" > minisign.key
+          rsign sign -W -s minisign.key -x "${TARBALL}.sig" \
+            -t "sudo-proxy ${GITHUB_REF#refs/tags/} release" \
+            "$TARBALL"
+          rm -f minisign.key
+          rsign verify -P "$MINISIGN_PUBKEY" -x "${TARBALL}.sig" "$TARBALL"
+          echo "SIGNATURE=${TARBALL}.sig" >> "$GITHUB_ENV"
+        env:
+          MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+          MINISIGN_PUBKEY: RWT7gwtBU0v4puI76u0oYwMAT9nmYwGimSOnqJJ+kHExsjTDQj1eZkMW
+
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
-          gh release create "$TAG" "$TARBALL" \
+          gh release create "$TAG" "$TARBALL" "$SIGNATURE" \
             --title "$TAG" \
             --generate-notes
         env:
