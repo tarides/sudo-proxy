@@ -93,6 +93,19 @@ on [Releases](https://github.com/tarides/sudo-proxy/releases)):
 cargo install sudo-proxy
 ```
 
+Or fetch the prebuilt static binaries without compiling, via
+[`cargo binstall`](https://github.com/cargo-bins/cargo-binstall):
+
+```bash
+cargo binstall sudo-proxy
+```
+
+`cargo binstall` downloads the release tarball from GitHub and **verifies
+its minisign signature** (public key `RWT7gwtBU0v4puI76u0oYwMAT9nmYwGimSOnqJJ+kHExsjTDQj1eZkMW`,
+key ID `A6F84B53410B83FB`) before installing; a missing or bad signature
+aborts the install. Prefer `cargo install` if you'd rather build from
+source.
+
 Point your MCP client at the server — add to the project's `.mcp.json` or
 `~/.claude/claude_desktop_config.json`:
 

@@ -7,8 +7,34 @@ description = "Privileged command execution proxy with human approval via pkexec
 repository = "https://github.com/tarides/sudo-proxy"
 homepage = "https://github.com/tarides/sudo-proxy"
 readme = "README.md"
-keywords = ["sudo", "pkexec", "privilege", "proxy", "mcp"]
-categories = ["command-line-utilities", "authentication"]
+keywords = ["sudo", "pkexec", "privilege", "mcp", "ai-agent"]
+categories = ["command-line-utilities", "authentication", "os::unix-apis"]
+
+# cargo-binstall: fetch the prebuilt static binaries from GitHub Releases
+# instead of compiling. The release asset is a single MUSL tarball holding
+# all four binaries, named sudo-proxy-v<version>-x86_64-linux.tar.gz, with
+# the binaries under a top-level directory of the same stem. Only x86_64
+# Linux is published; on any other target binstall finds no `pkg-url` and
+# falls back to `cargo install` (build from source).
+[package.metadata.binstall]
+pkg-fmt = "tgz"
+bin-dir = "sudo-proxy-v{ version }-x86_64-linux/{ bin }{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-musl]
+pkg-url = "{ repo }/releases/download/v{ version }/sudo-proxy-v{ version }-x86_64-linux.tar.gz"
+
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/sudo-proxy-v{ version }-x86_64-linux.tar.gz"
+
+# Minisign signature verification. cargo-binstall downloads `<asset>.sig`
+# alongside the tarball and verifies it against this public key before
+# installing; a bad or missing signature aborts the install. The matching
+# secret key is a dedicated release-signing key held only as the
+# MINISIGN_SECRET_KEY GitHub Actions secret and used by .github/workflows/
+# release.yml — it is never committed. Key ID A6F84B53410B83FB.
+[package.metadata.binstall.signing]
+algorithm = "minisign"
+pubkey = "RWT7gwtBU0v4puI76u0oYwMAT9nmYwGimSOnqJJ+kHExsjTDQj1eZkMW"
 
 [[bin]]
 name = "sudo-proxy"
