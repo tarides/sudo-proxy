@@ -73,7 +73,7 @@ fn main() {
 
     let prompter: Arc<dyn Prompter> = Arc::new(TtyPrompter);
     let sink: Arc<dyn ResultSink> = Arc::new(TtyResultSink);
-    let shutdown = AtomicBool::new(false);
+    let shutdown = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
@@ -94,25 +94,34 @@ fn main() {
         ..Default::default()
     };
 
-    if let Err(e) = server::run(
+    match server::run(
         &socket_path,
         config,
         prompter,
         sink,
-        &shutdown,
+        Arc::clone(&shutdown),
         in_flight,
         tty_lock,
     ) {
-        eprintln!("error: {e}");
-        // Only remove the socket file if it is ours. AddrInUse means
-        // another sudo-proxy is already bound there — deleting that
-        // file would silently break the live daemon's reachability for
-        // every subsequent client without taking it down, leaving a
-        // running-but-unreachable process behind.
-        if e.kind() != std::io::ErrorKind::AddrInUse {
+        // Clean return: only reachable via a stop request. Remove our
+        // socket so the next start doesn't find a stale file, then exit 0
+        // — the terminal window closes with us, and for a remote daemon
+        // the command-mode SSH session (and its tunnel) ends too.
+        Ok(()) => {
             let _ = std::fs::remove_file(&socket_path);
         }
-        process::exit(1);
+        Err(e) => {
+            eprintln!("error: {e}");
+            // Only remove the socket file if it is ours. AddrInUse means
+            // another sudo-proxy is already bound there — deleting that
+            // file would silently break the live daemon's reachability for
+            // every subsequent client without taking it down, leaving a
+            // running-but-unreachable process behind.
+            if e.kind() != std::io::ErrorKind::AddrInUse {
+                let _ = std::fs::remove_file(&socket_path);
+            }
+            process::exit(1);
+        }
     }
 }
 
