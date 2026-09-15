@@ -74,35 +74,25 @@ binary, the instructions include a link to the installation section.
 ## Registry introspection (Glama)
 
 The [Glama](https://glama.ai/mcp/servers/tarides/sudo-proxy) MCP registry scores
-a server by *building it from the repo's `Dockerfile`, running it in a sandbox,
-and calling `tools/list`* — its quality score is derived from the enumerated
-tool definitions, so the server must launch and list its tools to be scored.
-Glama re-scans on every new commit
+a server by building it, running it, and calling `tools/list` — the quality
+score is derived from the enumerated tool definitions, so the tools must
+enumerate for the server to be scored
 ([methodology](https://glama.ai/mcp/methodology)).
 
-The repo ships a `Dockerfile` whose entrypoint is `sudo-proxy-mcp` (the stdio
-MCP server — **not** the `sudo-proxy` host daemon, which does not speak MCP).
-The image is an introspection artifact only: it has no TTY and no sudo, so it
-can list tools but cannot approve or execute anything.
+Glama does **not** build a `Dockerfile` from this repo. The build is configured
+on the server's Glama admin page (`.../admin/dockerfile`) as *build steps* + a
+*CMD*, run inside Glama's `debian:trixie-slim` base (Node and `mcp-proxy`
+preinstalled, but no Rust). The working configuration:
 
-Check introspection ad-hoc, in increasing fidelity to what Glama does:
+- Build steps:
+  - `apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config`
+  - `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.96.0 --profile minimal && . "$HOME/.cargo/env" && cargo build --release --bin sudo-proxy-mcp`
+- CMD: `["/app/target/release/sudo-proxy-mcp"]`
+
+To check that the server introspects correctly (no Docker needed):
 
 ```sh
-# 1. Handshake against the binary (fast; runs in CI):
 cargo test --test mcp_introspection
-
-# 2. Build the image and drive the handshake against the container. The
-#    trailing `sleep` holds stdin open so the server stays alive long enough
-#    to answer before the pipe closes.
-docker build -t sudo-proxy-mcp .
-{ printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}' \
-  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; sleep 1; } \
-  | docker run -i --rm sudo-proxy-mcp
-
-# 3. Official MCP Inspector UI against the container:
-npx @modelcontextprotocol/inspector docker run -i --rm sudo-proxy-mcp
 ```
 
-All three should enumerate `execute`, `start_server`, and `update_host`.
+It should enumerate `execute`, `start_server`, and `update_host`.
