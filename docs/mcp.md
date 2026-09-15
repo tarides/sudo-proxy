@@ -82,17 +82,53 @@ enumerate for the server to be scored
 Glama does **not** build a `Dockerfile` from this repo. The build is configured
 on the server's Glama admin page (`.../admin/dockerfile`) as *build steps* + a
 *CMD*, run inside Glama's `debian:trixie-slim` base (Node and `mcp-proxy`
-preinstalled, but no Rust). The working configuration:
+preinstalled, but no Rust). Enter these as JSON arrays — the values below use no
+embedded double quotes, so they paste without being flagged invalid (call
+`cargo` by its full path instead of sourcing `$HOME/.cargo/env`):
 
-- Build steps:
-  - `apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config`
-  - `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.96.0 --profile minimal && . "$HOME/.cargo/env" && cargo build --release --bin sudo-proxy-mcp`
-- CMD: `["/app/target/release/sudo-proxy-mcp"]`
+Build steps:
 
-To check that the server introspects correctly (no Docker needed):
+```json
+["apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config", "curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.96.0 --profile minimal && $HOME/.cargo/bin/cargo build --release --bin sudo-proxy-mcp"]
+```
+
+CMD arguments:
+
+```json
+["/app/target/release/sudo-proxy-mcp"]
+```
+
+After changing the config press **Build and release** (plain *Release*
+republishes the previous artifact). To check that the server introspects
+correctly (no Docker needed):
 
 ```sh
 cargo test --test mcp_introspection
 ```
 
 It should enumerate `execute`, `start_server`, and `update_host`.
+
+## Glama terminology
+
+Glama describes MCP servers with three terms — here is how they map to
+sudo-proxy:
+
+| Glama term    | sudo-proxy |
+| ------------- | ---------- |
+| **Server**    | the `sudo-proxy-mcp` binary — the stdio MCP server, listed as `tarides/sudo-proxy`. |
+| **Tools**     | `execute`, `start_server`, `update_host`. |
+| **Connector** | *none* — a connector is a **remote/hosted** MCP server (a managed HTTP endpoint). sudo-proxy is local-only, so it is a server but never a connector. |
+
+Two caveats:
+
+- **"Connector" does not apply by design.** It is Glama's word for a hosted,
+  remote MCP endpoint with managed credentials. sudo-proxy needs a live local
+  daemon and a human at the approval TUI, so it cannot be hosted this way (the
+  same reason Glama's "try in browser" only ever returns "sudo-proxy is not
+  running").
+- **Mind the word "server".** Glama's *server* is the `sudo-proxy-mcp` MCP
+  process. sudo-proxy's own *server* — what the `start_server` tool spawns — is
+  the `sudo-proxy` host daemon (Unix socket + TUI) that the MCP server proxies
+  to. That daemon, `sudo-request`, `pkexec-cache`, and target *hosts* all sit
+  below Glama's vocabulary; in MCP terms sudo-proxy is one server exposing three
+  tools.
