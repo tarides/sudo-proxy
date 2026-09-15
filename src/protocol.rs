@@ -8,6 +8,30 @@ use std::ops::Deref;
 /// the same crate, so this resolves to the same value everywhere.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// What the sender wants the daemon to do. Absent on the wire for old
+/// clients, so it defaults to `Exec`; exec requests from new clients skip
+/// the field entirely, keeping them byte-identical to the pre-1.1 format.
+///
+/// Control actions (`Stop`, `Ping`) are sent with an empty `pipeline`. An
+/// old daemon (< 1.1) ignores the unknown `action` key, rejects the empty
+/// pipeline at `ValidatedRequest::validate` without prompting the human,
+/// and its error `Response` still carries its `version` — which is how new
+/// clients detect a peer that predates control actions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Action {
+    #[default]
+    Exec,
+    Stop,
+    Ping,
+}
+
+impl Action {
+    fn is_exec(&self) -> bool {
+        matches!(self, Action::Exec)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Request {
     #[serde(default = "default_id")]
@@ -18,7 +42,10 @@ pub struct Request {
     pub session: String,
     #[serde(default)]
     pub time: String,
+    #[serde(default)]
     pub pipeline: Vec<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Action::is_exec")]
+    pub action: Action,
     #[serde(default)]
     pub env: HashMap<String, String>,
     #[serde(default)]
@@ -64,10 +91,31 @@ impl Request {
             session,
             time: crate::datetime::now_iso8601(),
             pipeline,
+            action: Action::Exec,
             env,
             reason,
             privileged,
             forward_agent,
+            version: VERSION.to_string(),
+        }
+    }
+
+    /// Build a control request (`Stop` / `Ping`). The empty pipeline is
+    /// deliberate: it is what makes an old daemon reject the request at
+    /// validation — before any prompt — while still stamping its version
+    /// on the error response.
+    pub fn control(host: String, session: String, action: Action) -> Self {
+        Self {
+            id: default_id(),
+            host,
+            session,
+            time: crate::datetime::now_iso8601(),
+            pipeline: vec![],
+            action,
+            env: HashMap::new(),
+            reason: String::new(),
+            privileged: false,
+            forward_agent: false,
             version: VERSION.to_string(),
         }
     }
@@ -122,7 +170,10 @@ impl ValidatedRequest {
     /// client-side `validate_host`; all are held to the same sanitization as
     /// argv and env. See `tui::prompt_tty` for the render this protects.
     pub fn validate(req: Request) -> Result<Self, String> {
-        if req.pipeline.is_empty() {
+        // Control actions (Stop/Ping) carry no pipeline by design; only an
+        // Exec request must have one. Every string-field check below stays
+        // unconditional, so control requests are sanitized like any other.
+        if req.action == Action::Exec && req.pipeline.is_empty() {
             return Err("pipeline must not be empty".to_string());
         }
         for (stage_idx, argv) in req.pipeline.iter().enumerate() {
@@ -280,5 +331,75 @@ impl Response {
     /// Returns the exit code of the last stage, or 0 if no stages.
     pub fn exit_code(&self) -> i32 {
         self.stages.last().map(|s| s.exit_code).unwrap_or(0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exec_request() -> Request {
+        Request::new(
+            String::new(),
+            "test".into(),
+            vec![vec!["ls".into()]],
+            HashMap::new(),
+            String::new(),
+            true,
+            false,
+        )
+    }
+
+    /// Wire compat: a request from an old client (no `action` key) must
+    /// deserialize to `Action::Exec`.
+    #[test]
+    fn action_absent_defaults_to_exec() {
+        let json = r#"{"id":"a","session":"s","time":"2026-01-01T00:00:00Z","pipeline":[["ls"]]}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(req.action, Action::Exec);
+    }
+
+    /// Wire compat the other way: an exec request from a new client must be
+    /// byte-identical to the pre-1.1 format — no `action` key on the wire.
+    #[test]
+    fn exec_request_omits_action_on_wire() {
+        let json = serde_json::to_string(&exec_request()).unwrap();
+        assert!(!json.contains("action"), "exec must not serialize `action`: {json}");
+    }
+
+    /// A control request must serialize an explicit empty pipeline (so old
+    /// daemons parse it and reject at validate, version-stamping the error)
+    /// and must round-trip its action.
+    #[test]
+    fn control_request_serializes_empty_pipeline_and_action() {
+        let req = Request::control(String::new(), "test".into(), Action::Stop);
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains(r#""pipeline":[]"#), "missing empty pipeline: {json}");
+        assert!(json.contains(r#""action":"stop""#), "missing action: {json}");
+        let back: Request = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.action, Action::Stop);
+    }
+
+    #[test]
+    fn validate_allows_empty_pipeline_for_control_only() {
+        for action in [Action::Stop, Action::Ping] {
+            let req = Request::control(String::new(), "test".into(), action);
+            assert!(ValidatedRequest::validate(req).is_ok(), "{action:?} must validate");
+        }
+        let mut req = Request::control(String::new(), "test".into(), Action::Exec);
+        req.pipeline = vec![];
+        assert_eq!(
+            ValidatedRequest::validate(req).unwrap_err(),
+            "pipeline must not be empty"
+        );
+    }
+
+    /// Control requests go through the same dangerous-character sanitization
+    /// as exec requests — every displayed field is still checked.
+    #[test]
+    fn validate_still_sanitizes_control_fields() {
+        let mut req = Request::control(String::new(), "test".into(), Action::Ping);
+        req.session.push('\u{1b}');
+        assert!(ValidatedRequest::validate(req).is_err());
     }
 }

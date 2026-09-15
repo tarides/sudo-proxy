@@ -27,7 +27,8 @@ The wire shape is always a list of stages: a single command is
 to `a | b | c`). The MCP `execute` tool accepts a convenience `argv`
 field and wraps it for you.
 
-Field defaults (every field except `pipeline` is optional on the wire):
+Field defaults (every field is optional on the wire, but an `exec`
+request with an empty or missing `pipeline` is rejected at validation):
 
 - `id` — defaults to a fresh UUIDv4.
 - `host`, `session`, `time`, `reason`, `env` — empty if omitted, but
@@ -37,6 +38,21 @@ Field defaults (every field except `pipeline` is optional on the wire):
   client that forgets the field still goes through approval + sudo).
 - `forward_agent` — defaults to `false`. Setting `true` is only valid
   when `privileged: false`.
+- `action` — defaults to `"exec"` (and is omitted from the wire for exec
+  requests, keeping them byte-identical to the pre-1.1 format). See
+  *Control actions* below.
+
+**Control actions** (since 1.1): `"action": "stop"` asks the daemon to
+shut down cleanly — it prints a notice on its TTY (no approval prompt),
+replies `ok`, and exits; `"action": "ping"` replies `ok` with
+`"message": "pong"` without prompting. Both are sent with
+`"pipeline": []` and pass every gate an exec request does (same-UID
+check, field sanitization, freshness, replay protection), so a captured
+stop request cannot be replayed later. Compatibility: a pre-1.1 daemon
+ignores the unknown `action` key and rejects the empty pipeline at
+validation — before any prompt — with `"pipeline must not be empty"`;
+since every response carries the daemon's `version`, new clients use
+that reply to detect peers that predate control actions.
 
 **Response:**
 ```jsonc

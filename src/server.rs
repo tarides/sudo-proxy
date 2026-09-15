@@ -326,7 +326,7 @@ pub fn run(
     config: ServerConfig,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
-    shutdown: &AtomicBool,
+    shutdown: Arc<AtomicBool>,
     in_flight: Arc<AtomicUsize>,
     tty_lock: Arc<Mutex<()>>,
 ) -> std::io::Result<()> {
@@ -398,6 +398,7 @@ pub fn run(
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
         let confirm_unprivileged = Arc::clone(&confirm_unprivileged);
+        let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
             let _guard = guard;
             handle_connection(
@@ -411,6 +412,7 @@ pub fn run(
                 sink,
                 seen,
                 tty,
+                shutdown,
             );
         });
     }
@@ -428,6 +430,7 @@ fn handle_connection(
     result_sink: Arc<dyn ResultSink>,
     seen_ids: Arc<Mutex<SeenIds>>,
     tty_lock: Arc<Mutex<()>>,
+    shutdown: Arc<AtomicBool>,
 ) {
     // Defense-in-depth: refuse connections from other UIDs even though the
     // socket file is 0600 inside a 0700 runtime dir.
@@ -530,6 +533,41 @@ fn handle_connection(
             let _ = write_response(&mut stream, &resp);
             return;
         }
+    }
+
+    // Control actions, dispatched only after every gate above (peer uid,
+    // validation, freshness, replay) — a captured stop request cannot be
+    // replayed later to take the daemon down.
+    match req.action {
+        crate::protocol::Action::Ping => {
+            if verbose {
+                let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
+                eprintln!("[{}] ping from {} (client {client_ver})", req.id, req.session);
+            }
+            let mut resp = Response::ok(&req.id, vec![], b"");
+            resp.message = Some("pong".to_string());
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
+        crate::protocol::Action::Stop => {
+            // No approval prompt (by design): a same-UID peer can already
+            // SIGTERM the daemon, so the gate would add friction without
+            // adding a security boundary. The TTY notice keeps the human
+            // informed; try_lock so a pending prompt can't delay shutdown.
+            if let Ok(_g) = tty_lock.try_lock() {
+                let _ = tui::display_notice(&format!(
+                    "sudo-proxy stopped by {}",
+                    req.session
+                ));
+            }
+            // Reply before flipping the flag so the client reliably reads
+            // the Ok response before the process exits.
+            let resp = Response::ok(&req.id, vec![], b"");
+            let _ = write_response(&mut stream, &resp);
+            shutdown.store(true, Ordering::Relaxed);
+            return;
+        }
+        crate::protocol::Action::Exec => {}
     }
 
     if verbose {
@@ -1034,6 +1072,7 @@ mod tests {
             session: rand_chars(rng, 6),
             time: crate::datetime::now_iso8601(),
             pipeline: std::mem::take(&mut pipeline),
+            action: crate::protocol::Action::Exec,
             env,
             reason: rand_chars(rng, 8),
             privileged: rng.next_u64() & 1 == 0,
