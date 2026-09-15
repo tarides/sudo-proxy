@@ -1,0 +1,10 @@
+# Keep the build context small: only src + manifests are needed to build the
+# sudo-proxy-mcp binary. Everything below is irrelevant to the build and would
+# either bloat the context (target/) or risk shipping stale artifacts.
+target/
+.git/
+proofs/
+docs/
+scratch/
+tests/
+lab/

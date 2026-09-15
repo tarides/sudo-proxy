@@ -70,3 +70,39 @@ after learning them during a session.
 
 If the `sudo-proxy` binary is not found in PATH or next to the MCP server
 binary, the instructions include a link to the installation section.
+
+## Registry introspection (Glama)
+
+The [Glama](https://glama.ai/mcp/servers/tarides/sudo-proxy) MCP registry scores
+a server by *building it from the repo's `Dockerfile`, running it in a sandbox,
+and calling `tools/list`* — its quality score is derived from the enumerated
+tool definitions, so the server must launch and list its tools to be scored.
+Glama re-scans on every new commit
+([methodology](https://glama.ai/mcp/methodology)).
+
+The repo ships a `Dockerfile` whose entrypoint is `sudo-proxy-mcp` (the stdio
+MCP server — **not** the `sudo-proxy` host daemon, which does not speak MCP).
+The image is an introspection artifact only: it has no TTY and no sudo, so it
+can list tools but cannot approve or execute anything.
+
+Check introspection ad-hoc, in increasing fidelity to what Glama does:
+
+```sh
+# 1. Handshake against the binary (fast; runs in CI):
+cargo test --test mcp_introspection
+
+# 2. Build the image and drive the handshake against the container. The
+#    trailing `sleep` holds stdin open so the server stays alive long enough
+#    to answer before the pipe closes.
+docker build -t sudo-proxy-mcp .
+{ printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"c","version":"0"}}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'; sleep 1; } \
+  | docker run -i --rm sudo-proxy-mcp
+
+# 3. Official MCP Inspector UI against the container:
+npx @modelcontextprotocol/inspector docker run -i --rm sudo-proxy-mcp
+```
+
+All three should enumerate `execute`, `start_server`, and `update_host`.
