@@ -3,6 +3,42 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-09-15 — Glama quality score: from unscored to grade A
+
+Release/hygiene work, not an assurance-ladder rung.
+
+- **Root-caused why Glama showed `quality: null`.** The registry's `/inspect`
+  view had `repository.inspectable: false` and `toolCount: 0`: Glama scores a
+  server by building it, running it, and calling `tools/list`, and it does **not**
+  build a `Dockerfile` from the repo — it builds from the server's admin page
+  (`.../admin/dockerfile`) as *build steps* + a *CMD*, run in Glama's
+  `debian:trixie-slim` base (Node + `mcp-proxy` preinstalled, but no Rust). With
+  no build configured, nothing launched, so no tools enumerated.
+
+- **Configured the admin build; the server now grades A.** Build steps install
+  the Rust toolchain and run `cargo build --release --bin sudo-proxy-mcp`; the
+  CMD launches the stdio binary `/app/target/release/sudo-proxy-mcp`. Glama then
+  enumerated the three tools (`execute`, `start_server`, `update_host`),
+  `inspectable` flipped true, and `scores.quality` computed to **A**. The
+  paste-safe recipe (JSON arrays with no embedded double quotes) is documented in
+  `docs/mcp.md`.
+
+- **PRs #45 → #46 → #47.** #45 added a repo `Dockerfile` + introspection test +
+  docs; #46 removed the `Dockerfile`/`.dockerignore` once we confirmed Glama
+  ignores repo Dockerfiles, keeping `tests/mcp_introspection.rs` (a Docker-free
+  regression guard that drives `initialize` → `tools/list` and asserts the three
+  tools) and documenting the real admin-page recipe; #47 added the Glama
+  server/tools/connector terminology mapping and made the documented build
+  config paste-safe.
+
+- **Declined the inapplicable Glama nudges.** "Try in browser" / hosted usage
+  and "seed usage" don't fit a `hosting:local-only` server that needs a live
+  daemon and a human TUI (sandbox calls only return "sudo-proxy is not
+  running"); left "related servers" as-is.
+
+- **Listed on awesome-mcp-servers** (punkpeye/awesome-mcp-servers#13975,
+  `check-submission` green).
+
 ## 2026-09-07 — Published to the MCP Registry; retired the cargo-support watch; RUSTSEC-2026-0189 triaged
 
 Release/hygiene work, not an assurance-ladder rung.
