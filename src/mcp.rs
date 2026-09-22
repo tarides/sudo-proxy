@@ -8,9 +8,9 @@ use base64::Engine;
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    AnnotateAble, CallToolResult, Content, ListResourcesResult, PaginatedRequestParams,
-    RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-    ServerCapabilities, ServerInfo,
+    AnnotateAble, CallToolResult, Content, Implementation, ListResourcesResult,
+    PaginatedRequestParams, RawResource, ReadResourceRequestParams, ReadResourceResult,
+    ResourceContents, ServerCapabilities, ServerInfo,
 };
 use rmcp::service::RequestContext;
 use rmcp::{
@@ -493,6 +493,13 @@ impl ServerHandler for McpProxy {
                 .enable_tools()
                 .enable_resources()
                 .build(),
+            // Default's server_info comes from rmcp's own build env ("rmcp
+            // 0.15.0"); report this crate's identity instead.
+            server_info: Implementation {
+                name: "sudo-proxy".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
