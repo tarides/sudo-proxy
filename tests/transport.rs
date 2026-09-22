@@ -45,7 +45,7 @@ fn refuses_to_clobber_active_server() {
     let path = s.socket_path.clone();
     let prompter = Arc::new(common::ScriptedPrompter::new());
     let sink = Arc::new(NoopResultSink);
-    let shutdown = AtomicBool::new(false);
+    let shutdown = Arc::new(AtomicBool::new(false));
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
@@ -54,7 +54,7 @@ fn refuses_to_clobber_active_server() {
         server::ServerConfig::default(),
         prompter,
         sink,
-        &shutdown,
+        shutdown,
         in_flight,
         tty_lock,
     );
@@ -104,7 +104,7 @@ fn replaces_stale_socket_file() {
             config,
             p_for_thread,
             Arc::new(NoopResultSink),
-            &s_for_thread,
+            s_for_thread,
             inflight_thread,
             tty_lock_thread,
         )

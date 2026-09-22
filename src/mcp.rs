@@ -20,11 +20,14 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
 use crate::hosts::HostsConfig;
-use crate::protocol::{self, Request, Response, Status};
+use crate::protocol::{self, Action, Request, Response, Status};
 use crate::server::default_socket_path;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+/// Total timeout for control requests (stop/ping). They never wait on a
+/// human, so anything beyond connect + one round-trip means trouble.
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether SUDO_PROXY_MCP_VERBOSE is set. MCP stdio is JSON-RPC over
 /// stdout, so the only safe trace sink is stderr. Cached once at first
@@ -116,6 +119,20 @@ pub struct UpdateHostParams {
     pub os: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StopServerParams {
+    /// Host whose daemon to stop (omit for the local daemon)
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StatusParams {
+    /// Host to check (omit to report the local daemon plus every known host)
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
 // ---------------------------------------------------------------------------
 // McpProxy — the MCP server
 // ---------------------------------------------------------------------------
@@ -140,7 +157,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Execute a command through sudo-proxy with human approval. The command runs on the target host (local by default). A human must approve privileged commands before they execute. Call start_server first if sudo-proxy is not already running. Supports pipelines: use `pipeline` for multi-stage commands (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]) or `argv` for a single command."
+        description = "Execute a command (or multi-stage pipeline) on a sudo-proxy host after a human approves it at that host's terminal. Provide `argv` for a single command or `pipeline` for piped stages (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]); `host` targets a remote daemon started via start_server (omit for localhost); `timeout` is in milliseconds (default 120000, clamped to 600000). Blocks until the human answers, then returns the final stage's stdout plus per-stage stderr and exit codes. Errors: 'Request denied by user.' if the human declines, a timeout error if unanswered within 60s, and 'sudo-proxy is not running' if the daemon is down — call start_server first."
     )]
     async fn execute(
         &self,
@@ -203,7 +220,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Start a sudo-proxy server. Local (no host): opens a terminal window with sudo-proxy's TUI for command approval. Remote (host given): opens a terminal window with SSH running sudo-proxy, with a socket tunnel so execute calls reach the remote host."
+        description = "Start a sudo-proxy approval daemon: with no `host`, opens a local terminal window running the approval TUI; with `host`, opens a terminal running SSH to that host with a Unix-socket tunnel so subsequent execute calls reach it. Idempotent: if the daemon (or tunnel) is already live it returns 'already running' without spawning anything. Blocks while polling for end-to-end socket readiness — up to 5s locally, up to 30s for remote tunnels — and returns as soon as the daemon answers. Set `forward_agent: true` to enable SSH agent forwarding for unprivileged remote commands (ignored locally); errors if no terminal emulator is found or the socket is not ready within the polling window."
     )]
     async fn start_server(
         &self,
@@ -230,7 +247,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Update metadata for a known host. Use this to record a host's description or OS after learning it during a session."
+        description = "Record or update metadata for a host in the sudo-proxy registry (~/.config/sudo-proxy/hosts.json), which is surfaced in this server's instructions and in status output. Partial update: only the `description` and/or `os` fields you provide are changed; omitted fields keep their current values. A `host` not yet in the registry is added automatically. Returns 'Updated host <name>'; errors only if the host name contains characters outside [A-Za-z0-9._@:-]."
     )]
     async fn update_host(
         &self,
@@ -252,6 +269,165 @@ impl McpProxy {
             "Updated host {}",
             params.host
         ))]))
+    }
+
+    #[tool(
+        description = "Stop a running sudo-proxy daemon: sends a stop request over its socket; the daemon prints a shutdown notice on its terminal (no approval prompt is required), exits, and its terminal window — and SSH tunnel, for remote hosts — closes. `host` selects a remote daemon started via start_server; omit it for the local one. Returns a non-error 'not running' message if no socket exists; on success, confirms after briefly polling for the socket to disappear and removes any stale tunnel socket. If the target runs a sudo-proxy version that predates remote stop, returns an error asking you to press q or Ctrl+C in that daemon's terminal instead."
+    )]
+    async fn stop_server(
+        &self,
+        Parameters(params): Parameters<StopServerParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(ref h) = params.host {
+            if let Err(e) = crate::server::validate_host(h) {
+                return Ok(error_result(format!("invalid host: {e}")));
+            }
+        }
+        let socket_path = socket_for_host(params.host.as_deref());
+        let host_name = params.host.clone().unwrap_or_else(|| "localhost".into());
+
+        if !socket_path.exists() {
+            return Ok(CallToolResult::success(vec![Content::text(format!(
+                "sudo-proxy is not running on {host_name} (no socket at {})",
+                socket_path.display()
+            ))]));
+        }
+
+        let req = Request::control(
+            params.host.unwrap_or_default(),
+            "sudo-proxy-mcp".to_string(),
+            Action::Stop,
+        );
+        match send_request(&socket_path, &req, CONTROL_TIMEOUT).await {
+            Ok(resp) if resp.status == Status::Ok => {
+                // Wait for the daemon (and, remotely, the ssh tunnel) to go
+                // away so a follow-up start_server doesn't race the old
+                // socket. Best-effort: report success either way.
+                for _ in 0..50 {
+                    if !socket_path.exists() || !remote_socket_ready(&socket_path).await {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                // ssh may leave the local end of the -L forward behind.
+                if socket_path.exists() && !remote_socket_ready(&socket_path).await {
+                    let _ = std::fs::remove_file(&socket_path);
+                }
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Stopped sudo-proxy on {host_name}."
+                ))]))
+            }
+            Ok(resp) if is_pre_action_daemon(&resp) => {
+                touch_host(&host_name, &resp.version);
+                let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+                Ok(error_result(format!(
+                    "{host_name} runs sudo-proxy {ver}, which predates remote stop. \
+                     Press q or Ctrl+C in that daemon's terminal window to stop it."
+                )))
+            }
+            Ok(resp) => Ok(format_response(resp)),
+            Err(e) => Ok(error_result(e)),
+        }
+    }
+
+    #[tool(
+        description = "Report the status of sudo-proxy daemons without executing any command: with `host`, checks that one daemon; with no arguments, checks the local daemon plus every host in the registry. For each host it reports whether the socket exists and answers, the live daemon version (learned via a ping that needs no human approval), and registry metadata (description, OS, last connected). Read-only except for refreshing the registry's last-connected/version cache after a successful ping. Hosts that are down are reported as 'not running' — that is a normal result, not an error."
+    )]
+    async fn status(
+        &self,
+        Parameters(params): Parameters<StatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let config = HostsConfig::load();
+        // The registry key for the local daemon is "localhost" (written by
+        // touch_host); it must be probed at the default socket, never at a
+        // tunnel path.
+        let targets: Vec<Option<String>> = match params.host {
+            Some(h) => {
+                if let Err(e) = crate::server::validate_host(&h) {
+                    return Ok(error_result(format!("invalid host: {e}")));
+                }
+                vec![if h == "localhost" { None } else { Some(h) }]
+            }
+            None => std::iter::once(None)
+                .chain(
+                    config
+                        .hosts
+                        .keys()
+                        .filter(|h| h.as_str() != "localhost")
+                        .cloned()
+                        .map(Some),
+                )
+                .collect(),
+        };
+
+        let mut lines = Vec::new();
+        for target in targets {
+            let name = target.clone().unwrap_or_else(|| "localhost".into());
+            let mut line = format!("{name}: {}", probe_one(target.as_deref()).await);
+            if let Some(info) = config.hosts.get(&name) {
+                if !info.description.is_empty() {
+                    line.push_str(&format!(" — {}", info.description));
+                }
+                if !info.os.is_empty() {
+                    line.push_str(&format!(" ({})", info.os));
+                }
+                if !info.last_connected.is_empty() {
+                    line.push_str(&format!(" [last: {}]", info.last_connected));
+                }
+            }
+            lines.push(line);
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            lines.join("\n"),
+        )]))
+    }
+}
+
+/// An old daemon (predating control actions) rejects a stop/ping request at
+/// validation with this message — before any prompt — and its error response
+/// still carries its version.
+fn is_pre_action_daemon(resp: &Response) -> bool {
+    resp.status == Status::Error
+        && resp
+            .message
+            .as_deref()
+            .is_some_and(|m| m.contains("pipeline must not be empty"))
+}
+
+/// One-host status probe: socket presence, readiness, then a live ping for
+/// the daemon's version. The only mutation is the hosts.json cache refresh
+/// after a successful exchange.
+async fn probe_one(host: Option<&str>) -> String {
+    let sock = socket_for_host(host);
+    let name = host.unwrap_or("localhost");
+    if !sock.exists() {
+        return "not running (no socket)".into();
+    }
+    if !remote_socket_ready(&sock).await {
+        return "socket present but not answering (stale?)".into();
+    }
+    let req = Request::control(
+        host.unwrap_or_default().to_string(),
+        "sudo-proxy-mcp".to_string(),
+        Action::Ping,
+    );
+    match send_request(&sock, &req, CONTROL_TIMEOUT).await {
+        Ok(resp) if resp.status == Status::Ok => {
+            touch_host(name, &resp.version);
+            let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+            format!("running (sudo-proxy {ver})")
+        }
+        Ok(resp) if is_pre_action_daemon(&resp) => {
+            // The version is still learned from the error reply.
+            touch_host(name, &resp.version);
+            let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+            format!("running (sudo-proxy {ver}, predates ping)")
+        }
+        Ok(resp) => format!(
+            "error: {}",
+            resp.message.unwrap_or_else(|| "unknown error".into())
+        ),
+        Err(e) => format!("unreachable: {e}"),
     }
 }
 

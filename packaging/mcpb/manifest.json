@@ -1,0 +1,22 @@
+{
+  "manifest_version": "0.3",
+  "name": "sudo-proxy",
+  "version": "1.1.0",
+  "description": "Privileged command execution proxy with human approval via pkexec or sudo",
+  "author": {
+    "name": "Tarides"
+  },
+  "homepage": "https://github.com/tarides/sudo-proxy",
+  "documentation": "https://github.com/tarides/sudo-proxy/blob/main/docs/mcp.md",
+  "server": {
+    "type": "binary",
+    "entry_point": "sudo-proxy-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/sudo-proxy-mcp",
+      "args": []
+    }
+  },
+  "compatibility": {
+    "platforms": ["linux"]
+  }
+}

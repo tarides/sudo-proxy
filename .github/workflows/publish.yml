@@ -73,6 +73,32 @@ jobs:
           echo "crate ${VERSION} did not appear on crates.io in time" >&2
           exit 1
 
+      # The MCPB package entry in server.json points at a GitHub release asset
+      # (built + uploaded by release.yml on the same tag) and must carry that
+      # file's sha256. release.yml runs in parallel, so wait for the asset, then
+      # compute and inject the hash. The registry validates the URL with a HEAD
+      # request at publish time, so the asset must be live before we publish.
+      - name: Wait for MCPB asset and inject sha256 into server.json
+        run: |
+          URL=$(jq -r '.packages[] | select(.registryType=="mcpb") | .identifier' server.json)
+          echo "MCPB asset: $URL"
+          TMP=$(mktemp)
+          for i in $(seq 1 60); do
+            if curl -fsSL -A "$CRATES_UA" "$URL" -o "$TMP"; then
+              echo "MCPB asset is live"
+              break
+            fi
+            echo "waiting for MCPB asset (attempt ${i})..."
+            sleep 10
+            [ "$i" -eq 60 ] && { echo "MCPB asset did not appear in time" >&2; exit 1; }
+          done
+          SHA=$(sha256sum "$TMP" | awk '{print $1}')
+          echo "sha256=$SHA"
+          jq --arg h "$SHA" \
+            '(.packages[] | select(.registryType=="mcpb") | .fileSha256) = $h' \
+            server.json > server.json.tmp
+          mv server.json.tmp server.json
+
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher

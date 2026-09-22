@@ -157,7 +157,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             config,
             prompter_arc,
             sink_arc,
-            &sh_arc,
+            sh_arc,
             inflight_arc,
             tty_lock_arc,
         );
@@ -251,12 +251,20 @@ pub fn make_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
             .into_iter()
             .map(|v| v.into_iter().map(String::from).collect())
             .collect(),
+        action: sudo_proxy::protocol::Action::Exec,
         env: Default::default(),
         reason: String::new(),
         privileged: false,
         forward_agent: false,
         version: sudo_proxy::protocol::VERSION.to_string(),
     }
+}
+
+#[allow(dead_code)]
+pub fn make_control_req(id: &str, action: sudo_proxy::protocol::Action) -> Request {
+    let mut req = make_req(id, vec![]);
+    req.action = action;
+    req
 }
 
 pub fn iso_now() -> String {

@@ -3,7 +3,7 @@
   "name": "io.github.tarides/sudo-proxy",
   "title": "sudo-proxy",
   "description": "Privileged command execution proxy with human approval via pkexec or sudo",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "repository": {
     "url": "https://github.com/tarides/sudo-proxy",
     "source": "github"
@@ -13,7 +13,16 @@
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "sudo-proxy",
-      "version": "1.0.0",
+      "version": "1.1.0",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/tarides/sudo-proxy/releases/download/v1.1.0/sudo-proxy-mcp-v1.1.0-x86_64-linux.mcpb",
+      "version": "1.1.0",
+      "fileSha256": "SHA256-INJECTED-BY-PUBLISH-WORKFLOW",
       "transport": {
         "type": "stdio"
       }

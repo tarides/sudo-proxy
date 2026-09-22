@@ -143,7 +143,7 @@ as `mcp-name: io.github.tarides/sudo-proxy`.
 ## Documentation
 
 - [docs/install.md](docs/install.md) — install variants, remote deploy, building from source
-- [docs/mcp.md](docs/mcp.md) — MCP tools (`start_server`, `execute`, `update_host`), config, known hosts
+- [docs/mcp.md](docs/mcp.md) — MCP tools (`start_server`, `execute`, `status`, `stop_server`, `update_host`), config, known hosts
 - [docs/usage.md](docs/usage.md) — CLI flags, non-privileged mode, SSH tunnels, agent forwarding
 - [docs/protocol.md](docs/protocol.md) — JSON-line wire protocol over the Unix socket
 - [docs/security.md](docs/security.md) — security model; [docs/security-audit.md](docs/security-audit.md) — point-in-time audit; [docs/threat-model.md](docs/threat-model.md) — STRIDE + attack tree; [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md) — graduated-assurance plan; [docs/assurance-case.md](docs/assurance-case.md) — GSN argument

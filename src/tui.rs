@@ -299,6 +299,17 @@ pub fn display_banner(req: &ValidatedRequest) -> io::Result<()> {
     Ok(())
 }
 
+/// Print a one-line dim notice on /dev/tty (e.g. "stopped by <session>").
+/// Best-effort: silently returns Ok if /dev/tty cannot be opened.
+pub fn display_notice(msg: &str) -> io::Result<()> {
+    let mut tty = match OpenOptions::new().write(true).open("/dev/tty") {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    let Style { dim, reset, .. } = style();
+    writeln!(tty, "{dim}\u{25a0}{reset} {msg}")
+}
+
 /// Display the command result on /dev/tty. Truncate stdout/stderr to 3 lines.
 pub fn display_result(resp: &Response) -> io::Result<()> {
     let mut tty = OpenOptions::new().write(true).open("/dev/tty")?;

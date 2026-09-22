@@ -89,7 +89,7 @@ fn mcp_server_enumerates_its_tools() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["execute", "start_server", "update_host"],
+        ["execute", "start_server", "status", "stop_server", "update_host"],
         "unexpected MCP tool set — this is exactly what Glama enumerates to score the server",
     );
 

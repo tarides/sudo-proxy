@@ -23,6 +23,7 @@ fn make_req(pipeline: Vec<Vec<&str>>) -> ValidatedRequest {
             .into_iter()
             .map(|v| v.into_iter().map(String::from).collect())
             .collect(),
+        action: sudo_proxy::protocol::Action::Exec,
         env: HashMap::new(),
         reason: String::new(),
         privileged: false,

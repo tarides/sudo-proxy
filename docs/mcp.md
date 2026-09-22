@@ -30,6 +30,24 @@ sudo-proxy as tools over stdio JSON-RPC. Any MCP-capable AI client
 - `host` (required): hostname to update.
 - `description`: human-readable description (e.g. "CI server").
 - `os`: operating system info (e.g. "Ubuntu 24.04").
+- Partial update: only the fields provided are changed; a host not yet in the
+  registry is added automatically.
+
+**`stop_server`** — stop a running sudo-proxy daemon.
+- `host`: which daemon to stop (omit for the local one).
+- Sends a `stop` control request over the socket. The daemon prints a
+  shutdown notice on its terminal (no approval prompt), exits, and its
+  terminal window — and SSH tunnel, for remote hosts — closes.
+- "Not running" is reported as a normal (non-error) result.
+- Daemons older than 1.1 don't understand `stop`; the tool reports their
+  version and asks for a manual `q`/Ctrl+C in the daemon's terminal.
+
+**`status`** — report daemon status without executing anything.
+- `host`: check one daemon; omit to check the local daemon plus every host in
+  the registry.
+- Per host: socket presence, readiness, live daemon version (via a `ping`
+  control request that needs no human approval), and registry metadata.
+- Read-only except for refreshing the registry's last-connected/version cache.
 
 ## Claude Code configuration
 
@@ -106,7 +124,8 @@ correctly (no Docker needed):
 cargo test --test mcp_introspection
 ```
 
-It should enumerate `execute`, `start_server`, and `update_host`.
+It should enumerate `execute`, `start_server`, `status`, `stop_server`, and
+`update_host`.
 
 ## Glama terminology
 
@@ -116,7 +135,7 @@ sudo-proxy:
 | Glama term    | sudo-proxy |
 | ------------- | ---------- |
 | **Server**    | the `sudo-proxy-mcp` binary — the stdio MCP server, listed as `tarides/sudo-proxy`. |
-| **Tools**     | `execute`, `start_server`, `update_host`. |
+| **Tools**     | `execute`, `start_server`, `status`, `stop_server`, `update_host`. |
 | **Connector** | *none* — a connector is a **remote/hosted** MCP server (a managed HTTP endpoint). sudo-proxy is local-only, so it is a server but never a connector. |
 
 Two caveats:
@@ -130,5 +149,5 @@ Two caveats:
   process. sudo-proxy's own *server* — what the `start_server` tool spawns — is
   the `sudo-proxy` host daemon (Unix socket + TUI) that the MCP server proxies
   to. That daemon, `sudo-request`, `pkexec-cache`, and target *hosts* all sit
-  below Glama's vocabulary; in MCP terms sudo-proxy is one server exposing three
+  below Glama's vocabulary; in MCP terms sudo-proxy is one server exposing five
   tools.
