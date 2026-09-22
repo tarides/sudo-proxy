@@ -2,6 +2,8 @@
 
 [![tarides/sudo-proxy MCP server](https://glama.ai/mcp/servers/tarides/sudo-proxy/badges/score.svg)](https://glama.ai/mcp/servers/tarides/sudo-proxy)
 
+[![Repository](https://img.shields.io/badge/repository-GitHub-181717?logo=github)](https://github.com/tarides/sudo-proxy)
+
 > An MCP server that lets an agent run privileged, mutating commands —
 > locally or over SSH — with a human keypress required on every one and
 > no credential ever stored.
