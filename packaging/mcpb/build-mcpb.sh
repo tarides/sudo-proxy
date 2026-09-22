@@ -23,11 +23,15 @@ HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 MANIFEST_SRC="$HERE/manifest.json"
 BIN="$BIN_DIR/sudo-proxy-mcp"
 NAME="sudo-proxy-mcp-v${VERSION}-x86_64-linux.mcpb"
-OUT="$OUT_DIR/$NAME"
 
 [ -f "$BIN" ] || { echo "error: $BIN not found" >&2; exit 1; }
 
+# Resolve OUT_DIR to an absolute path BEFORE building OUT: the zip below runs in
+# a subshell that cd's into $STAGE, so a relative OUT would land there (and get
+# cleaned up) instead of in the caller's directory.
 mkdir -p "$OUT_DIR"
+OUT_DIR=$(CDPATH= cd -- "$OUT_DIR" && pwd)
+OUT="$OUT_DIR/$NAME"
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 
@@ -41,6 +45,9 @@ rm -f "$OUT"
 # -X: no extra file attributes/timestamps -> reproducible-ish archive.
 ( cd "$STAGE" && zip -qX "$OUT" manifest.json sudo-proxy-mcp )
 
-SHA=$(sha256sum "$OUT" | awk '{print $1}')
+# No pipe here: `sha256sum | awk` would mask a sha256sum failure (its exit code
+# is hidden by the pipeline) and let the script exit 0 with an empty hash.
+SHA=$(sha256sum "$OUT")
+SHA=${SHA%% *}
 printf '%s' "$SHA" > "$OUT.sha256"
 echo "$SHA"
