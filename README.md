@@ -8,6 +8,11 @@
 > locally or over SSH — with a human keypress required on every one and
 > no credential ever stored.
 
+> ⚠️ **Not yet independently audited.** The security assurance in this repo is
+> self-produced. Security reviewers: [REVIEWING.md](REVIEWING.md) is a 15-minute
+> on-ramp — the falsifiable claims, the trust boundary, and where we have *no*
+> assurance. Reporting: [SECURITY.md](SECURITY.md).
+
 Privileged command execution proxy with an **MCP server** for AI agent
 integration. Receives requests over a Unix socket, shows a **single-keypress
 TUI prompt** for human approval, then escalates via **sudo**. Configure
