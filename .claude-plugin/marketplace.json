@@ -1,0 +1,14 @@
+{
+  "name": "tarides",
+  "owner": {
+    "name": "Tarides",
+    "url": "https://github.com/tarides"
+  },
+  "plugins": [
+    {
+      "name": "sudo-proxy",
+      "source": "./",
+      "description": "Human-approved sudo for agents — run privileged commands locally or over SSH, with a TUI keypress required on every one and no credential ever stored."
+    }
+  ]
+}

@@ -128,6 +128,27 @@ Point your MCP client at the server — add to the project's `.mcp.json` or
 }
 ```
 
+### Install as a Claude Code plugin
+
+The repo is also a Claude Code [plugin](https://code.claude.com/docs/en/plugins)
+and its own marketplace. Instead of editing `.mcp.json` by hand:
+
+```
+/plugin marketplace add tarides/sudo-proxy
+/plugin install sudo-proxy@tarides
+```
+
+The plugin registers the `sudo-proxy` MCP server and ships a skill that
+tells the model to reach for sudo-proxy only for privileged or remote
+work, to start the server before executing, and to write a clear
+description for each command so the approval prompt is easy to judge. It
+does **not** install the `sudo-proxy-mcp` binary — that must already be on
+your `PATH` (see the `cargo install` / `cargo binstall` steps above). A
+tool whose whole point is explicit human consent should not install
+itself silently.
+
+### Run commands
+
 Then the model starts a server (opening a terminal with the approval TUI)
 and runs commands through it:
 
