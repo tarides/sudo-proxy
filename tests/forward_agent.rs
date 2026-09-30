@@ -17,7 +17,6 @@ static ENV_MUTATION_LOCK: Mutex<()> = Mutex::new(());
 
 fn server() -> TestServer {
     start_test_server(TestServerOpts {
-        confirm_unprivileged: false,
         ..TestServerOpts::default()
     })
 }

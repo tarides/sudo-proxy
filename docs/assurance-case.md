@@ -37,6 +37,10 @@ asserted, evidence not yet produced).
 > **G1 — Nothing privileged runs without a human deliberately approving the
 > exact command shown.**
 
+> A second, parallel top-level invariant **G7** (below) guards the *unprivileged*
+> surface: no unprivileged command runs with less scrutiny than the agent's Bash
+> tool. G2–G6 decompose G1; G7 stands beside it with its own sub-goals.
+
 ```
                                   ┌──────────────────────────────────────┐
    C1 TOE: daemon + MCP server    │  G1  No privileged execution without  │
@@ -124,8 +128,8 @@ keypress binds to the command shown.*
 | **Sn5.1** | TLC-checked: the `PolicyFlipsOnlyOnKeypress` invariant of [`proofs/tla/`](../proofs/tla/) proves the policy flag flips only via an interactive `a` keypress on an unprivileged request — never a request field, replay, MCP flag, or timeout — over all attacker forgeries/replays and operator choices. `src/server.rs`. | 4 | [discharged] (model-checked) |
 | **G5.2** | The prompt reads a single keypress in non-canonical mode and times out after 60 s (default **deny**). | — | |
 | **Sn5.2** | `src/tui.rs` prompt; timeout test. | 1 | [discharged] |
-| **G5.3** | The `confirm_unprivileged=false` policy relaxes only the **non-privileged** gate, never the privileged one, and only via an interactive `a` keypress. | — | |
-| **Sn5.3** | TLC-checked: `NoExecWithoutApproval` + `PrivilegedGateIndependentOfPolicy` ([`proofs/tla/`](../proofs/tla/)) prove the privileged gate requires a `y` keypress for *any* value the policy flag took, so `confirm_unprivileged` relaxes only the non-privileged gate. Audit finding **F2** by-design trade-off still documented; `display_banner` reliability is a separate backlog item. | 4 | [discharged] (model-checked) |
+| **G5.3** | No policy value relaxes the **privileged** gate: `privileged:true` requires a `y` keypress regardless of `unattended_eligible` or the session grant. | — | |
+| **Sn5.3** | TLC-checked: `PrivilegedGateIndependentOfPolicy` ([`proofs/tla/`](../proofs/tla/)) proves the privileged gate requires a `y` keypress for *any* eligibility/grant state. The *unprivileged* side (eligibility + session grant) is the second invariant **G7** below. | 4 | [discharged] (model-checked) |
 
 ### G6 — Adversary cannot bypass the gate
 
@@ -141,6 +145,21 @@ keypress binds to the command shown.*
 | **Sn6.3** | `src/server.rs`, `src/bin/sudo-proxy.rs`, `src/hosts.rs`. ProVerif model ([`proofs/proverif/`](../proofs/proverif/)) makes **A4 explicit** by modelling the real host-key + client-key material: it **derives** the first-contact MITM from host-key substitution (payload secrecy `false` unpinned — leaf 4.2), and disentangles confidentiality (rides on host-key pinning) from command authenticity (rides on client auth, so it holds even on first contact); the separation theorem shows a channel compromise does not bypass the local keypress gate. Residual A4 (no `StrictHostKeyChecking`) now formally characterised, not closed. | 4 | [discharged] (residual A4 made explicit) |
 | **G6.4** | Resource exhaustion cannot force-open the gate: 1 MiB request cap, 64 in-flight, 16 MiB output cap. | — | |
 | **Sn6.4** | `src/server.rs`, `src/executor.rs`; cap test (flaky **S2**, control sound). | 1–2 | [partial] |
+
+### G7 — No unprivileged command runs with less scrutiny than the Bash tool
+
+*Every unprivileged command faces a live human gate unless an operator made its
+host eligible out-of-band AND a human confirmed the session; and a self/loopback
+target cannot route around that gate.*
+
+| Node | Claim / Evidence | Rung | Status |
+|------|------------------|------|--------|
+| **G7.1** | No unprivileged command runs unattended except behind two barriers — `unattended_eligible` (config-only, immutable at runtime) AND an in-session `a` keypress — and the grant is never persisted. | — | |
+| **Sn7.1** | `tests/approval.rs` (`every_unprivileged_request_is_prompted_when_not_eligible`, `non_eligible_approved_always_grants_nothing`, `eligible_approved_always_grants_session_but_never_persists`); `src/hosts.rs` (`stale_confirm_unprivileged_key_is_inert`). TLC: `NoUnattendedUnprivilegedExec` ([`proofs/tla/`](../proofs/tla/)). Closes audit **F2**. | 2, 4 | [discharged] |
+| **G7.2** | No persisted policy value enables unattended execution on load (fail-closed default; stale `confirm_unprivileged` inert). | — | |
+| **Sn7.2** | `src/hosts.rs` serde tests; `Policy::default` is `unattended_eligible=false`. | 2 | [discharged] |
+| **G7.3** | A self/loopback target is classified local and cannot route SSH-to-self around local policy; local unprivileged is delegated to the Bash tool. Soundness of undetected aliases rests on G7.1 holding on every daemon (C10). | — | |
+| **Sn7.3** | `src/server.rs` (`is_local_host_classifies_self_and_loopback`), `src/mcp.rs` (`normalize_host_folds_loopback_to_local`). Closes audit **F5**. | 2 | [discharged] |
 
 ## Open items tracked against the case
 
@@ -158,9 +177,12 @@ These are the leaves where the argument is currently weakest, drawn from
   authenticity to client auth.
 - **Sn6.4 / S2** — stabilise the flaky resource-cap test so the cap stays
   covered in CI.
-- **Sn4.4 / Sn5.3** — accepted residual risks (look-alike `reason`, the
-  `confirm_unprivileged` trade-off); revisit if an auto-approve surface is ever
-  added (see the [allowlisting note](architecture.md#design-note-allowlisting-when-it-lands)).
+- **Sn4.4** — accepted residual risk (look-alike `reason`).
+- **G7.1 residual** — the bounded unattended window on an eligible daemon after an
+  `a` keypress (audit **F2**, now closed but with a characterised residual);
+  judged at Bash-allow-rule parity. Revisit if a command allowlist / auto-approve
+  surface is ever added (see the
+  [allowlisting note](architecture.md#design-note-allowlisting-when-it-lands)).
 
 ## How to use this document
 

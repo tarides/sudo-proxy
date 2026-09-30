@@ -11,7 +11,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use sudo_proxy::mode::Mode;
-use sudo_proxy::protocol::{Request, Response, ValidatedRequest};
+use sudo_proxy::protocol::{Request, Response, Status, ValidatedRequest};
 use sudo_proxy::server;
 use sudo_proxy::tui::{Prompter, PromptResult, ResultSink};
 use tempfile::TempDir;
@@ -61,7 +61,12 @@ impl ScriptedPrompter {
 }
 
 impl Prompter for ScriptedPrompter {
-    fn prompt(&self, req: &ValidatedRequest, _timeout: Duration) -> std::io::Result<PromptResult> {
+    fn prompt(
+        &self,
+        req: &ValidatedRequest,
+        _eligible: bool,
+        _timeout: Duration,
+    ) -> std::io::Result<PromptResult> {
         self.calls.lock().unwrap().push(RecordedCall {
             req: req.inner().clone(),
             at: Instant::now(),
@@ -98,7 +103,10 @@ impl ResultSink for RecordingSink {
 }
 
 pub struct TestServerOpts {
-    pub confirm_unprivileged: bool,
+    /// Barrier 1 of G7: whether the daemon may offer the session-scoped `a`
+    /// answer. Default `false` (fail-closed) — every unprivileged command is
+    /// prompted. Set `true` to exercise the granted (unattended) path.
+    pub unattended_eligible: bool,
     pub pkexec_only: bool,
     pub mode: Mode,
     pub max_in_flight: usize,
@@ -107,7 +115,7 @@ pub struct TestServerOpts {
 impl Default for TestServerOpts {
     fn default() -> Self {
         Self {
-            confirm_unprivileged: true,
+            unattended_eligible: false,
             pkexec_only: false,
             mode: Mode::Local,
             max_in_flight: sudo_proxy::server::DEFAULT_MAX_IN_FLIGHT,
@@ -147,7 +155,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             mode: opts.mode,
             pkexec_only: opts.pkexec_only,
             verbose: false,
-            confirm_unprivileged: opts.confirm_unprivileged,
+            unattended_eligible: opts.unattended_eligible,
             max_in_flight: opts.max_in_flight,
         };
         // Coercion to Arc<dyn Trait> happens here at the function-argument
@@ -196,6 +204,21 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
 impl TestServer {
     pub fn send(&self, req: &Request) -> Response {
         send_request(&self.socket_path, req)
+    }
+
+    /// Establish the session-scoped unattended grant. The server must have been
+    /// started with `unattended_eligible: true`; this sends one warmup
+    /// unprivileged request answered `ApprovedAlways`, after which unprivileged
+    /// requests bypass the prompter for the rest of the session. The warmup
+    /// counts as one prompter call. Leaves the prompter set to auto-approve;
+    /// callers needing a different response set it afterward.
+    pub fn grant_unattended_session(&self) {
+        self.prompter
+            .set_response(|_| (Duration::ZERO, PromptResult::ApprovedAlways));
+        let resp = self.send(&make_req("grant-warmup", vec![vec!["true"]]));
+        assert_eq!(resp.status, Status::Ok, "warmup grant request should succeed");
+        self.prompter
+            .set_response(|_| (Duration::ZERO, PromptResult::Approved));
     }
 
     pub fn send_raw(&self, line: &[u8]) -> Vec<u8> {

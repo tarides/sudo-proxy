@@ -11,14 +11,22 @@ const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct GuiPrompter;
 
 impl Prompter for GuiPrompter {
-    fn prompt(&self, req: &ValidatedRequest, _timeout: Duration) -> io::Result<PromptResult> {
-        prompt_gui(req)
+    // The GUI dialogs (zenity/kdialog) are plain yes/no — they never offer the
+    // session-scoped `a` answer, so `eligible` is honored only on the TUI
+    // fallback path.
+    fn prompt(
+        &self,
+        req: &ValidatedRequest,
+        eligible: bool,
+        _timeout: Duration,
+    ) -> io::Result<PromptResult> {
+        prompt_gui(req, eligible)
     }
 }
 
 /// Show a Y/N confirmation dialog for a command request.
 /// Auto-detects: zenity → kdialog → TUI (/dev/tty) fallback.
-pub fn prompt_gui(req: &ValidatedRequest) -> io::Result<PromptResult> {
+pub fn prompt_gui(req: &ValidatedRequest, eligible: bool) -> io::Result<PromptResult> {
     let text = format_prompt_text(req);
 
     if which("zenity").is_some() {
@@ -34,7 +42,7 @@ pub fn prompt_gui(req: &ValidatedRequest) -> io::Result<PromptResult> {
     }
 
     // Fall back to TUI
-    tui::prompt_tty(req, PROMPT_TIMEOUT)
+    tui::prompt_tty(req, eligible, PROMPT_TIMEOUT)
 }
 
 fn format_prompt_text(req: &ValidatedRequest) -> String {

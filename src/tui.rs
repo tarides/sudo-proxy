@@ -78,17 +78,28 @@ pub fn truncate_for_display(s: &str) -> String {
 #[derive(Debug, PartialEq)]
 pub enum PromptResult {
     Approved,
-    /// Approve this request *and* grant log-only mode for unprivileged
-    /// commands going forward (until reverted). Only emitted for
-    /// unprivileged requests; privileged prompts never offer this.
+    /// Approve this request *and*, if the daemon is eligible, grant unattended
+    /// unprivileged execution for the rest of this session (in-memory, never
+    /// persisted). Only emitted for unprivileged requests; privileged prompts
+    /// never offer this. The dispatcher grants the session only when the
+    /// daemon's `unattended_eligible` policy is set — otherwise this approves
+    /// the single command and nothing more.
     ApprovedAlways,
     Denied,
     Timeout,
 }
 
-/// Asks the user to approve or deny a privilege request.
+/// Asks the user to approve or deny a privilege request. `eligible` reflects
+/// the daemon's `unattended_eligible` policy: when set (and the request is
+/// unprivileged) the prompt offers the session-scoped `a` answer, otherwise it
+/// shows a plain `[y/N]`.
 pub trait Prompter: Send + Sync {
-    fn prompt(&self, req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult>;
+    fn prompt(
+        &self,
+        req: &ValidatedRequest,
+        eligible: bool,
+        timeout: Duration,
+    ) -> io::Result<PromptResult>;
 }
 
 /// Echoes the result of a completed command back to the user.
@@ -99,8 +110,13 @@ pub trait ResultSink: Send + Sync {
 pub struct TtyPrompter;
 
 impl Prompter for TtyPrompter {
-    fn prompt(&self, req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult> {
-        prompt_tty(req, timeout)
+    fn prompt(
+        &self,
+        req: &ValidatedRequest,
+        eligible: bool,
+        timeout: Duration,
+    ) -> io::Result<PromptResult> {
+        prompt_tty(req, eligible, timeout)
     }
 }
 
@@ -137,7 +153,13 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
 }
 
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
-pub fn prompt_tty(req: &ValidatedRequest, timeout: Duration) -> io::Result<PromptResult> {
+/// `eligible` gates whether the session-scoped `a` answer is offered (only for
+/// unprivileged requests on a daemon whose `unattended_eligible` policy is set).
+pub fn prompt_tty(
+    req: &ValidatedRequest,
+    eligible: bool,
+    timeout: Duration,
+) -> io::Result<PromptResult> {
     let mut tty_w = OpenOptions::new().write(true).open("/dev/tty")?;
     let tty_r = File::open("/dev/tty")?;
 
@@ -198,14 +220,22 @@ pub fn prompt_tty(req: &ValidatedRequest, timeout: Duration) -> io::Result<Promp
         writeln!(tty_w, "Env:     {}", env_display.join(" "))?;
     }
 
+    // `a` is offered only when this daemon is `unattended_eligible` (an
+    // out-of-band operator opt-in). Without it, unprivileged commands get the
+    // same plain `[y/N]` gate as privileged ones — no way to grant unattended
+    // execution from the prompt.
+    let offer_always = eligible && !req.privileged;
     let (question, choices) = if req.privileged {
         ("Execute as root?", "[y/N]")
-    } else {
+    } else if offer_always {
         writeln!(
             tty_w,
-            "{dim}a = always allow unprivileged on this host (saved to hosts.json){reset}"
+            "{dim}a = approve and allow unprivileged on this host for this session \
+             (not saved){reset}"
         )?;
         ("Execute?", "[y/N/a]")
+    } else {
+        ("Execute?", "[y/N]")
     };
     write!(
         tty_w,
@@ -221,7 +251,11 @@ pub fn prompt_tty(req: &ValidatedRequest, timeout: Duration) -> io::Result<Promp
     let label = match result {
         PromptResult::Timeout => "Timeout",
         PromptResult::Approved => "Approved",
-        PromptResult::ApprovedAlways => "Approved (always for this host)",
+        // `a` on an eligible daemon grants the session; pressed when `a` was
+        // not offered it degrades to a plain approve-once (the dispatcher will
+        // not grant), so label it honestly.
+        PromptResult::ApprovedAlways if offer_always => "Approved (unattended for this session)",
+        PromptResult::ApprovedAlways => "Approved",
         PromptResult::Denied => "Denied",
     };
     writeln!(tty_w, "\n→ {label}")?;
@@ -467,15 +501,16 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
 mod tests {
     use super::*;
 
-    // === Property: confirm_unprivileged flips only on an interactive keypress
+    // === Property: the session grant is set only by an interactive `a` keypress
     //
     // Spec clause (Rung 2; proof obligation for the Rung 4 state-machine model
-    // and the Rung 5 dispatch contract): the *only* signal that can flip the
-    // `confirm_unprivileged` policy off is `ApprovedAlways`, and `classify_key`
-    // emits `ApprovedAlways` iff the keypress is `'a'`/`'A'` AND the request is
-    // unprivileged. No timeout, no other key, and no privileged request can
-    // produce it. The dispatch side of this clause (only `ApprovedAlways`
-    // stores the flag) is covered by tests/approval.rs.
+    // and the Rung 5 dispatch contract): the *only* signal that can set the
+    // session-scoped unattended grant (invariant G7, barrier 2) is
+    // `ApprovedAlways`, and `classify_key` emits `ApprovedAlways` iff the
+    // keypress is `'a'`/`'A'` AND the request is unprivileged. No timeout, no
+    // other key, and no privileged request can produce it. The dispatch side —
+    // that `ApprovedAlways` grants only when the daemon is *eligible*, never
+    // persists, and grants nothing otherwise — is covered by tests/approval.rs.
     //
     // The input domain `(Option<u8>, bool)` is tiny, so this is checked
     // exhaustively rather than sampled.

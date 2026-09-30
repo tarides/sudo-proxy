@@ -26,6 +26,13 @@ sudo-proxy as tools over stdio JSON-RPC. Any MCP-capable AI client
 - `privileged`: whether to escalate privileges (default `true`).
 - `env`: environment variables to pass.
 
+> **Local unprivileged commands are refused.** A request with `privileged: false`
+> that targets the local machine (including loopback aliases such as `127.0.0.1`,
+> `::1`, or this host's own name) is declined with a message pointing the agent
+> back to its Bash tool, which already applies the client's permission rules
+> (invariant G7). sudo-proxy runs privileged commands (local and remote) and
+> unprivileged commands on remote hosts.
+
 **`update_host`** — record metadata about a known host.
 - `host` (required): hostname to update.
 - `description`: human-readable description (e.g. "CI server").

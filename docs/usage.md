@@ -5,17 +5,31 @@
 ## Non-privileged mode
 
 With `privileged: false` in the request, sudo-proxy runs the command
-directly as the current user, without sudo. The TUI Y/N gate fires by
-default — same human review as the privileged path, just no password
-step. The prompt offers three keys: `y` to approve once, `N` (default)
-to deny, `a` to approve **and** mark the host as trusted for unprivileged
-commands. Picking `a` writes a `policy` block into
-`~/.config/sudo-proxy/hosts.json` (`{"confirm_unprivileged": false}`)
-and from that point on unprivileged commands just print a one-line
-banner — privileged commands still require a Y/N. Pass
-`--no-confirm-unprivileged` to skip the gate without persisting, or
-`--confirm-unprivileged` to force the gate even if the file says
-otherwise.
+directly as the current user, without sudo. The TUI Y/N gate fires on
+**every** unprivileged command by default — same human review as the
+privileged path, just no password step.
+
+Two things narrow this surface (invariant **G7** — "no unprivileged command
+runs with less scrutiny than the Bash tool"):
+
+- **Local unprivileged commands are refused.** Over the MCP `execute` tool, an
+  unprivileged command targeting the local machine (including loopback aliases
+  like `127.0.0.1`, `::1`, or this host's own name) is declined with a message
+  telling the agent to use its Bash tool instead — which already applies your
+  permission rules. sudo-proxy is for privilege escalation and for remote hosts.
+- **Unattended mode needs two deliberate acts.** On a **remote** host you may
+  want a batch of unprivileged commands to run without a keypress each. That
+  requires (1) an operator to set `"unattended_eligible": true` in that host's
+  `~/.config/sudo-proxy/hosts.json` (an out-of-band file edit — nothing on the
+  wire can set it), and (2) a human to answer `a` at a prompt. Only then do
+  subsequent unprivileged commands run unattended, logged, **for that session
+  only** — the grant is in-memory and never persisted, so it is gone when the
+  daemon or SSH tunnel ends. On a non-eligible daemon, `a` approves just the one
+  command. The **privileged** gate is never relaxed.
+
+Pass `--unattended-eligible` when starting a daemon to make it eligible without
+editing the file (the session grant still needs the `a` keypress; it is never
+persisted).
 
 ## Command-line
 
@@ -31,12 +45,11 @@ sudo-proxy -v
 sudo-proxy --host remotehost
 sudo-proxy --host remotehost -v     # prints the ssh command before connecting
 
-# Skip the confirmation prompt for unprivileged commands
-# (default is to prompt for both; press `a` at a prompt to persist this
-# choice in hosts.json so future runs of the daemon skip the gate too)
-sudo-proxy --no-confirm-unprivileged
-# Force the gate even if hosts.json says otherwise
-sudo-proxy --confirm-unprivileged
+# Allow a human to grant unattended unprivileged execution for the session
+# (default is to prompt every command; with this flag the prompt offers `a`,
+# which grants an in-memory, never-persisted session grant). Equivalent to
+# setting "unattended_eligible": true in this host's hosts.json.
+sudo-proxy --unattended-eligible
 
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock

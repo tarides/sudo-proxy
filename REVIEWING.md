@@ -9,15 +9,24 @@ code that has to hold it up, and — most importantly — here is where we have
 If you find a way to break any numbered claim below, that is a security finding;
 see [SECURITY.md](SECURITY.md) for where to send it.
 
-## The one claim
+## The claims
 
-Everything reduces to a single invariant:
+The privileged surface reduces to a single invariant (**G1**):
 
 > **Nothing privileged runs without a human deliberately approving the exact
 > command shown.**
 
-We would rather you try to falsify that than "review the project." Below it is
-broken into concrete, falsifiable sub-claims.
+A second invariant (**G7**) guards the *unprivileged* surface — the part that
+was historically weaker than the agent's own Bash tool:
+
+> **No unprivileged command runs with less human scrutiny than the agent's Bash
+> tool would apply: every unprivileged command faces a live human gate unless an
+> operator has *out-of-band* made its host eligible AND a human gave a
+> *session-scoped* confirmation; and a self/loopback target cannot route around
+> that gate by naming an alias of "localhost".**
+
+We would rather you try to falsify these than "review the project." Below they
+are broken into concrete, falsifiable sub-claims (C1–C7 for G1, C8–C10 for G7).
 
 ## Falsify one of these
 
@@ -39,10 +48,14 @@ finding.
   deduplicated and every request must carry a `time` within 60 s. *Attack:*
   cause the same approval to authorise two executions, or make a stale request
   pass. → `src/server.rs` (`check_freshness` `:58`, `try_insert` `:213`).
-- **C4 — Policy flips only on a keypress.** The `confirm_unprivileged` policy
-  flag can be changed *only* by an interactive keypress — never by a request
-  field, MCP tool flag, or replay. *Attack:* flip it from the wire. →
-  `src/tui.rs` (`classify_key`), `src/server.rs`.
+- **C4 — Unattended mode can't be enabled from the wire.** A daemon becomes
+  eligible for unattended unprivileged execution *only* via an out-of-band edit
+  of `hosts.json` (`policy.unattended_eligible`), which is read once at startup
+  and never mutated at runtime; and the session grant flips *only* on an
+  interactive `a` keypress, and *only* when eligible. No request field, MCP tool
+  flag, or replay can enable either barrier. *Attack:* enable unattended mode, or
+  flip the session grant, from the wire. → `src/hosts.rs` (`Policy`),
+  `src/tui.rs` (`classify_key`), `src/server.rs` (dispatch).
 - **C5 — No stored credential.** sudo-proxy never stores or caches a secret;
   authentication is owned entirely by `sudo`/`pkexec`. *Attack:* find any path
   where sudo-proxy holds, caches, or replays a credential. → `src/executor.rs`.
@@ -57,6 +70,34 @@ finding.
   cannot execute without the keypress. *Attack:* execute via the raw socket
   without approval. → `src/server.rs` (`peer_uid`/`SO_PEERCRED` `:244`,
   `handle_connection`).
+
+The G7 sub-claims (unprivileged surface):
+
+- **C8 — No unattended unprivileged exec except behind two human acts; the grant
+  never persists.** No unprivileged command reaches `exec_direct` without a
+  per-command keypress *unless* (a) its daemon is `unattended_eligible` (barrier
+  1, config-only) *and* (b) a human answered `a` this session (barrier 2). The
+  grant lives only in memory, is never written to `hosts.json`, and dies with the
+  daemon/tunnel. *Attack:* reach `exec_direct` unattended on a non-eligible
+  daemon; make an `a` press grant a session without eligibility; make the grant
+  survive a session/tunnel boundary or a restart; or make a stale
+  `confirm_unprivileged` key re-enable it. → `src/server.rs` (dispatch),
+  `src/hosts.rs` (`Policy`, migration), `tests/approval.rs`.
+- **C9 — Self/loopback can't dodge local policy.** A request naming any loopback
+  alias of the daemon's own machine (`localhost`, `127.0.0.0/8`, `::1`,
+  `localhost.`, the machine's own hostname) routes to the *local* path, not an
+  SSH tunnel, and a local unprivileged command is refused (delegated to the Bash
+  tool). *Attack:* make `execute(host="127.0.0.1")` (or `::1`, or the own
+  hostname) open an SSH-to-self tunnel, or slip a local unprivileged command past
+  the Bash-delegation refusal. → `src/server.rs` (`is_local_host`), `src/mcp.rs`
+  (`normalize_host`, `execute`).
+- **C10 — Backstop composition (soundness).** `is_local_host` is best-effort, so
+  an *undetectable* self-alias (ssh-config alias, NAT hairpin) may still route
+  SSH-to-self. That cannot yield unattended exec, because C8 holds on *every*
+  daemon: the tunnel lands on a daemon whose only unattended path is the
+  eligible + session-confirmed grant. *Attack:* find a host string that is really
+  the local box, escapes C9, *and* runs unprivileged unattended. → composition of
+  `src/mcp.rs` routing and `src/server.rs` dispatch.
 
 ## The trust boundary (what to actually read)
 
@@ -104,9 +145,17 @@ what carries **no proof**, roughly in order of how much it worries us:
 5. **`base64` / `serde_json` decoding.** Panic-freedom of the decode paths rests
    on the upstream crates' `Result`-returning APIs and our `.unwrap()`-free call
    sites — an assumption, not a proof.
-6. **Auto-approve, if ever enabled.** The "remember this command" surface (audit
-   finding F2) is off by design; the moment it exists, prefix-matching escapes
-   become live. → `docs/architecture.md` allowlisting note.
+6. **The unattended window on an eligible daemon.** The old persisted, global
+   auto-approve (finding F2) is gone. What remains is bounded: on a daemon an
+   operator has *deliberately* made `unattended_eligible`, one `a` keypress opens
+   a session-scoped, non-persistent window in which unprivileged commands run
+   with only an audit-log line. Inside that window the gate is the operator's
+   two prior decisions (the config edit and the `a` press) plus the audit log —
+   there is no per-command human check. We judge this at Bash parity (a Bash
+   allow-rule is a similar, and less bounded, operator opt-in), but the window is
+   real: an operator who enables eligibility and presses `a` on a hostile-looking
+   command is not protected by the code. → `src/server.rs` dispatch, finding F2
+   in `docs/security-audit.md`.
 
 ## Run it in a container
 

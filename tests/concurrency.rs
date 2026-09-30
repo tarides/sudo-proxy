@@ -70,7 +70,6 @@ fn long_exec_does_not_wedge_loop() {
         return;
     }
     let opts = TestServerOpts {
-        confirm_unprivileged: false,
         ..Default::default()
     };
     let s = start_test_server(opts);
@@ -111,17 +110,20 @@ fn long_exec_does_not_wedge_loop() {
     );
 }
 
-/// Failure-mode-3 evidence in fast form: an unprivileged request that
-/// doesn't take the prompt path runs to completion while a privileged
-/// request is still in its (slow) prompt. Direct proof that the daemon
-/// no longer serializes ALL traffic behind the TTY.
+/// Failure-mode-3 evidence in fast form: an unprivileged request on the
+/// granted (unattended) path runs to completion while a privileged request is
+/// still in its (slow) prompt. Direct proof that the granted path's reliable
+/// log never takes the tty_lock blocking, so it doesn't serialize behind the
+/// TTY. (In the default non-eligible config an unprivileged command DOES prompt
+/// and would serialize — that is correct: one human, one terminal.)
 #[test]
 fn unprivileged_runs_during_privileged_prompt() {
     let opts = TestServerOpts {
-        confirm_unprivileged: false,
+        unattended_eligible: true,
         ..Default::default()
     };
     let s = start_test_server(opts);
+    s.grant_unattended_session(); // warmup counts as one prompter call
 
     // Returning Denied avoids triggering exec_sudo for A (which would
     // need a real sudo configuration). The slow delay holds the TTY
@@ -138,10 +140,11 @@ fn unprivileged_runs_during_privileged_prompt() {
         send_request(&path_a, &req)
     });
 
-    assert!(wait_until(Duration::from_secs(2), || s.prompter.call_count() >= 1));
+    // Warmup already counted as 1; wait until A is also in the prompter.
+    assert!(wait_until(Duration::from_secs(2), || s.prompter.call_count() >= 2));
 
     let t_b = thread::spawn(move || {
-        // Unprivileged + confirm_unprivileged=false → skips prompter entirely.
+        // Unprivileged + granted → bypasses the prompter entirely.
         let req = make_req("unpriv-B", vec![vec!["true"]]);
         let start = Instant::now();
         let resp = send_request(&path_b, &req);
@@ -230,20 +233,26 @@ fn prompter_returns_denied_propagates_to_client() {
     assert_eq!(resp.status, Status::Denied);
 }
 
+/// Once a session is granted (eligible daemon + one `a` keypress), later
+/// unprivileged commands bypass the prompter for the rest of the session. The
+/// grant is in-memory only — see `approval.rs` for the non-persistence and
+/// eligibility-required guarantees (C8).
 #[test]
-fn unprivileged_no_confirm_skips_prompter() {
+fn granted_session_skips_prompter() {
     let opts = TestServerOpts {
-        confirm_unprivileged: false,
+        unattended_eligible: true,
         ..Default::default()
     };
     let s = start_test_server(opts);
+    s.grant_unattended_session(); // one warmup prompter call establishes the grant
 
+    let before = s.prompter.call_count();
     let resp = s.send(&make_req("noprompt-1", vec![vec!["true"]]));
     assert_eq!(resp.status, Status::Ok);
     assert_eq!(
         s.prompter.call_count(),
-        0,
-        "prompter must not be called when confirm_unprivileged=false"
+        before,
+        "a granted session must not call the prompter again"
     );
 }
 
@@ -315,7 +324,6 @@ fn concurrent_distinct_ids_succeed() {
         return;
     }
     let opts = TestServerOpts {
-        confirm_unprivileged: false,
         ..Default::default()
     };
     let s = start_test_server(opts);
@@ -353,7 +361,6 @@ fn concurrent_distinct_ids_succeed() {
 fn burst_connections_above_cap_get_busy_response() {
     let opts = TestServerOpts {
         max_in_flight: 4,
-        confirm_unprivileged: false,
         ..Default::default()
     };
     let s = start_test_server(opts);

@@ -96,7 +96,7 @@ fn replaces_stale_socket_file() {
 
     let handle = thread::spawn(move || {
         let config = server::ServerConfig {
-            confirm_unprivileged: true,
+            unattended_eligible: false,
             ..Default::default()
         };
         server::run(

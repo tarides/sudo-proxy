@@ -168,7 +168,25 @@ impl McpProxy {
                 return Ok(error_result(format!("invalid host: {e}")));
             }
         }
-        let socket_path = socket_for_host(params.host.as_deref());
+        // Fold any loopback/self alias to the local target (C9), so a
+        // self-target cannot route SSH-to-self around local policy.
+        let target = normalize_host(params.host.as_deref());
+
+        // Delegate-to-Bash (G7): an unprivileged command on the local machine
+        // is refused — the agent's own Bash tool already applies the same
+        // controls, so sudo-proxy running it would only be a second, weaker
+        // gate. sudo-proxy is for privilege escalation and for remote hosts.
+        if target.is_none() && !params.privileged {
+            return Ok(error_result(
+                "Refusing to run an unprivileged command on the local machine. \
+                 Use your Bash tool instead — it applies the same controls without a \
+                 second gate. sudo-proxy is for privilege escalation (privileged: true) \
+                 and for commands on remote hosts."
+                    .to_string(),
+            ));
+        }
+
+        let socket_path = socket_for_host(target.as_deref());
         let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
 
         if !socket_path.exists() {
@@ -189,7 +207,7 @@ impl McpProxy {
             }
         };
 
-        let host_name = params.host.clone().unwrap_or_else(|| "localhost".into());
+        let host_name = target.clone().unwrap_or_else(|| "localhost".into());
 
         if params.forward_agent && params.privileged {
             return Ok(error_result(
@@ -198,7 +216,7 @@ impl McpProxy {
         }
 
         let req = Request::new(
-            params.host.unwrap_or_default(),
+            target.unwrap_or_default(),
             "sudo-proxy-mcp".to_string(),
             pipeline,
             params.env.unwrap_or_default(),
@@ -231,14 +249,17 @@ impl McpProxy {
                 return Ok(error_result(format!("invalid host: {e}")));
             }
         }
-        let result = match &params.host {
+        // A loopback/self alias starts the LOCAL daemon, not an SSH-to-self
+        // tunnel (C9) — keeps `start_server` consistent with `execute` routing.
+        let target = normalize_host(params.host.as_deref());
+        let result = match &target {
             None => start_local().await,
             Some(host) => start_remote(host, params.forward_agent).await,
         };
 
         if let Ok(ref r) = result {
             if r.is_error != Some(true) {
-                let host_name = params.host.unwrap_or_else(|| "localhost".into());
+                let host_name = target.unwrap_or_else(|| "localhost".into());
                 touch_host(&host_name, "");
             }
         }
@@ -341,19 +362,21 @@ impl McpProxy {
         // The registry key for the local daemon is "localhost" (written by
         // touch_host); it must be probed at the default socket, never at a
         // tunnel path.
+        let own = crate::server::own_hostname();
         let targets: Vec<Option<String>> = match params.host {
             Some(h) => {
                 if let Err(e) = crate::server::validate_host(&h) {
                     return Ok(error_result(format!("invalid host: {e}")));
                 }
-                vec![if h == "localhost" { None } else { Some(h) }]
+                // A loopback/self alias probes the local daemon, not a tunnel.
+                vec![normalize_host(Some(&h))]
             }
             None => std::iter::once(None)
                 .chain(
                     config
                         .hosts
                         .keys()
-                        .filter(|h| h.as_str() != "localhost")
+                        .filter(|h| !crate::server::is_local_host(h, &own))
                         .cloned()
                         .map(Some),
                 )
@@ -1000,10 +1023,26 @@ fn decode_b64(s: Option<&str>) -> String {
 // Utilities
 // ---------------------------------------------------------------------------
 
-fn socket_for_host(host: Option<&str>) -> PathBuf {
+/// Normalize a caller-supplied `host` to the routing target: `None` for the
+/// local daemon — including any loopback or self alias — and `Some(h)` for a
+/// genuine remote. Folding self-aliases to `None` is the C9 half of invariant
+/// G7: it stops `execute(host="127.0.0.1")` (or `::1`, or this machine's own
+/// hostname) from opening an SSH-to-self tunnel that would route around local
+/// policy and the Bash-delegation refusal.
+fn normalize_host(host: Option<&str>) -> Option<String> {
+    let own = crate::server::own_hostname();
     match host {
+        Some(h) if !crate::server::is_local_host(h, &own) => Some(h.to_string()),
+        _ => None,
+    }
+}
+
+fn socket_for_host(host: Option<&str>) -> PathBuf {
+    // Defence-in-depth: even if a caller reaches this with an un-normalized
+    // self-alias, resolve it to the local socket rather than a tunnel path.
+    match normalize_host(host) {
         None => default_socket_path(),
-        Some(h) => crate::server::remote_socket_path(h),
+        Some(h) => crate::server::remote_socket_path(&h),
     }
 }
 
@@ -1049,5 +1088,34 @@ fn touch_host(host: &str, version: &str) {
     config.touch(host);
     config.record_version(host, version);
     config.save();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The routing contract behind C9 and the Bash-delegation refusal: a
+    /// loopback/self alias resolves to the local target (`None`), a genuine
+    /// remote stays `Some`. (The full self/loopback classification, including
+    /// the own-hostname cases, is covered exhaustively by `is_local_host` in
+    /// `server.rs`; here we only pin the None/Some routing decision.)
+    #[test]
+    fn normalize_host_folds_loopback_to_local() {
+        assert_eq!(normalize_host(None), None);
+        assert_eq!(normalize_host(Some("localhost")), None);
+        assert_eq!(normalize_host(Some("127.0.0.1")), None);
+        assert_eq!(normalize_host(Some("127.0.0.9")), None);
+        assert_eq!(normalize_host(Some("::1")), None);
+        assert_eq!(normalize_host(Some("user@localhost")), None);
+        // Genuine remotes and self-alias dodges route remote.
+        assert_eq!(
+            normalize_host(Some("example.com")),
+            Some("example.com".to_string())
+        );
+        assert_eq!(
+            normalize_host(Some("127.0.0.1.evil.com")),
+            Some("127.0.0.1.evil.com".to_string())
+        );
+    }
 }
 

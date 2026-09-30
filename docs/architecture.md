@@ -30,11 +30,14 @@ Functional but minimal.
 - TUI approval prompt + sudo for privilege escalation (local and remote)
 - Non-privileged mode (direct execution, no escalation) — also TUI-gated by default
 - `--verbose` / `-v` on server: prints startup info, logs each request
-- Per-host policy in `hosts.json`: pressing `a` at an unprivileged prompt
-  writes `policy.confirm_unprivileged=false` so the daemon skips the gate
-  on this host from then on
-- `--no-confirm-unprivileged` / `--confirm-unprivileged` on server:
-  explicit overrides of the persisted policy
+- Per-daemon policy in `hosts.json` (`policy.unattended_eligible`, default
+  false): whether the daemon may offer the session-scoped `a` answer. Read once
+  at startup, immutable at runtime — an out-of-band operator opt-in (invariant
+  G7, barrier 1). Pressing `a` on an eligible daemon flips an in-memory,
+  never-persisted session grant (barrier 2); on a non-eligible daemon `a`
+  approves just the one command
+- `--unattended-eligible` on server: makes the daemon eligible without editing
+  the file (the session grant still needs the `a` keypress and is never persisted)
 - `--no-privilege` on client: sends request with `privileged: false`
 - `--host` flag on server: SSHs into remote, starts sudo-proxy, tunnels socket (used by MCP `start_server`)
 - `--print` mode for human-readable output on stdout

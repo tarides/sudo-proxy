@@ -96,9 +96,9 @@ invariant at a given boundary are omitted.
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
-| Tampering | Another user rewrites `hosts.json` to flip `confirm_unprivileged`. | File owned by the user; dir not group/other-writable; after F4 fix 0600/0700. The **privileged** gate is never relaxed by policy regardless. | G5.3 / F4, F2 |
+| Tampering | Another user rewrites `hosts.json` to set `unattended_eligible`. | File owned by the user; dir not group/other-writable (0600/0700). Eligibility only *permits* the session-scoped `a` grant — it does not itself run anything unattended, and a human must still press `a`; the grant is never persisted. The **privileged** gate is never relaxed. A2 with write access to the config is already same-UID and can run unprivileged code directly, so this grants no new capability. | G7 / F4, F2 |
 | Info disclosure | World-readable `hosts.json` leaks host inventory, cached UIDs, policy. | After F4 fix: 0600 file / 0700 dir, mirroring the socket-bind umask pattern. | F4 |
-| Elevation | Flip the privileged gate via the persisted policy. | Only an interactive keypress writes policy; policy relaxes only the **unprivileged** gate. | G5.1, G5.3 / F2 |
+| Elevation | Flip the privileged gate, or run unprivileged unattended, via the persisted policy. | No persisted value enables unattended exec on load (a stale `confirm_unprivileged` is inert; `unattended_eligible` only permits, never grants). Only an interactive `a` keypress on an eligible daemon flips the in-memory grant; the **privileged** gate is never relaxed. | G7 (C4, C8) / F2 |
 
 ## Attack tree
 
@@ -156,10 +156,16 @@ A  A root command runs that the human did NOT approve
 Every leaf maps to a sub-goal in [assurance-case.md](assurance-case.md); no leaf
 is unaccounted for. The residuals — already on record and accepted — are:
 
-- **1.4 / 4.4 — `confirm_unprivileged` (F2).** Once a human presses `a`, later
-  *unprivileged* commands run without a prompt. The **privileged** gate is never
-  affected. By-design trade-off; see
-  [security-audit.md](security-audit.md) finding F2.
+- **1.4 / 4.4 — unattended unprivileged window (F2, closed; bounded residual).**
+  The old persisted, global auto-approve is gone (invariant G7). What remains is
+  bounded: on a daemon an operator has *deliberately* made `unattended_eligible`,
+  one `a` keypress opens a session-scoped, non-persistent window in which later
+  *unprivileged* commands run logged-but-unprompted. The **privileged** gate is
+  never affected. Judged at Bash-allow-rule parity; see
+  [security-audit.md](security-audit.md) finding F2 and REVIEWING.md C8.
+- **loopback self-routing (F5, closed).** `is_local_host` normalizes self/loopback
+  targets; residual undetected aliases are covered by the C10 composition (every
+  remote daemon still gates unattended exec). See finding F5.
 - **3.4 — look-alike `reason` (F1 residual).** Printable Unicode can mislead but
   cannot conceal the real command line, which is printed separately.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no

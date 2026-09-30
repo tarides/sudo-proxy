@@ -13,9 +13,9 @@ struct Opts {
     login: Option<String>,
     pkexec: bool,
     verbose: bool,
-    /// `None` = take the default from `hosts.json` (`policy.confirm_unprivileged`).
+    /// `None` = take the default from `hosts.json` (`policy.unattended_eligible`).
     /// `Some(_)` = an explicit CLI flag was passed and overrides the file.
-    confirm_unprivileged: Option<bool>,
+    unattended_eligible: Option<bool>,
     forward_agent: bool,
 }
 
@@ -77,20 +77,21 @@ fn main() {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
-    // Resolve the per-host policy: explicit CLI flag wins; otherwise the
-    // persisted `policy.confirm_unprivileged` in hosts.json; otherwise the
-    // built-in default (on).
-    let confirm_unprivileged = opts.confirm_unprivileged.unwrap_or_else(|| {
+    // Resolve unattended eligibility: explicit CLI flag wins; otherwise the
+    // persisted `policy.unattended_eligible` in hosts.json; otherwise the
+    // built-in default (off, fail-closed). This is barrier 1 of G7 — an
+    // out-of-band operator opt-in; nothing on the wire can change it.
+    let unattended_eligible = opts.unattended_eligible.unwrap_or_else(|| {
         sudo_proxy::hosts::HostsConfig::load()
             .policy
-            .confirm_unprivileged
+            .unattended_eligible
     });
 
     let config = server::ServerConfig {
         mode,
         pkexec_only: opts.pkexec,
         verbose: opts.verbose,
-        confirm_unprivileged,
+        unattended_eligible,
         ..Default::default()
     };
 
@@ -133,7 +134,7 @@ fn parse_args(args: &[String]) -> Opts {
     let mut verbose = false;
     // Tri-state: None means "no CLI flag passed, use hosts.json policy",
     // Some(_) means an explicit flag overrides the file.
-    let mut confirm_unprivileged: Option<bool> = None;
+    let mut unattended_eligible: Option<bool> = None;
     let mut forward_agent = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -152,24 +153,25 @@ fn parse_args(args: &[String]) -> Opts {
             }
             "--pkexec" => pkexec = true,
             "--verbose" | "-v" => verbose = true,
-            "--confirm-unprivileged" => confirm_unprivileged = Some(true),
-            "--no-confirm-unprivileged" => confirm_unprivileged = Some(false),
+            "--unattended-eligible" => unattended_eligible = Some(true),
+            "--no-unattended-eligible" => unattended_eligible = Some(false),
             "--forward-agent" => forward_agent = true,
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--no-confirm-unprivileged] [--forward-agent]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
-                eprintln!("Every command (privileged or not) goes through the TUI Y/N gate by default.");
+                eprintln!("Every command (privileged or not) goes through the TUI Y/N gate.");
                 eprintln!();
                 eprintln!("Options:");
                 eprintln!("  --socket PATH               Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
                 eprintln!("  --host HOST                 Connect to remote host via SSH tunnel");
                 eprintln!("  --pkexec                    Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
                 eprintln!("  --verbose, -v               Print startup info and log each request to stderr");
-                eprintln!("  --no-confirm-unprivileged   Skip the Y/N gate for unprivileged commands (batch/automation)");
-                eprintln!("  --confirm-unprivileged      Force the Y/N gate for unprivileged commands even if hosts.json says otherwise");
+                eprintln!("  --unattended-eligible       Allow a human to grant unattended unprivileged execution");
+                eprintln!("                              for this session via the prompt's `a` answer (overrides hosts.json;");
+                eprintln!("                              the grant is in-memory only and never persisted)");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 std::process::exit(0);
@@ -186,7 +188,7 @@ fn parse_args(args: &[String]) -> Opts {
         login,
         pkexec,
         verbose,
-        confirm_unprivileged,
+        unattended_eligible,
         forward_agent,
     }
 }
