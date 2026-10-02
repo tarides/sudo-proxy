@@ -25,6 +25,27 @@ use crate::server::default_socket_path;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
+
+/// Choose the client-side read deadline for an `execute` request (issue #54).
+///
+/// An unprivileged command runs as the invoking user with no escalation, so the
+/// wall-clock `timeout` adds little safety but can falsely fail a command that
+/// was approved and ran — the deadline also counts human-approval latency, and a
+/// caller that retries a "timed-out" side-effecting command then double-executes.
+/// So the timeout is **opt-in** for unprivileged requests: honored when the
+/// caller sets it, otherwise `None` (the read waits as long as the daemon needs).
+/// The daemon still bounds the command — the approval prompt is 60 s
+/// default-deny and the executor has its own exec timeout — and a dead tunnel is
+/// still caught by the connect/write phases and by EOF, so an unbounded read
+/// cannot hang on a daemon that has died. Privileged requests keep the default
+/// bound. An explicit `timeout` is always honored (and clamped to the max).
+fn read_timeout_for(privileged: bool, timeout_ms: Option<u64>) -> Option<Duration> {
+    match timeout_ms {
+        Some(ms) => Some(Duration::from_millis(ms.min(MAX_TIMEOUT_MS))),
+        None if privileged => Some(Duration::from_millis(DEFAULT_TIMEOUT_MS)),
+        None => None,
+    }
+}
 /// Total timeout for control requests (stop/ping). They never wait on a
 /// human, so anything beyond connect + one round-trip means trouble.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -69,7 +90,11 @@ pub struct ExecuteParams {
     #[serde(default)]
     pub host: Option<String>,
 
-    /// Timeout in milliseconds (default: 120000, max: 600000)
+    /// Timeout in milliseconds, max 600000. For privileged commands the default
+    /// is 120000. For unprivileged commands the timeout is opt-in: if omitted,
+    /// the call waits as long as the daemon needs (the 60s approval prompt and
+    /// the executor's own bound still apply), so an approved-but-slow command is
+    /// not falsely reported as timed out. Set it explicitly to bound either.
     #[serde(default)]
     pub timeout: Option<u64>,
 
@@ -157,7 +182,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Execute a command (or multi-stage pipeline) on a sudo-proxy host after a human approves it at that host's terminal. Provide `argv` for a single command or `pipeline` for piped stages (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]); `host` targets a remote daemon started via start_server (omit for localhost); `timeout` is in milliseconds (default 120000, clamped to 600000). Blocks until the human answers, then returns the final stage's stdout plus per-stage stderr and exit codes. Errors: 'Request denied by user.' if the human declines, a timeout error if unanswered within 60s, and 'sudo-proxy is not running' if the daemon is down — call start_server first."
+        description = "Execute a command (or multi-stage pipeline) on a sudo-proxy host after a human approves it at that host's terminal. Provide `argv` for a single command or `pipeline` for piped stages (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]); `host` targets a remote daemon started via start_server (omit for localhost). Unprivileged commands on the local machine are refused — use your Bash tool, which applies the same controls. `timeout` is in milliseconds (max 600000); it defaults to 120000 for privileged commands but is opt-in for unprivileged ones (omitted = wait as long as the daemon needs, so an approved-but-slow command is not falsely timed out). Blocks until the human answers, then returns the final stage's stdout plus per-stage stderr and exit codes. Errors: 'Request denied by user.' if the human declines, a timeout error if unanswered within 60s, and 'sudo-proxy is not running' if the daemon is down — call start_server first."
     )]
     async fn execute(
         &self,
@@ -187,7 +212,11 @@ impl McpProxy {
         }
 
         let socket_path = socket_for_host(target.as_deref());
-        let timeout_ms = params.timeout.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+        // Issue #54: the wall-clock `timeout` is opt-in for unprivileged
+        // commands (see `read_timeout_for`). Computed here so the decision is
+        // visible next to routing; `params.privileged` is Copy so it stays
+        // readable after the request is built below.
+        let read_timeout = read_timeout_for(params.privileged, params.timeout);
 
         if !socket_path.exists() {
             return Ok(error_result(format!(
@@ -225,8 +254,7 @@ impl McpProxy {
             params.forward_agent,
         );
 
-        let total_timeout = Duration::from_millis(timeout_ms);
-        let result = send_request(&socket_path, &req, total_timeout).await;
+        let result = send_request(&socket_path, &req, read_timeout).await;
 
         match result {
             Ok(resp) => {
@@ -319,7 +347,7 @@ impl McpProxy {
             "sudo-proxy-mcp".to_string(),
             Action::Stop,
         );
-        match send_request(&socket_path, &req, CONTROL_TIMEOUT).await {
+        match send_request(&socket_path, &req, Some(CONTROL_TIMEOUT)).await {
             Ok(resp) if resp.status == Status::Ok => {
                 // Wait for the daemon (and, remotely, the ssh tunnel) to go
                 // away so a follow-up start_server doesn't race the old
@@ -434,7 +462,7 @@ async fn probe_one(host: Option<&str>) -> String {
         "sudo-proxy-mcp".to_string(),
         Action::Ping,
     );
-    match send_request(&sock, &req, CONTROL_TIMEOUT).await {
+    match send_request(&sock, &req, Some(CONTROL_TIMEOUT)).await {
         Ok(resp) if resp.status == Status::Ok => {
             touch_host(name, &resp.version);
             let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
@@ -796,7 +824,7 @@ const PHASE_TIMEOUT: Duration = Duration::from_secs(5);
 async fn send_request(
     socket_path: &Path,
     req: &Request,
-    total_timeout: Duration,
+    read_timeout: Option<Duration>,
 ) -> Result<Response, String> {
     // Bounded retry on transient EOF — the SSH `-L` forward accepts a
     // local connect before the remote daemon has bound the remote
@@ -810,7 +838,7 @@ async fn send_request(
     let mut eof_retries = 0u32;
 
     loop {
-        match send_request_once(socket_path, req, total_timeout).await {
+        match send_request_once(socket_path, req, read_timeout).await {
             Ok(resp) => {
                 if eof_retries > 0 {
                     mcp_trace!(
@@ -849,9 +877,12 @@ enum SendError {
 async fn send_request_once(
     socket_path: &Path,
     req: &Request,
-    total_timeout: Duration,
+    read_timeout: Option<Duration>,
 ) -> Result<Response, SendError> {
-    let deadline = tokio::time::Instant::now() + total_timeout;
+    // `None` means "wait as long as the daemon needs" (issue #54, unprivileged).
+    // Connect/write below still have their own PHASE_TIMEOUT, so only the read —
+    // the phase that waits on the human and the command — can be unbounded.
+    let deadline = read_timeout.map(|t| tokio::time::Instant::now() + t);
 
     // Phase 1: Connect (5s — if a Unix socket takes longer, the tunnel is dead)
     let stream = tokio::time::timeout(PHASE_TIMEOUT, UnixStream::connect(socket_path))
@@ -898,21 +929,34 @@ async fn send_request_once(
     })?;
     write_result?;
 
-    // Phase 3: Read (remaining time from user-specified timeout)
-    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-    let remaining = remaining.max(Duration::from_secs(1)); // at least 1s
-
+    // Phase 3: Read. With a deadline, wait the remaining budget; without one
+    // (opt-in-timeout unprivileged request), wait indefinitely for the daemon's
+    // response — the daemon always answers (approve → exec → respond, deny, or
+    // the 60 s prompt timeout) or drops the connection (surfaced as EOF below).
     let mut reader = BufReader::new(read);
     let mut line = String::new();
-    tokio::time::timeout(remaining, reader.read_line(&mut line))
-        .await
-        .map_err(|_| {
-            SendError::Hard(format!(
-                "server did not respond within {}s — it may be busy with another command or waiting for user approval",
-                total_timeout.as_secs()
-            ))
-        })?
-        .map_err(|e| SendError::Hard(format!("read: {e}")))?;
+    match deadline {
+        Some(dl) => {
+            let remaining = dl
+                .saturating_duration_since(tokio::time::Instant::now())
+                .max(Duration::from_secs(1)); // at least 1s
+            tokio::time::timeout(remaining, reader.read_line(&mut line))
+                .await
+                .map_err(|_| {
+                    SendError::Hard(format!(
+                        "server did not respond within {}s — it may be busy with another command or waiting for user approval",
+                        remaining.as_secs()
+                    ))
+                })?
+                .map_err(|e| SendError::Hard(format!("read: {e}")))?;
+        }
+        None => {
+            reader
+                .read_line(&mut line)
+                .await
+                .map_err(|e| SendError::Hard(format!("read: {e}")))?;
+        }
+    }
 
     if line.is_empty() {
         return Err(SendError::TransientEof);
@@ -1099,6 +1143,33 @@ mod tests {
     /// remote stays `Some`. (The full self/loopback classification, including
     /// the own-hostname cases, is covered exhaustively by `is_local_host` in
     /// `server.rs`; here we only pin the None/Some routing decision.)
+    /// Issue #54: the client-side read timeout is opt-in for unprivileged
+    /// commands, kept for privileged, and an explicit value is always honored
+    /// (and clamped).
+    #[test]
+    fn read_timeout_is_opt_in_for_unprivileged() {
+        // Unprivileged, no explicit timeout -> unbounded (daemon-bounded).
+        assert_eq!(read_timeout_for(false, None), None);
+        // Privileged, no explicit timeout -> default bound.
+        assert_eq!(
+            read_timeout_for(true, None),
+            Some(Duration::from_millis(DEFAULT_TIMEOUT_MS))
+        );
+        // An explicit timeout is honored for both, and clamped to the max.
+        assert_eq!(
+            read_timeout_for(false, Some(5_000)),
+            Some(Duration::from_millis(5_000))
+        );
+        assert_eq!(
+            read_timeout_for(true, Some(5_000)),
+            Some(Duration::from_millis(5_000))
+        );
+        assert_eq!(
+            read_timeout_for(false, Some(u64::MAX)),
+            Some(Duration::from_millis(MAX_TIMEOUT_MS))
+        );
+    }
+
     #[test]
     fn normalize_host_folds_loopback_to_local() {
         assert_eq!(normalize_host(None), None);
