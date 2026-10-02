@@ -21,7 +21,11 @@ sudo-proxy as tools over stdio JSON-RPC. Any MCP-capable AI client
 **`execute`** — run a command through sudo-proxy with human approval.
 - `argv` (required): command as an argument array.
 - `host`: target host (omit for localhost; must match a prior `start_server`).
-- `timeout`: timeout in ms (default 120 000, max 600 000).
+- `timeout`: timeout in ms (max 600 000). Defaults to 120 000 for privileged
+  commands; **opt-in for unprivileged** ones — if omitted, the call waits as long
+  as the daemon needs (the 60 s approval prompt and the executor's own bound
+  still apply), so an approved-but-slow command isn't falsely reported as timed
+  out (issue #54).
 - `description`: what this command does (shown in the TUI approval prompt).
 - `privileged`: whether to escalate privileges (default `true`).
 - `env`: environment variables to pass.
