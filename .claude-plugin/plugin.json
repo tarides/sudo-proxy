@@ -1,0 +1,17 @@
+{
+  "name": "sudo-proxy",
+  "version": "1.1.0",
+  "description": "Run privileged commands locally or over SSH, with a human keypress approving each one",
+  "author": {
+    "name": "Tarides"
+  },
+  "homepage": "https://github.com/tarides/sudo-proxy",
+  "repository": "https://github.com/tarides/sudo-proxy",
+  "license": "MIT",
+  "keywords": ["sudo", "ssh", "privileged", "human-in-the-loop", "approval"],
+  "mcpServers": {
+    "sudo-proxy": {
+      "command": "sudo-proxy-mcp"
+    }
+  }
+}
