@@ -46,7 +46,7 @@ fn concurrent_save_is_atomic_and_loses_no_data() {
 }
 
 /// hosts.json carries the host inventory, cached UIDs, and the
-/// confirm_unprivileged policy — it must be owner-only (0600), and its
+/// unattended_eligible policy — it must be owner-only (0600), and its
 /// directory owner-only (0700), regardless of the caller's umask.
 #[test]
 fn saved_hosts_file_is_owner_only() {

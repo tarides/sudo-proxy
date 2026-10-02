@@ -45,16 +45,17 @@ for exactly this reason); the fix re-applies that existing control consistently.
 | ID | Severity | Title | Attacker | Status |
 |----|----------|-------|----------|--------|
 | F1 | **High** | Approval-prompt ANSI/control-char injection via unvalidated display fields | A1, A2 | **Fixed** |
-| F2 | Low | `confirm_unprivileged=false` runs later commands with only a best-effort banner | A1, A2 | Accepted-risk / doc |
+| F2 | Low | Persisted global `confirm_unprivileged=false` runs later commands unattended with only a best-effort banner | A1, A2 | **Fixed** (G7) |
 | F3 | Low | Approval prompt has no length bound; huge argv can push the command off-screen | A1 | **Fixed** |
 | F4 | Low | `hosts.json` created world-readable (0644); leaks host inventory/UIDs/policy | A2 | **Fixed** |
+| F5 | Low–Med | Self/loopback host string (`127.0.0.1`, `::1`, own hostname) routes SSH-to-self, bypassing local policy and Bash delegation | A1, A2 | **Fixed** (G7) |
 | S1 | Low | Signal handler calls `CString::new` (malloc) — not async-signal-safe | local | **Fixed** |
 | S2 | Info | `burst_connections_above_cap` test is timing-flaky (~2/3 fail) | — | Note (open) |
 
-**Fixes applied (this audit):** F1, F3, F4, S1 — each with a regression test;
-`cargo build --release --features mcp` and the full suite pass (the only failing
-test is the pre-existing, unrelated flaky S2). F2 and S2 remain open as a
-documentation change and a test-stabilization task respectively.
+**Fixes applied (this audit):** F1, F3, F4, S1. **Fixed later under invariant G7**
+(the second invariant — "no unprivileged command runs with less scrutiny than the
+Bash tool"): F2 and F5, each with regression tests. Only S2 (the pre-existing,
+unrelated flaky burst test) remains open.
 
 ---
 
@@ -120,25 +121,36 @@ Regression test mirrors the existing argv bidi/control tests in `tests/validatio
 
 ---
 
-### F2 — `confirm_unprivileged=false` silent execution (Low, by-design)
+### F2 — persisted global `confirm_unprivileged=false` silent execution (Low) — FIXED under G7
 
-**Location:** `src/server.rs:631-662`, `src/hosts.rs` (policy persistence).
+**Original location:** `src/server.rs` dispatch, `src/hosts.rs` (policy persistence).
 
-Once a human presses `a` at an unprivileged prompt, `policy.confirm_unprivileged` is
-set `false` and persisted; subsequent **unprivileged** requests skip the Y/N gate and
-run after only a best-effort banner (`display_banner`, printed under a `try_lock`, so
-it may not appear under TTY contention). An "unprivileged" command still runs arbitrary
-code *as the user* — read private files, rewrite `~/.ssh/authorized_keys`, install
-cron/systemd-user units, `curl … | sh`. A1/A2 can drive these with misleading
-descriptions and no prompt.
+**Original finding.** Once a human pressed `a` at an unprivileged prompt,
+`policy.confirm_unprivileged` was set `false` and **persisted globally** to
+`hosts.json`; thereafter *all* unprivileged requests — on any host — skipped the
+Y/N gate and ran after only a best-effort banner. An "unprivileged" command still
+runs arbitrary code *as the user* (read private files, rewrite
+`~/.ssh/authorized_keys`, `curl … | sh`), and A1/A2 could drive these unattended
+with misleading descriptions. This was strictly weaker than the agent's Bash tool,
+which gates every command.
 
-This is a deliberate trust trade-off, correctly never relaxing the **privileged**
-gate (verified: `privileged:true` always prompts regardless of policy; only an
-interactive keypress can set the policy — no request field, replay, or MCP tool flips
-it). Severity **Low**: the residual risk is real but gated behind an explicit human
-choice. Recommendations: (1) state the residual risk plainly in the README and at the
-`a`-key prompt (it currently reads as benign); (2) make the post-trust banner reliable
-(don't drop it on `try_lock` failure) so silent execution is always at least visible.
+**Fix (invariant G7).** The persisted global flag is removed. Unattended
+unprivileged execution now requires **two independent barriers**: (1) the daemon
+is `unattended_eligible` — a per-daemon policy read once at startup from
+`hosts.json` and immutable at runtime, so no wire field, MCP flag, or keypress can
+set it; and (2) a human answers `a` this session, which flips an **in-memory,
+session-scoped** grant that is **never persisted** and dies with the daemon/tunnel.
+On a non-eligible daemon `a` approves the one command and grants nothing. In the
+granted window the audit line is unconditional (`eprintln`, not the try_lock
+banner), so unattended execution is always recorded. A stale
+`confirm_unprivileged` key in an old config is ignored on load (fail-closed).
+Regression tests: `tests/approval.rs`
+(`non_eligible_approved_always_grants_nothing`,
+`eligible_approved_always_grants_session_but_never_persists`), `src/hosts.rs`
+(`stale_confirm_unprivileged_key_is_inert`). The residual — the bounded,
+operator-opted-in, non-persistent unattended window — is characterised in
+[REVIEWING.md](../REVIEWING.md) (C8, and the "NO assurance" note) and judged at
+Bash-allow-rule parity.
 
 ---
 
@@ -163,11 +175,41 @@ hidden)` marker) and/or reject individual arguments above a sane size for displa
 `save_to` uses `create_dir_all` + `File::create` with no umask tightening, so on a
 typical `umask 022` the config lands at mode `0644` (file) / `0755` (dir). By contrast
 the socket path explicitly tightens `umask(0o077)` around bind. `hosts.json` holds the
-host inventory, cached remote UIDs, and the `confirm_unprivileged` policy — readable by
+host inventory, cached remote UIDs, and the `unattended_eligible` policy — readable by
 *other* local users on a shared host. No escalation (others cannot write it: file 0644,
 dir owned by the user), and no impact on single-user systems. Severity **Low**.
 Remediation (proposed fix): tighten `umask` around the write and/or `chmod` the file to
 `0600` and the directory to `0700`, mirroring the socket-bind pattern.
+
+---
+
+### F5 — self/loopback host routes SSH-to-self, bypassing local policy (Low–Med) — FIXED under G7
+
+**Boundary:** B5 (SSH tunnel → remote) primarily, decided at B2 (socket
+selection). **Attacker:** A1 (prompt-injected MCP caller), A2 (same-UID).
+
+**Finding.** Host→transport routing keyed on the literal string `"localhost"`:
+`execute`/`start_server` sent any other host string down the SSH path, and there
+was **no loopback normalization**. So `execute(host="127.0.0.1", privileged=false)`
+(or `::1`, or the machine's own hostname) targeted the *same physical machine* as
+the agent's Bash tool but over the "remote" path — a laundering channel that
+dodged both the local-only special-casing and (after G7's delegation) the
+Bash-delegation refusal, letting an unprivileged command run on the local box
+around the Bash tool's controls. It grants no new privilege (SSH-to-self needs the
+user's own access) but relocates execution off the controlled path.
+
+**Fix (invariant G7, C9/C10).** `server::is_local_host` folds loopback literals
+(`localhost`, all of `127.0.0.0/8` parsed not string-matched, `::1`), the trailing
+FQDN-dot and `user@` forms, and the machine's own hostname to the local target;
+`mcp::normalize_host` applies it at every routing site (`execute`, `start_server`,
+`status`, and defensively inside `socket_for_host`). A local unprivileged command
+is then refused and delegated to the Bash tool. Detection is best-effort
+(ssh-config aliases and NAT hairpin can still hide a self-target), so soundness
+rests on the C10 composition, not on catching every alias: every remote daemon's
+only unattended path is the eligible + session-confirmed grant (C8), so an
+undetected self-alias routed SSH-to-self still lands on a gated daemon. Regression
+tests: `src/server.rs` (`is_local_host_classifies_self_and_loopback`), `src/mcp.rs`
+(`normalize_host_folds_loopback_to_local`).
 
 ---
 

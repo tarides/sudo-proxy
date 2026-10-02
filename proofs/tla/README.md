@@ -4,8 +4,9 @@
 
 This directory holds **three** TLA+/PlusCal models, all model-checked by TLC:
 
-1. **`ApprovalStateMachine`** (below) — the approval state machine: the four
-   safety properties of the gate chain and `classify_key`.
+1. **`ApprovalStateMachine`** (below) — the approval state machine: the safety
+   properties of the gate chain and `classify_key`, covering both the privileged
+   invariant (G1) and the unprivileged two-barrier invariant (G7).
 2. **[`ReplayWindow`](#window-sizing--freshness--replay-retention) (Extended Rung 4)** —
    the temporal freshness ↔ replay-retention **window-sizing** property that the
    first model deliberately abstracts away (it never evicts). Restores a small
@@ -25,9 +26,9 @@ A TLA+/PlusCal model of sudo-proxy's approval state machine, model-checked by
 TLC. It discharges **Rung 4** (state-machine half) of the
 [formalisation roadmap](../../docs/formalisation-roadmap.md): the temporal /
 relational properties that are not per-function and that the Rung 0 threat model
-routed here — attack-tree leaves **1.4 / 4.4** (the `confirm_unprivileged`
-policy transition, finding **F2**) and the unconditional human gate on
-privileged execution.
+routed here — attack-tree leaves **1.4 / 4.4** (the unprivileged
+eligibility + session-grant transitions, invariant **G7** / finding **F2**) and
+the unconditional human gate on privileged execution.
 
 `ApprovalStateMachine.tla` carries the PlusCal algorithm in a comment block (the
 source of truth) followed by the `pcal.trans`-generated TLA+ translation that TLC
@@ -35,7 +36,7 @@ checks. `ApprovalStateMachine.cfg` is the bounded model. The Rung 3 Kani sibling
 lives in [`src/proofs.rs`](../../src/proofs.rs); this is the protocol-level
 analogue.
 
-## The four properties
+## The properties
 
 Tracked by bounded **monitor variables** — a violation flag is raised at the
 exact site the bad thing would happen, and the invariant asserts the flag stays
@@ -47,8 +48,10 @@ requests are rejected as replays and only revisit states.)
 |---|-----------|-------|---------|
 | **P1** | `NoExecWithoutApproval` | A privileged exec happens only on a `y` keypress — never on timeout, denial, replay, or any policy state. | leaf 1.4 · G5 |
 | **P2** | `ReplayImpossible` | The same request id never causes two executions. | leaf 1.1 · G2.1 |
-| **P3** | `PolicyFlipsOnlyOnKeypress` (+ action property `FlagMonotone`) | The policy flag flips only via an `a` keypress on an *unprivileged* request — never a request field, replay, MCP flag, or timeout — and once `FALSE` stays `FALSE`. | leaf 1.4 / 4.4 · F2 |
-| **P4** | `PrivilegedGateIndependentOfPolicy` | No privileged exec without a `y` keypress, for *any* value the policy flag took. The privileged branch structurally never reads the flag; stated separately for traceability. | leaf 4.4 · G5.1 |
+| **P3** | `GrantOnlyByKeypressWhenEligible` | The session grant (barrier 2) is set only via an `a` keypress on an *unprivileged* request AND only when the daemon is `eligible` — never a request field, replay, MCP flag, timeout, or a non-eligible daemon. | leaf 1.4 / 4.4 · G7 (C4/C8) · F2 |
+| **P4** | `PrivilegedGateIndependentOfPolicy` | No privileged exec without a `y` keypress, for *any* eligibility/grant state. The privileged branch structurally never reads them; stated separately for traceability. | leaf 4.4 · G5.1 |
+| **P5** | `NoUnattendedUnprivilegedExec` | No unprivileged command runs unattended (no keypress consulted) unless the daemon is `eligible`. With P3 and the session-reset in `Env` (the grant never outlives a session), this is the model form of "no unprivileged command runs with less scrutiny than the Bash tool". | leaf 1.4 / 4.4 · **G7** · F2 |
+| **P6** | `EligibilityImmutable` (action property) | Eligibility (barrier 1) is a runtime-immutable input — no transition ever writes it; it can only be set out-of-band at startup from `hosts.json`. | G7 · C4 |
 
 `Classify(k, priv)` in the spec is a direct transcription of
 [`tui::classify_key`](../../src/tui.rs); the daemon's gate chain mirrors the
@@ -83,13 +86,16 @@ verified to violate exactly the listed invariant.
 | # | Mutation (in the PlusCal) | Violates |
 |---|---------------------------|----------|
 | **NC1** | Privileged `Timeout` branch: replace `skip;` with `NoteExec(TRUE);` (exec on timeout). | `NoExecWithoutApproval` |
-| **NC2** | Wire the flag into the privileged gate: prepend `if confirmUnpriv then NoteExec(TRUE); elsif …` to the privileged dispatch. | `NoExecWithoutApproval` (= `PrivilegedGateIndependentOfPolicy` — same witness) |
+| **NC2** | Wire the policy into the privileged gate: prepend `if grant then NoteExec(TRUE); elsif …` to the privileged dispatch. | `NoExecWithoutApproval` (= `PrivilegedGateIndependentOfPolicy` — same witness) |
 | **NC3** | Remove the dedup gate: change `elsif req.id \in seen then` to `elsif FALSE then`. | `ReplayImpossible` |
-| **NC4** | Flip the flag illegitimately: replace the `skip;` in the unprivileged `Timeout` branch with `FlipFlag();`. | `PolicyFlipsOnlyOnKeypress` |
+| **NC5** | Grant without eligibility: drop the `if eligible then … end if;` guard around `GrantSession()` so `a` grants on a non-eligible daemon. | `GrantOnlyByKeypressWhenEligible` (verified) |
+| **NC6** | Unattended without a keypress: replace the `skip;` in the ungranted unprivileged `Timeout` branch with `NoteUnattended();`. | `NoUnattendedUnprivilegedExec` (verified) |
+| **NC7** | Wire eligibility from the wire: add `eligible := req.forwardAgent;` in the daemon accept branch. | `EligibilityImmutable` |
 
-Note NC4 leaves `FlagMonotone` *satisfied* (a `TRUE→FALSE` flip is monotone-OK):
-it is the provenance monitor `PolicyFlipsOnlyOnKeypress`, not monotonicity, that
-catches an illegitimate flip — which is the point of having both.
+NC5 and NC6 are the load-bearing G7 controls: NC5 shows the grant cannot be
+established without both barriers, and NC6 shows an unattended exec cannot happen
+on a non-eligible daemon — together the model form of "no weaker than the Bash
+tool". Both were run and confirmed to fail exactly the listed invariant.
 
 ## Faithfulness ledger
 
@@ -103,15 +109,17 @@ note in the [roadmap](../../docs/formalisation-roadmap.md).
   observable.
 - `classify_key`'s exact decision table (`Classify`), including that
   `ApprovedAlways` is emitted iff `a` ∧ unprivileged.
-- Both dispatch branches, the defensive `ApprovedAlways → Denied` fold on the
-  privileged path, and that `confirm_unprivileged` is written by exactly one
-  primitive (`FlipFlag`).
+- All three unprivileged dispatch states (granted → unattended; ungranted →
+  prompt; `ApprovedAlways` grants only when eligible), the defensive
+  `ApprovedAlways → Denied` fold on the privileged path, that the session `grant`
+  is written by exactly one primitive (`GrantSession`), that `eligible` is never
+  written, and that a session boundary resets `grant` (non-persistence).
 - Replay rejection via a monotonically-growing `seen` set.
 - The attacker and the operator are both fully nondeterministic, so the
   properties are universally quantified over all field forgeries / replays and
   all operator choices.
 
-**Abstracted (sound for these four properties)**
+**Abstracted (sound for these properties)**
 
 - The clock / freshness check → a boolean `fresh`; env contents → `envOk`;
   decode + peer-auth → `wellFormed`. The properties don't depend on the contents
@@ -356,19 +364,21 @@ a vacuous pass. NC2 reproduces the PR #22 hazard the TTY lock exists to prevent.
 
 - The per-request gate chain (validate → freshness → env allowlist) → assumed
   passed: it is per-handler and sequential, covered by the
-  [`ApprovalStateMachine`](#the-four-properties) model. The focus here is the
+  [`ApprovalStateMachine`](#the-properties) model. The focus here is the
   shared-state races.
 - `SeenIds` eviction → never evict (the [`ReplayWindow`](#window-sizing--freshness--replay-retention)
   model owns the TTL); irrelevant to a concurrency race within the model's horizon.
-- `confirm_unprivileged` → a read-only init-free boolean (no `a` key), so its flip
-  semantics stay with the `ApprovalStateMachine` model; both dispatch paths are
-  still covered.
+- the unprivileged gate → a read-only init-free boolean `confirmUnpriv` (no `a`
+  key offered here), a stand-in for "the unprivileged path may or may not prompt".
+  The real two-barrier gate semantics (eligibility + session grant, invariant G7)
+  stay with the `ApprovalStateMachine` model; here both dispatch paths reach the
+  exec site, which is all the concurrency properties need.
 - Handler count bounded to 2 (3 also checked); the keypress set to `{y, other}`.
 
 **Out of scope**
 
 - The approval/keypress decision table and the flag-flip transition — the
-  [`ApprovalStateMachine`](#the-four-properties) model.
+  [`ApprovalStateMachine`](#the-properties) model.
 - The freshness ↔ retention window sizing — the
   [`ReplayWindow`](#window-sizing--freshness--replay-retention) model.
 

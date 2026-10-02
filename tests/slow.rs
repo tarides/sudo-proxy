@@ -19,10 +19,10 @@ use common::*;
 /// B's connection thread starts immediately on accept; freshness is
 /// checked while B is still fresh, and B succeeds.
 ///
-/// Setup: confirm_unprivileged=false, so B (privileged=false) skips the
-/// prompter entirely and runs `exec_direct` while A (privileged=true)
-/// is still in its 65s prompt. A's prompter returns Denied so we don't
-/// drag a real `sudo` into the test.
+/// Setup: an eligible daemon with a granted session, so B (privileged=false)
+/// bypasses the prompter and runs `exec_direct` while A (privileged=true) is
+/// still in its 65s prompt. A's prompter returns Denied so we don't drag a real
+/// `sudo` into the test.
 ///
 /// Runs ~65s; gated behind --ignored. Real time-passage on A's prompt
 /// is what proves the freshness check is decoupled from prompt
@@ -31,10 +31,11 @@ use common::*;
 #[ignore]
 fn request_queued_behind_slow_prompt_completes_normally() {
     let opts = TestServerOpts {
-        confirm_unprivileged: false,
+        unattended_eligible: true,
         ..Default::default()
     };
     let s = start_test_server(opts);
+    s.grant_unattended_session(); // warmup counts as one prompter call
 
     s.prompter
         .set_response(|_| (Duration::from_secs(65), PromptResult::Denied));
@@ -49,13 +50,14 @@ fn request_queued_behind_slow_prompt_completes_normally() {
     });
 
     // Wait until A has actually entered the prompter (so the TTY lock is
-    // taken and we're in the wedge window).
-    assert!(wait_until(Duration::from_secs(5), || s.prompter.call_count() == 1));
+    // taken and we're in the wedge window). The grant warmup already counted
+    // as call 1, so A entering the prompter is call 2.
+    assert!(wait_until(Duration::from_secs(5), || s.prompter.call_count() == 2));
 
     let t_b = thread::spawn(move || {
-        // privileged=false + confirm_unprivileged=false → no prompter,
-        // no TTY lock. With the fix, this thread runs to completion
-        // while A's 65s prompt is still active.
+        // privileged=false + granted session → no prompter, no TTY lock.
+        // With the fix, this thread runs to completion while A's 65s prompt
+        // is still active.
         let req = make_req("queue-B", vec![vec!["true"]]);
         let start = Instant::now();
         let resp = send_request(&path_b, &req);

@@ -11,7 +11,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
-use crate::hosts::HostsConfig;
 use crate::mode::Mode;
 use crate::protocol::{Request, Response, ValidatedRequest};
 use crate::tui::{self, Prompter, ResultSink};
@@ -190,6 +189,68 @@ pub fn validate_host(host: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// This machine's hostname (from `/etc/hostname`), used by [`is_local_host`] to
+/// recognise a request that names the local box. Falls back to an empty string
+/// (which matches nothing) if the file is unreadable, keeping the classifier
+/// fail-closed toward "remote".
+pub fn own_hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// True if `host` denotes the machine this proxy runs on, so a request naming
+/// it must route to the *local* path rather than an SSH tunnel. This is the C9
+/// normaliser (invariant G7): it folds loopback literals and the machine's own
+/// hostname to "local" so a self-target cannot masquerade as remote — e.g.
+/// `execute(host="127.0.0.1")` must not open an SSH-to-self tunnel that routes
+/// around local policy.
+///
+/// Best-effort by construction: ssh-config aliases and NAT hairpin can hide a
+/// self-target it cannot see. G7 does not rest on catching every alias (see
+/// C10) — local unprivileged is delegated to the Bash tool and every remote
+/// daemon still gates unattended execution, so an undetected self-alias routed
+/// SSH-to-self still lands on a gated daemon.
+///
+/// `own_hostname` is injected rather than read here, so the classification is a
+/// pure function of its inputs and the property test stays hermetic.
+pub fn is_local_host(host: &str, own_hostname: &str) -> bool {
+    // Drop an optional `user@` prefix and a single trailing FQDN dot; compare
+    // case-insensitively.
+    let h = host.rsplit('@').next().unwrap_or(host);
+    let h = h.strip_suffix('.').unwrap_or(h);
+    let h_lower = h.to_ascii_lowercase();
+
+    if h_lower == "localhost" {
+        return true;
+    }
+    // The whole 127.0.0.0/8 block is loopback — parse it, don't string-match,
+    // so `127.0.0.1.evil.com` is NOT treated as local.
+    if let Ok(v4) = h.parse::<std::net::Ipv4Addr>() {
+        return v4.octets()[0] == 127;
+    }
+    if let Ok(v6) = h.parse::<std::net::Ipv6Addr>() {
+        return v6.is_loopback();
+    }
+    // The machine's own name — full FQDN, or a bare label matching our first
+    // label (so `box` matches a hostname of `box.local`). A dotted FQDN must
+    // match in full, so an unrelated `box.example.com` is not caught. An empty
+    // `own_hostname` (unreadable /etc/hostname) matches nothing.
+    if !own_hostname.is_empty() {
+        let own_lower = own_hostname.to_ascii_lowercase();
+        if h_lower == own_lower {
+            return true;
+        }
+        if !h_lower.contains('.') {
+            let own_label = own_lower.split('.').next().unwrap_or(&own_lower);
+            if !own_label.is_empty() && h_lower == own_label {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Bounded set of recently-seen request ids, evicted by age.
 pub(crate) struct SeenIds {
     set: HashSet<String>,
@@ -301,7 +362,12 @@ pub struct ServerConfig {
     pub mode: Mode,
     pub pkexec_only: bool,
     pub verbose: bool,
-    pub confirm_unprivileged: bool,
+    /// Whether this daemon *may* offer the session-scoped `a` answer at an
+    /// unprivileged prompt (invariant G7, first barrier). Read from the
+    /// `unattended_eligible` policy in `hosts.json` at startup and immutable
+    /// thereafter — no wire field, MCP flag, or keypress changes it. Default
+    /// `false` (fail-closed): every unprivileged command is prompted.
+    pub unattended_eligible: bool,
     pub max_in_flight: usize,
 }
 
@@ -311,11 +377,7 @@ impl Default for ServerConfig {
             mode: Mode::Local,
             pkexec_only: false,
             verbose: false,
-            // Human-in-the-loop is the marketed value of sudo-proxy.
-            // Unprivileged commands now go through the same Y/N gate as
-            // privileged ones by default; opt out via
-            // `--no-confirm-unprivileged` for batch/automation flows.
-            confirm_unprivileged: true,
+            unattended_eligible: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
     }
@@ -343,9 +405,13 @@ pub fn run(
 
     let our_uid = unsafe { libc::getuid() };
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(Instant::now)));
-    // Shared across handler threads so an interactive `a` (ApprovedAlways)
-    // can flip the gate for subsequent requests without restarting.
-    let confirm_unprivileged = Arc::new(AtomicBool::new(config.confirm_unprivileged));
+    // Eligibility is a runtime-immutable config input (barrier 1). The session
+    // grant (barrier 2) starts OFF and is the *only* thing an interactive `a`
+    // can flip — in memory only, never persisted. It dies with the daemon,
+    // i.e. with the SSH tunnel for a remote host, so the grant cannot outlive
+    // the session (invariant G7).
+    let unattended_eligible = config.unattended_eligible;
+    let unattended_grant = Arc::new(AtomicBool::new(false));
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -397,7 +463,7 @@ pub fn run(
         let mode = config.mode;
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
-        let confirm_unprivileged = Arc::clone(&confirm_unprivileged);
+        let unattended_grant = Arc::clone(&unattended_grant);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
             let _guard = guard;
@@ -407,7 +473,8 @@ pub fn run(
                 mode,
                 pkexec_only,
                 verbose,
-                confirm_unprivileged,
+                unattended_eligible,
+                unattended_grant,
                 prompter,
                 sink,
                 seen,
@@ -425,7 +492,8 @@ fn handle_connection(
     mode: Mode,
     pkexec_only: bool,
     verbose: bool,
-    confirm_unprivileged: Arc<AtomicBool>,
+    unattended_eligible: bool,
+    unattended_grant: Arc<AtomicBool>,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
     seen_ids: Arc<Mutex<SeenIds>>,
@@ -591,7 +659,7 @@ fn handle_connection(
             // by ForegroundGuard for the swap.
             let prompt_result = {
                 let _g = lock_recover(&tty_lock);
-                prompter.prompt(&req, PROMPT_TIMEOUT)
+                prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
             };
             match prompt_result {
                 Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env, &tty_lock),
@@ -607,18 +675,41 @@ fn handle_connection(
                 }
             }
         }
-    } else if confirm_unprivileged.load(Ordering::Relaxed) {
+    } else if unattended_grant.load(Ordering::Relaxed) {
+        // A session-scoped grant is active: this daemon is eligible AND a human
+        // pressed `a` earlier in this session. Run unattended. The audit line
+        // is UNCONDITIONAL — in this no-prompt window it is the reliable record
+        // of what ran, and unlike the TTY banner it never depends on the
+        // tty_lock, so an unprivileged command is never blocked behind an
+        // in-flight privileged prompt. The TTY banner stays best-effort
+        // (try_lock) for on-screen visibility. The grant lives only in memory
+        // and dies with the daemon/tunnel; it is never persisted.
+        eprintln!(
+            "[{}] [unattended] {}",
+            req.id,
+            crate::tui::pipeline_join(&req.pipeline)
+        );
+        if let Ok(_g) = tty_lock.try_lock() {
+            let _ = tui::display_banner(&req);
+        }
+        exec_direct(&req, &env)
+    } else {
+        // Default unprivileged path: prompt every command. `a` is offered only
+        // when eligible; on an eligible daemon an `a` press approves this
+        // command AND flips the in-memory session grant. When not eligible,
+        // `a` degrades to approve-once and grants nothing.
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
-            prompter.prompt(&req, PROMPT_TIMEOUT)
+            prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
         };
         match prompt_result {
             Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
             Ok(tui::PromptResult::ApprovedAlways) => {
-                confirm_unprivileged.store(false, Ordering::Relaxed);
-                let mut hosts = HostsConfig::load();
-                hosts.policy.confirm_unprivileged = false;
-                hosts.save();
+                // Grant the session only when eligible — never persisted, no
+                // hosts.json write. Barrier 1 (eligibility) gates barrier 2.
+                if unattended_eligible {
+                    unattended_grant.store(true, Ordering::Relaxed);
+                }
                 exec_direct(&req, &env)
             }
             Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
@@ -628,16 +719,6 @@ fn handle_connection(
                 Response::error(&req.id, &format!("prompt error: {e}"))
             }
         }
-    } else {
-        // Non-privileged, no confirmation: print a one-line banner so the
-        // user can see what the proxy is running on their behalf, then exec.
-        // Best-effort: try_lock so the banner never queues behind a
-        // long-running privileged prompt. Skipping the banner under
-        // contention is preferred to making `ls` wait on a human Y/N.
-        if let Ok(_g) = tty_lock.try_lock() {
-            let _ = tui::display_banner(&req);
-        }
-        exec_direct(&req, &env)
     };
 
     // Echo result on the TTY. The privileged path takes the lock blocking
@@ -837,6 +918,42 @@ mod tests {
         assert!(validate_host("localhost").is_ok());
         assert!(validate_host("user@host.example.com").is_ok());
         assert!(validate_host("root@10.0.0.1").is_ok());
+    }
+
+    #[test]
+    fn is_local_host_classifies_self_and_loopback() {
+        // Hermetic: own hostname is injected, never read from /etc/hostname.
+        let own = "box.local";
+        // Local: canonical name, whole 127/8, IPv6 loopback, user@ and trailing
+        // dot forms, case-insensitivity, own hostname (full + bare first label).
+        for local in [
+            "localhost", "LOCALHOST", "LocalHost", "localhost.",
+            "127.0.0.1", "127.0.0.5", "127.1.2.3", "user@127.0.0.1",
+            "::1", "user@::1",
+            "box.local", "BOX.LOCAL", "box",
+        ] {
+            assert!(
+                is_local_host(local, own),
+                "is_local_host({local:?}) should be local"
+            );
+        }
+        // Remote: suffix/prefix/substring dodges must NOT match, and genuine
+        // remotes stay remote. An unrelated FQDN sharing our first label is
+        // remote (only a bare label or the full FQDN counts as self).
+        for remote in [
+            "127.0.0.1.evil.com", "notlocalhost", "localhost.evil.com",
+            "example.com", "10.0.0.4", "128.0.0.1", "::2",
+            "box.example.com", "buildbox",
+        ] {
+            assert!(
+                !is_local_host(remote, own),
+                "is_local_host({remote:?}) should be remote"
+            );
+        }
+        // An unreadable /etc/hostname (empty own) matches nothing by name, but
+        // loopback literals still resolve local.
+        assert!(is_local_host("127.0.0.1", ""));
+        assert!(!is_local_host("box", ""));
     }
 
     #[test]

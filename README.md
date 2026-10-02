@@ -53,6 +53,16 @@ system files, manage services, or run any other command — with the human
 always in the loop, even when Claude Code is run with
 `--dangerously-skip-permissions`.
 
+It is deliberately **not** a way to run *un*privileged commands with less
+scrutiny than the Bash tool: an unprivileged command targeting the local
+machine is refused and delegated back to the Bash tool (which already applies
+your permission rules), and loopback aliases like `127.0.0.1` cannot dodge that.
+sudo-proxy handles privilege escalation and commands on remote hosts; there,
+unprivileged commands are gated the same way, and the per-command gate is only
+relaxed if you deliberately mark a host eligible in `hosts.json` *and* confirm
+once per session (a grant that is never persisted). See
+[REVIEWING.md](REVIEWING.md) invariant **G7**.
+
 For how this relates to mcp-firewall, sandboxing, polkit, doas, and other
 neighboring tools, see [docs/comparison.md](docs/comparison.md).
 

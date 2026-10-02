@@ -43,8 +43,9 @@ NoHolder == "none"
 \* Keypress abstraction restricted to what matters for concurrency: "y"
 \* approves (so the exec site is reached), "other" denies/times out (so the
 \* TTY lock is released without executing). The full keypress decision table
-\* and the confirm_unprivileged flip are the ApprovalStateMachine model's job;
-\* here no "a" is offered, so confirmUnpriv is read-only.
+\* and the two-barrier unprivileged gate (eligibility + session grant, G7) are
+\* the ApprovalStateMachine model's job; here `confirmUnpriv` is a read-only
+\* stand-in for "the unprivileged path may or may not prompt" (no "a" offered).
 Keys == {"y", "other"}
 
 (* --algorithm ConcurrentHandlers

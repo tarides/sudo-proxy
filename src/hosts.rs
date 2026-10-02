@@ -23,21 +23,26 @@ pub struct HostInfo {
     pub version: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+/// Per-daemon policy, read from `hosts.json` at startup and **immutable at
+/// runtime** — no wire field, MCP flag, or keypress can change it; only an
+/// out-of-band edit of the file does. This is the first of the two barriers
+/// guarding unattended unprivileged execution (invariant G7 in REVIEWING.md);
+/// the second is the in-memory, session-scoped grant in `server.rs`.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct Policy {
-    /// When `true`, unprivileged commands hit the TTY Y/N gate (today's
-    /// default). When `false`, they take the banner-only path. The
-    /// interactive `a` answer flips this to `false` and persists.
-    #[serde(default = "crate::protocol::default_true")]
-    pub confirm_unprivileged: bool,
-}
-
-impl Default for Policy {
-    fn default() -> Self {
-        Self {
-            confirm_unprivileged: true,
-        }
-    }
+    /// When `true`, this daemon *may* offer "approve for this session" (`a`)
+    /// at an unprivileged prompt; a human keypress then grants unattended
+    /// unprivileged execution for the daemon's lifetime — never persisted.
+    /// When `false` (the default), every unprivileged command is prompted
+    /// individually and `a` is never offered.
+    ///
+    /// Default-false is fail-closed: an absent `policy` block, or a stale
+    /// `confirm_unprivileged` key from a pre-G7 config, deserializes to `false`
+    /// (serde ignores the unknown key), so the dangerous persisted opt-out from
+    /// older builds becomes inert on upgrade and the daemon prompts every
+    /// command until an operator deliberately edits the file.
+    #[serde(default)]
+    pub unattended_eligible: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -171,7 +176,7 @@ pub fn save_to(path: &Path, config: &HostsConfig) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
         // hosts.json holds the host inventory, cached remote UIDs, and the
-        // confirm_unprivileged policy — owner-private data. Keep the
+        // unattended-eligibility policy — owner-private data. Keep the
         // directory owner-only (0700) so other local users can't enumerate
         // or read it, mirroring the socket-bind hardening in server.rs.
         let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
@@ -230,30 +235,37 @@ mod tests {
     }
 
     #[test]
-    fn policy_defaults_to_confirm_when_field_absent() {
-        // An older hosts.json (no `policy` block) must round-trip with
-        // confirm_unprivileged=true so behaviour matches pre-policy builds.
+    fn policy_defaults_to_not_eligible_when_absent() {
+        // An older hosts.json (no `policy` block) must deserialize fail-closed:
+        // not eligible, so every unprivileged command is prompted.
         let cfg: HostsConfig = serde_json::from_str(r#"{"hosts":{}}"#).unwrap();
-        assert!(cfg.policy.confirm_unprivileged);
+        assert!(!cfg.policy.unattended_eligible);
     }
 
     #[test]
-    fn policy_with_confirm_false_loads() {
+    fn stale_confirm_unprivileged_key_is_inert() {
+        // G7 migration: a pre-G7 config that disabled the gate
+        // (`confirm_unprivileged:false`) must NOT survive the upgrade as an
+        // active unattended grant. Serde ignores the unknown key and
+        // `unattended_eligible` falls back to its fail-closed default.
         let cfg: HostsConfig = serde_json::from_str(
             r#"{"hosts":{},"policy":{"confirm_unprivileged":false}}"#,
         )
         .unwrap();
-        assert!(!cfg.policy.confirm_unprivileged);
+        assert!(
+            !cfg.policy.unattended_eligible,
+            "a stale confirm_unprivileged key must not enable eligibility"
+        );
     }
 
     #[test]
     fn policy_round_trips_through_serde() {
         let mut cfg = HostsConfig::default();
-        assert!(cfg.policy.confirm_unprivileged);
-        cfg.policy.confirm_unprivileged = false;
+        assert!(!cfg.policy.unattended_eligible);
+        cfg.policy.unattended_eligible = true;
         let s = serde_json::to_string(&cfg).unwrap();
         let back: HostsConfig = serde_json::from_str(&s).unwrap();
-        assert!(!back.policy.confirm_unprivileged);
+        assert!(back.policy.unattended_eligible);
     }
 
     #[test]
@@ -266,12 +278,12 @@ mod tests {
         let path = dir.join("hosts.json");
 
         let mut cfg = HostsConfig::default();
-        cfg.policy.confirm_unprivileged = false;
+        cfg.policy.unattended_eligible = true;
         save_to(&path, &cfg).unwrap();
 
         let s = std::fs::read_to_string(&path).unwrap();
         let back: HostsConfig = serde_json::from_str(&s).unwrap();
-        assert!(!back.policy.confirm_unprivileged);
+        assert!(back.policy.unattended_eligible);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

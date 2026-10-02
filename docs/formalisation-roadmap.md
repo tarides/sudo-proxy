@@ -126,8 +126,11 @@ specification:
 - `shell_escape` round-trips through `/bin/sh` byte-for-byte;
 - every field displayed at the approval prompt is dangerous-char-free;
 - `privileged:true` ⇒ an interactive keypress occurred before exec;
-- the `confirm_unprivileged` policy flag is flippable *only* by an interactive
-  keypress, never by a request field.
+- unattended unprivileged execution requires both `unattended_eligible` (config-
+  only, never set from the wire) and an in-session `a` keypress, and the grant is
+  never persisted (invariant G7 / C8); a stale `confirm_unprivileged` key is inert;
+- self/loopback host targets are classified local and cannot route SSH-to-self
+  (G7 / C9), tested by `is_local_host`'s truth table.
 
 This is the cheap bridge to formal methods: these properties become the proof
 obligations for the higher rungs.
@@ -209,10 +212,12 @@ half with a stable-Rust typestate (rationale below).
 The most interesting properties are temporal and relational, not per-function:
 
 - Model the **approval state machine** — request → freshness check → dedup →
-  prompt → keypress → exec, plus the `confirm_unprivileged` policy transition
-  (finding F2) — in **TLA+/PlusCal** or **Alloy**, and model-check: replay is
-  impossible; no exec without approval; the policy flag transitions *only* on an
-  interactive keypress (never via a request field, replay, or MCP tool flag).
+  prompt → keypress → exec, plus the unprivileged eligibility + session-grant
+  transitions (invariant G7, finding F2) — in **TLA+/PlusCal** or **Alloy**, and
+  model-check: replay is impossible; no exec without approval; eligibility is a
+  runtime-immutable input; and `NoUnattendedUnprivilegedExec` — an unprivileged
+  command runs unattended only when eligible AND a prior in-session `a` keypress
+  occurred, with the grant reset at the session boundary (never persisted).
 - For the A3 / SSH-tunnel path, model freshness + replay + channel assumptions
   in the symbolic-protocol provers **Tamarin** or **ProVerif**. These are the
   standard instruments for "what does the tunnel actually guarantee," and they
