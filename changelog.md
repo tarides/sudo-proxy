@@ -3,6 +3,36 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-10-16 — Alert the human when an approval prompt appears (bell + blink)
+
+Usability/safety work, not an assurance-ladder rung — the change is purely
+additive to `prompt_tty` and leaves the security-relevant decision path
+(`classify_key`, the keypress read, the timeout) untouched.
+
+- **The gap.** A root (or unprivileged) approval prompt was written silently to
+  `/dev/tty`. When the daemon's terminal was unfocused or off-screen the request
+  could go unnoticed until the 60s timeout denied it — no attention signal.
+
+- **Two attention cues, both on by default.** `prompt_tty` now rings the
+  terminal bell (`\x07` / BEL) and blinks the question line (SGR `\x1b[5m` …
+  `\x1b[25m`) just before the `Execute?` question. BEL is the primary cue —
+  terminals map it to an audible beep and, for an unfocused window, the WM/dock
+  urgency hint; the blink is the in-window fallback we fully control. We emit the
+  bytes; the terminal's own visual-bell/urgency setting decides the rendering.
+
+- **Opt-out mirrors `NO_COLOR`.** Each cue is independently silenced by its own
+  env var — `SUDO_PROXY_NO_BELL` and `SUDO_PROXY_NO_BLINK` — read with the same
+  `var_os(...).is_some_and(|v| !v.is_empty())` idiom as `style()`. A new `Alert`
+  struct + pure `alert_for(no_bell, no_blink)` splits the env mapping from the
+  I/O, exactly as `Style`/`style_for` already do.
+
+- **Additive by construction.** The question write was factored into a
+  writer-generic `write_question_line` helper (the BEL leads; the blink wraps
+  only the text, so the resting cursor does not blink). Two unit tests cover the
+  env mapping and assert the escape bytes are present when on and absent when
+  off, exercised against a `Vec<u8>` buffer rather than `/dev/tty`. Full suite
+  green; README documents the opt-out.
+
 ## 2026-09-15 — Glama quality score: from unscored to grade A
 
 Release/hygiene work, not an assurance-ladder rung.

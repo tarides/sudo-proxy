@@ -55,6 +55,38 @@ fn style_for(no_color: bool) -> Style {
     }
 }
 
+/// Attention cues emitted just before the `Execute?` question so an unfocused or
+/// off-screen daemon terminal does not sit silently until the timeout denies the
+/// request. The terminal bell (BEL) is the primary cue — terminals map it to an
+/// audible beep and, for an unfocused window, the WM/dock urgency hint; the
+/// blink wraps the question text as an in-window fallback for terminals that
+/// render no bell. Both default on; each is independently suppressed by its own
+/// env var (gated separately from NO_COLOR, which governs color/weight).
+#[derive(Clone, Copy)]
+struct Alert {
+    bell: &'static str,      // "\x07" or ""
+    blink_on: &'static str,  // "\x1b[5m" or ""
+    blink_off: &'static str, // "\x1b[25m" or ""
+}
+
+fn alert() -> Alert {
+    alert_for(
+        std::env::var_os("SUDO_PROXY_NO_BELL").is_some_and(|v| !v.is_empty()),
+        std::env::var_os("SUDO_PROXY_NO_BLINK").is_some_and(|v| !v.is_empty()),
+    )
+}
+
+/// Pure split so the env mapping is unit-testable without mutating the
+/// process-wide environment (same pattern as `style_for`). Bell and blink are
+/// independent — each honors only its own flag.
+fn alert_for(no_bell: bool, no_blink: bool) -> Alert {
+    Alert {
+        bell: if no_bell { "" } else { "\x07" },
+        blink_on: if no_blink { "" } else { "\x1b[5m" },
+        blink_off: if no_blink { "" } else { "\x1b[25m" },
+    }
+}
+
 /// Upper bound on the command string shown at the approval prompt. A caller
 /// could otherwise submit a multi-kilobyte argument that wraps over dozens of
 /// lines and pushes the `[y/N]` question off-screen, so the human approves
@@ -237,11 +269,7 @@ pub fn prompt_tty(
     } else {
         ("Execute?", "[y/N]")
     };
-    write!(
-        tty_w,
-        "{question} {choices} ({}s timeout, default=N) ",
-        timeout.as_secs()
-    )?;
+    write_question_line(&mut tty_w, &alert(), question, choices, timeout.as_secs())?;
     tty_w.flush()?;
 
     // Read single keypress with timeout (no Enter needed), then classify it
@@ -262,6 +290,25 @@ pub fn prompt_tty(
     writeln!(tty_w, "{bold}━━━━━━━━━━━━━━━━━━━━━━━━━{reset}")?;
 
     Ok(result)
+}
+
+/// Write the `Execute?` question line, wrapped with the attention cues. The BEL
+/// leads (fires when the line first renders); the blink wraps only the text, so
+/// the trailing space before the resting cursor does not blink. Kept writer-
+/// generic and free of I/O side effects so the emitted bytes are unit-testable
+/// against a buffer, without touching /dev/tty.
+fn write_question_line<W: Write>(
+    w: &mut W,
+    alert: &Alert,
+    question: &str,
+    choices: &str,
+    timeout_secs: u64,
+) -> io::Result<()> {
+    let Alert { bell, blink_on, blink_off } = *alert;
+    write!(
+        w,
+        "{bell}{blink_on}{question} {choices} ({timeout_secs}s timeout, default=N){blink_off} "
+    )
 }
 
 /// Write the `Resolves:` line for a command name. PATH-searches the
@@ -565,6 +612,56 @@ mod tests {
         assert_eq!(off.bold, "");
         assert_eq!(off.dim, "");
         assert_eq!(off.reset, "");
+    }
+
+    #[test]
+    fn alert_for_honors_env() {
+        let on = alert_for(false, false);
+        assert_eq!(on.bell, "\x07");
+        assert_eq!(on.blink_on, "\x1b[5m");
+        assert_eq!(on.blink_off, "\x1b[25m");
+
+        let off = alert_for(true, true);
+        assert_eq!(off.bell, "");
+        assert_eq!(off.blink_on, "");
+        assert_eq!(off.blink_off, "");
+
+        // Bell and blink are independent — each flag gates only its own cue.
+        let no_bell = alert_for(true, false);
+        assert_eq!(no_bell.bell, "");
+        assert_eq!(no_bell.blink_on, "\x1b[5m");
+        assert_eq!(no_bell.blink_off, "\x1b[25m");
+
+        let no_blink = alert_for(false, true);
+        assert_eq!(no_blink.bell, "\x07");
+        assert_eq!(no_blink.blink_on, "");
+        assert_eq!(no_blink.blink_off, "");
+    }
+
+    fn render_question(alert: &Alert) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        write_question_line(&mut buf, alert, "Execute as root?", "[y/N]", 60).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn write_question_line_emits_and_suppresses_cues() {
+        // Default (all cues on): BEL and the blink pair are present, wrapping the
+        // question text, which itself is always rendered.
+        let on = render_question(&alert_for(false, false));
+        assert!(on.contains('\x07'), "bell byte missing: {on:?}");
+        assert!(on.contains("\x1b[5m"), "blink-on missing: {on:?}");
+        assert!(on.contains("\x1b[25m"), "blink-off missing: {on:?}");
+        assert!(on.contains("Execute as root? [y/N]"), "question text missing: {on:?}");
+
+        // Both cues suppressed: none of the three escapes appear, but the
+        // question line is otherwise identical and still printed.
+        let off = render_question(&alert_for(true, true));
+        assert!(!off.contains('\x07'), "bell leaked: {off:?}");
+        assert!(!off.contains("\x1b[5m"), "blink-on leaked: {off:?}");
+        assert!(!off.contains("\x1b[25m"), "blink-off leaked: {off:?}");
+        assert!(off.contains("Execute as root? [y/N]"), "question text missing: {off:?}");
+        assert_eq!(off, "Execute as root? [y/N] (60s timeout, default=N) ");
     }
 
     #[test]

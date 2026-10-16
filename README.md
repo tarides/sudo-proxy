@@ -171,6 +171,14 @@ Each `execute` shows the exact command in the TUI; press `y` to approve,
 `N` (default) to deny. For remote hosts, pass `host` to `start_server` and
 `execute`.
 
+When a prompt appears, the TUI rings the terminal bell and blinks the
+question line so a request is not missed while the daemon's terminal is
+unfocused or off-screen. The bell honors the terminal's own
+visual-bell/urgency setting (audible beep, taskbar/dock flash, or both).
+Both cues are on by default; set `SUDO_PROXY_NO_BELL` to silence the bell
+and `SUDO_PROXY_NO_BLINK` to stop the blink (same opt-out style as
+`NO_COLOR`).
+
 ## MCP Registry
 
 Listed in the official [MCP Registry](https://registry.modelcontextprotocol.io)
