@@ -109,6 +109,76 @@ for live visibility. Decide the default (log-to-syslog on by default vs opt-in
 via a flag) and document the privacy/retention implications in the README.
 Captured follow-up, not active work.
 
+## Structured composite-execution plan (retire the `bash -lc` opaque wrapper)
+
+**The gap.** A captured approval trail from a registered host (24 consecutive
+requests, all from one `sudo-proxy-mcp` client, 2026-10-16) showed **every**
+command wrapped as
+`argv = ["bash", "-lc", "<script>"]`. Two consequences hollow out the approval
+gate: (1) the path-resolution guarantee is vacuous — every `Resolves:` line is
+`/usr/bin/bash`, and the real binaries (`opam`, `dune`, `sysctl`, `git`, `pkill`)
+are chosen *inside* the script by `$PATH` lookup in a login shell the proxy never
+inspected; (2) a single root approval authorizes many effects — e.g. requests
+`8ab05131` (13:58) and `4ce9cd4c` (12:14) each bundled `sysctl -w
+vm.mmap_rnd_bits=28`, a nested `sudo -H -u <user> bash -lc '…'`, and a sysctl
+restore under one "Execute as root? y". This is the softer sibling of what the
+`no-opaque-blob` hook already blocks: an un-reviewable payload defeats the gate.
+
+**The fix.** Generalize `execute`'s existing `pipeline`/`env` into a **structured
+plan** that the daemon executes *directly* (fork/exec per stage: pipes,
+redirections, env, `setuid` to a run-as user, sequencing) with **no shell in the
+privileged path**. The load-bearing invariant: *the structure the human approves
+is literally the structure that runs.* This rules out the tempting-but-unsound
+alternative of parsing the `bash -lc` string for display while still executing it
+via bash — parser/bash divergence (quoting, globbing, `$(…)`, and `-l` profile
+functions/aliases) would let the approved interpretation differ from the executed
+one. Executing a literal-argv plan also *shrinks* the TCB: no word-splitting, glob
+expansion, command substitution, or profile functions on the privileged path. The
+prompt then renders each stage with its resolved real binary, its run-as context
+(`[ROOT]` / `[as user]`), and its redirections — so the two sysctl toggles above
+appear as two explicit, isolated root effects instead of hiding in a wall of text.
+
+**Prior art — Dune's action DSL** (checked
+`dune.readthedocs.io/en/stable/reference/actions/`). Dune already defines a
+proven, shell-free, S-expression command grammar for the same reason (reproducible,
+no-shell builds). It covers ~80% of the log's composition vocabulary directly:
+`run` (literal prog+args), `setenv`, `chdir`, `with-stdout-to` / `with-stderr-to`
+/ `with-outputs-to` (redirection; `with-outputs-to` = `2>&1`), `with-stdin-from`,
+`ignore-stdout`/`-stderr`/`-outputs` (= `>/dev/null`), `pipe-stdout`/`pipe-outputs`
+(= `|`), `progn` (sequence; fails on first error ≈ `&&`), `concurrent`,
+`write-file` (= `printf > file`), `echo`, `cat`, `copy`, and
+`with-accepted-exit-codes` (bound allowed exit codes). Critically, its `system` /
+`bash` forms are exactly the "explicitly opaque shell escape hatch" we want:
+adopt Dune's grammar as the plan schema, and render `system`/`bash` stages at the
+prompt as *opaque — resolves only the shell* (the `no-opaque-blob` philosophy),
+not hidden.
+
+**Gaps Dune does NOT cover — the security- and lifecycle-critical axes we must add
+on top:**
+
+- **Per-stage run-as / privilege** (`[ROOT]` vs `[as <user>]`). Dune runs
+  everything as the invoking user; it has no privilege notion. This is the single
+  most important field for us — it replaces the nested `sudo -H -u` and makes each
+  root effect explicit and isolated. (No equivalent in Dune.)
+- **Backgrounding / detach with pid return** (`nohup … & echo $!`, used in
+  requests `3a7cb1f9`, `e6aeb649`, `942cd83f`, `b1f6294a`). Dune actions are
+  synchronous; `concurrent` still joins. We need launch-and-detach returning the
+  pid as a structured field (not a shell `$!`).
+- **`||` fallback.** `progn` ≈ `;`/`&&` (stops on failure); there is no
+  run-on-failure branch for the log's `pgrep … || echo none`. Add it, or fold it
+  into `with-accepted-exit-codes`.
+- **Append redirection (`>>`).** `with-stdout-to` truncates; no append mode.
+- **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Dune resolves
+  `%{…}` at rule-eval, not runtime — so it has no runtime `$(…)` either, which
+  *confirms* our plan: promote the common cases to first-class ops (a read-file op
+  for `$(cat …)`; the launcher already knows the background pid), and route the
+  rest to the explicit `raw_shell`/`system` escape hatch.
+
+This subsumes rather than sits beside the `bash -lc` concern. Cost: a small
+in-daemon plan executor (fork/exec + pipes + redir + setuid + sequencing),
+bounded, and it removes the shell from the privileged path. Captured follow-up,
+not active work.
+
 ---
 
 ## Rung 6 — seL4-style end-to-end refinement (aspirational)
