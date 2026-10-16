@@ -215,6 +215,48 @@ daemon failing open must never be the difference between safe and unsafe; the
 hook failing open (misconfig, different client) likewise must not — the daemon is
 the backstop. Captured follow-up, not active work.
 
+## Partial-`seq` retry hazard and the sudo-credential-in-pipe caveat
+
+Surfaced while reviewing the structured-plan executor (the plan model above,
+first increment landed). Two interacting behaviours deserve a safer story than
+"the caller must know."
+
+**The retry hazard.** A `seq` runs its steps in order and stops at the first
+non-accepted failure (`executor.rs`, `run_seq` → `SeqNode::Seq`). When a later
+step fails, the earlier steps' side effects are **already committed**. The
+response marks which stages ran (per-stage exit codes; a skipped stage carries
+the `-1` not-run sentinel), but nothing stops a caller from resubmitting the
+*same* plan — which replays the already-committed early steps. For
+non-idempotent effects (`mkdir`, append-redirects, counters, `git commit`) that
+double-applies or errors on the second pass. This is the classic
+partial-failure/retry footgun of any `set -e` script; the plan model makes the
+partial state *visible* but does not prevent the replay.
+
+**The sudo-credential compounding.** The most likely "later step fails" cause is
+a privileged stage with no cached sudo credential. A **single** privileged stage
+runs with `setpgid` + the foreground-tty guard and *can* prompt; a privileged
+stage **inside a pipe** runs with `setsid` (detached, no controlling tty) and
+**cannot** prompt — it relies on a cached credential. Whether a leading
+`sudo true`-style prime carries into a `setsid` pipe child depends on the host's
+sudoers `timestamp_type` (`global` → yes; the common `tty` default → likely
+not). So a pipe whose privileged stage is neither NOPASSWD nor already-cached
+fails fast with "no tty present," and credential-priming is not a reliable fix
+*inside a pipe*.
+
+**Mitigations available today** (caller-side): order privileged stages first;
+make early stages idempotent (`mkdir -p`, truncate not append); rely on
+NOPASSWD / cached creds; prefer a single privileged stage over `sudo`-inside-a-
+pipe; and use the per-stage exit-code array to resubmit only the not-run stages
+rather than replaying the whole plan.
+
+**Potential improvements to weigh** (none a full fix — idempotency stays the
+caller's responsibility): (1) surface the partial-execution boundary
+prominently in the response/prompt so a caller resumes rather than replays;
+(2) an optional executor-inserted auth-probe for privileged plans that fails
+fast *before* any stateful stage, documenting the `timestamp_type` caveat;
+(3) advisory flagging of obviously-non-idempotent leading stages. Captured
+follow-up, not active work.
+
 ---
 
 ## Rung 6 — seL4-style end-to-end refinement (aspirational)

@@ -274,6 +274,7 @@ pub fn make_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
             .into_iter()
             .map(|v| v.into_iter().map(String::from).collect())
             .collect(),
+        plan: None,
         action: sudo_proxy::protocol::Action::Exec,
         env: Default::default(),
         reason: String::new(),

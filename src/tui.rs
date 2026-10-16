@@ -5,8 +5,8 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::executor::which;
-use crate::protocol::{Response, Status, ValidatedRequest};
+use crate::executor::{plan_display, which, LeafPrivilege, LeafView};
+use crate::protocol::{Plan, RedirTarget, Response, RunAs, Status, Stream, ValidatedRequest};
 
 /// Join argv into a shell-like display string, quoting args that contain spaces.
 pub fn shell_join(argv: &[String]) -> String {
@@ -29,6 +29,73 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
         .map(|argv| shell_join(argv))
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+/// A one-line summary of a request's command, for logs and the compact
+/// unattended banner. Renders the canonical `Plan` (a flat `pipeline` desugars
+/// into one), so it covers both the legacy pipeline form and structured plans.
+pub fn command_summary(req: &ValidatedRequest) -> String {
+    plan_to_string(&req.exec_plan())
+}
+
+/// Recursive one-line rendering of a plan tree. Structural, not resolved —
+/// the detailed per-leaf resolution happens in the multi-line prompt render.
+fn plan_to_string(plan: &Plan) -> String {
+    match plan {
+        Plan::Run { argv } => shell_join(argv),
+        Plan::System { shell, script } => {
+            let bin = match shell {
+                crate::protocol::Shell::Sh => "sh",
+                crate::protocol::Shell::Bash => "bash",
+            };
+            shell_join(&[bin.to_string(), "-c".to_string(), script.clone()])
+        }
+        Plan::Pipe { stages } => stages
+            .iter()
+            .map(plan_to_string)
+            .collect::<Vec<_>>()
+            .join(" | "),
+        Plan::Seq { steps } => steps
+            .iter()
+            .map(plan_to_string)
+            .collect::<Vec<_>>()
+            .join(" ; "),
+        Plan::Redirect { stream, target, body } => {
+            let op = match (stream, target) {
+                (Stream::Stdout, RedirTarget::File { path, mode }) => {
+                    format!("{} {path}", redir_arrow(*mode))
+                }
+                (Stream::Stderr, RedirTarget::File { path, mode }) => {
+                    format!("2{} {path}", redir_arrow(*mode))
+                }
+                (Stream::Both, RedirTarget::File { path, mode }) => {
+                    format!("{} {path} 2>&1", redir_arrow(*mode))
+                }
+                (Stream::Stdout, RedirTarget::DevNull) => "> /dev/null".to_string(),
+                (Stream::Stderr, RedirTarget::DevNull) => "2> /dev/null".to_string(),
+                (Stream::Both, RedirTarget::DevNull) => "> /dev/null 2>&1".to_string(),
+            };
+            format!("{} {op}", plan_to_string(body))
+        }
+        Plan::WithStdinFrom { path, body } => format!("{} < {path}", plan_to_string(body)),
+        Plan::Setenv { key, value, body } => format!("{key}={value} {}", plan_to_string(body)),
+        Plan::Chdir { dir, body } => format!("(cd {dir}; {})", plan_to_string(body)),
+        Plan::RunAs { who, body } => {
+            let tag = match who {
+                RunAs::Root => "[ROOT]".to_string(),
+                RunAs::User { name } => format!("[as {name}]"),
+            };
+            format!("{tag} {}", plan_to_string(body))
+        }
+        Plan::WithAcceptedExitCodes { body, .. } => plan_to_string(body),
+    }
+}
+
+fn redir_arrow(mode: crate::protocol::WriteMode) -> &'static str {
+    match mode {
+        crate::protocol::WriteMode::Append => ">>",
+        crate::protocol::WriteMode::Truncate => ">",
+    }
 }
 
 /// Bold/dim/reset styling for the approval prompt — no color. All escapes are
@@ -94,6 +161,12 @@ fn alert_for(no_bell: bool, no_blink: bool) -> Alert {
 /// makes truncation explicit so an over-long command reads as suspicious
 /// rather than benign.
 const MAX_DISPLAY_CMD_CHARS: usize = 1024;
+
+/// Upper bound on the number of plan stages rendered line-by-line at the prompt.
+/// A plan with more stages than this has its tail hidden behind an explicit
+/// marker, so a wide plan cannot push the `[y/N]` question off-screen — the same
+/// anti-flooding rationale as `MAX_DISPLAY_CMD_CHARS`, applied to stage count.
+const MAX_DISPLAY_STAGES: usize = 32;
 
 /// Truncate an approval-prompt command string to a bounded number of
 /// characters, appending an explicit marker when it was shortened.
@@ -222,29 +295,18 @@ pub fn prompt_tty(
     writeln!(
         tty_w,
         "Command: {bold}{}{reset}{agent_tag}",
-        truncate_for_display(&pipeline_join(&req.pipeline))
+        truncate_for_display(&command_summary(req))
     )?;
 
-    // Show resolved path for the first stage's command. Symlinks are
-    // followed via canonicalize so a same-UID adversary who substitutes
-    // /usr/local/bin/foo -> /tmp/evil cannot hide the redirection from
-    // the prompt.
-    if let Some(first_argv) = req.pipeline.first() {
-        if let Some(cmd_name) = first_argv.first() {
-            write_resolves_line(&mut tty_w, cmd_name, &st)?;
-        }
-
-        // Warn if later stages have commands not in PATH
-        for argv in req.pipeline.iter().skip(1) {
-            if let Some(cmd_name) = argv.first() {
-                if which(cmd_name).is_none() {
-                    writeln!(
-                        tty_w,
-                        "Warning:  {bold}{cmd_name}{reset} not found in PATH"
-                    )?;
-                }
-            }
-        }
+    // Render every stage the executor will run, each with its run-as context
+    // and its resolved real binary. This is the structural guarantee the plan
+    // model buys: the vacuous single `/usr/bin/bash` resolves line is replaced
+    // by one resolved binary per literal stage, so a bundle of root effects can
+    // no longer hide inside one opaque command. Built from the same
+    // `compile_plan` walk the executor uses, so prompt and execution agree.
+    match plan_display(req) {
+        Ok(views) => write_plan_stages(&mut tty_w, &views, &st)?,
+        Err(e) => writeln!(tty_w, "{bold}⚠ invalid plan: {e}{reset}")?,
     }
 
     if !req.env.is_empty() {
@@ -252,13 +314,18 @@ pub fn prompt_tty(
         writeln!(tty_w, "Env:     {}", env_display.join(" "))?;
     }
 
-    // `a` is offered only when this daemon is `unattended_eligible` (an
-    // out-of-band operator opt-in). Without it, unprivileged commands get the
-    // same plain `[y/N]` gate as privileged ones — no way to grant unattended
-    // execution from the prompt.
-    let offer_always = eligible && !req.privileged;
-    let (question, choices) = if req.privileged {
+    // Effective privilege, not the raw `privileged` flag: a plan that smuggles
+    // a `RunAs` node is gated exactly like a top-level privileged request, so
+    // `a` is never offered for it and root wording is shown when any stage is
+    // root. `a` is offered only when this daemon is `unattended_eligible` (an
+    // out-of-band operator opt-in).
+    let effective_priv = req.effective_privileged();
+    let offer_always = eligible && !effective_priv;
+    let (question, choices) = if req.runs_as_root() {
         ("Execute as root?", "[y/N]")
+    } else if effective_priv {
+        // Escalation only to a named non-root user (no root stage).
+        ("Execute with elevated privileges?", "[y/N]")
     } else if offer_always {
         writeln!(
             tty_w,
@@ -274,8 +341,9 @@ pub fn prompt_tty(
 
     // Read single keypress with timeout (no Enter needed), then classify it
     // with the pure decision function so the TTY echo and the security-
-    // relevant mapping cannot drift apart.
-    let result = classify_key(read_key_timeout(&tty_r, timeout)?, req.privileged);
+    // relevant mapping cannot drift apart. Pass effective privilege so `a`
+    // (ApprovedAlways) can never be produced for a plan that escalates.
+    let result = classify_key(read_key_timeout(&tty_r, timeout)?, effective_priv);
     let label = match result {
         PromptResult::Timeout => "Timeout",
         PromptResult::Approved => "Approved",
@@ -309,6 +377,69 @@ fn write_question_line<W: Write>(
         w,
         "{bell}{blink_on}{question} {choices} ({timeout_secs}s timeout, default=N){blink_off} "
     )
+}
+
+/// Render every stage of a compiled plan, one block per leaf: a header line
+/// with the run-as tag, the stage's argv (and any redirections), then its
+/// resolved real binary. A single plain unprivileged stage degrades to the
+/// classic one-line `Resolves:` form so simple prompts stay simple.
+fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
+    let Style { bold, dim, reset } = *style;
+
+    // Simple case: one stage, no escalation, not opaque, no redirections — keep
+    // the familiar single `Resolves:` line.
+    if views.len() == 1
+        && views[0].privilege == LeafPrivilege::Direct
+        && !views[0].opaque
+        && views[0].redirects.is_empty()
+    {
+        if let Some(name) = views[0].argv.first() {
+            return write_resolves_line(w, name, style);
+        }
+        return Ok(());
+    }
+
+    let shown = views.len().min(MAX_DISPLAY_STAGES);
+    for view in &views[..shown] {
+        let tag = match &view.privilege {
+            LeafPrivilege::Direct => String::new(),
+            LeafPrivilege::Root => format!("{bold}[ROOT]{reset} "),
+            LeafPrivilege::User(name) => format!("{bold}[as {name}]{reset} "),
+        };
+        let redir = if view.redirects.is_empty() {
+            String::new()
+        } else {
+            format!("  {dim}{}{reset}", view.redirects)
+        };
+        writeln!(
+            w,
+            "  {n}. {tag}{bold}{cmd}{reset}{redir}",
+            n = view.stage_id + 1,
+            cmd = truncate_for_display(&shell_join(&view.argv)),
+        )?;
+        // Resolve line for the stage, indented under it.
+        write!(w, "       ")?;
+        if view.opaque {
+            match &view.resolved_bin {
+                Some(p) => writeln!(
+                    w,
+                    "{bold}opaque — resolves only the shell: {}{reset}",
+                    p.display()
+                )?,
+                None => writeln!(w, "{bold}opaque — shell not found in PATH{reset}")?,
+            }
+        } else if let Some(name) = view.argv.first() {
+            write_resolves_line(w, name, style)?;
+        }
+    }
+    if views.len() > shown {
+        let hidden = views.len() - shown;
+        writeln!(
+            w,
+            "  {bold}… {hidden} more stage(s) hidden — full plan not shown{reset}"
+        )?;
+    }
+    Ok(())
 }
 
 /// Write the `Resolves:` line for a command name. PATH-searches the
@@ -371,7 +502,7 @@ pub fn display_banner(req: &ValidatedRequest) -> io::Result<()> {
         Err(_) => return Ok(()),
     };
     let Style { dim, reset, .. } = style();
-    let cmd = pipeline_join(&req.pipeline);
+    let cmd = command_summary(req);
     if req.forward_agent {
         writeln!(tty, "{dim}\u{25b6}{reset} {cmd} {dim}(agent forwarded){reset}")?;
     } else {
@@ -599,6 +730,80 @@ mod tests {
         let st = Style { bold: "B", dim: "D", reset: "R" };
         write_resolves_line(&mut buf, cmd_name, &st).expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    /// Every stage of a plan is rendered with its run-as tag and its own
+    /// resolved binary — the structural fix for the vacuous single
+    /// `/usr/bin/bash` resolves line. A `System` stage is flagged opaque.
+    #[test]
+    fn plan_stages_render_per_leaf_privilege_and_resolves() {
+        use crate::protocol::{Plan, Request, RunAs, Shell, ValidatedRequest};
+
+        let plan = Plan::Seq {
+            steps: vec![
+                Plan::RunAs {
+                    who: RunAs::Root,
+                    body: Box::new(Plan::Run { argv: vec!["true".into()] }),
+                },
+                Plan::RunAs {
+                    who: RunAs::User { name: "alice".into() },
+                    body: Box::new(Plan::Run { argv: vec!["true".into()] }),
+                },
+                Plan::System {
+                    shell: Shell::Sh,
+                    script: "echo hi".into(),
+                },
+            ],
+        };
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            false,
+            false,
+        ))
+        .expect("valid");
+
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "" };
+        write_plan_stages(&mut buf, &views, &st).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+
+        assert!(out.contains("[ROOT]"), "missing root tag: {out}");
+        assert!(out.contains("[as alice]"), "missing user tag: {out}");
+        assert!(
+            out.contains("opaque — resolves only the shell"),
+            "System stage must be flagged opaque: {out}"
+        );
+        // The two `true` stages each get their own resolved line.
+        assert_eq!(out.matches("Resolves:").count(), 2, "one resolves per non-opaque stage: {out}");
+    }
+
+    /// A simple single unprivileged command keeps the classic one-line
+    /// `Resolves:` form (no numbered stage block).
+    #[test]
+    fn single_plain_command_uses_compact_resolves() {
+        use crate::protocol::{Plan, Request, ValidatedRequest};
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            Plan::Run { argv: vec!["true".into()] },
+            std::collections::HashMap::new(),
+            String::new(),
+            false,
+            false,
+        ))
+        .expect("valid");
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "" };
+        write_plan_stages(&mut buf, &views, &st).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+        assert!(out.starts_with("Resolves:"), "compact form expected: {out}");
+        assert!(!out.contains("1. "), "no numbered block for a single plain stage: {out}");
     }
 
     #[test]
