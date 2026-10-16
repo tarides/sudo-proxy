@@ -179,6 +179,42 @@ in-daemon plan executor (fork/exec + pipes + redir + setuid + sequencing),
 bounded, and it removes the shell from the privileged path. Captured follow-up,
 not active work.
 
+It also subsumes the `no-opaque-blob` guard (see the interim item below):
+once the daemon resolves and renders every stage, "opaque blob" stops being a
+denylisted string pattern and becomes the general case "a stage I cannot
+resolve." The plan executor flags any such stage (`opaque — resolves only the
+shell`) and a policy mode rejects it — making `no-opaque-blob` a special case of
+daemon-side *reject-unresolvable-stages*, enforced structurally and for every
+client rather than by regex in one user's hook.
+
+## Move the `no-opaque-blob` floor into the daemon (interim, ahead of the plan model)
+
+**Why.** `no-opaque-blob` is currently a Claude Code PreToolUse hook (matcher
+`mcp__sudo-proxy__execute`) living in one user's `~/.claude/hooks/`. It blocks
+`echo … | base64 -d | bash`-style payloads an approver cannot review. But it sits
+on the *untrusted* end of the airlock: it protects only that one client, only
+that one machine, and only the MCP path — another MCP client, a fresh install
+without the hook, or a direct socket caller all bypass it. sudo-proxy's trusted
+components are the daemon and the human at the TTY, so a reviewability *guarantee*
+can only be enforced daemon-side; a client hook can't provide it.
+
+**Interim fix** (small, lands before the full structured-plan work). Have the
+daemon detect the obvious opaque shape in an incoming `argv`/`pipeline` — a
+decode step (`base64 -d`, `xxd -r`, `openssl enc -d`, …) piped into an
+interpreter (`bash`/`sh`/`python`/`perl`/`eval`) — and either hard-reject it or
+mark it loudly at the approval prompt. This holds the floor for *all* clients and
+the direct-socket path, not just this user's hook. Keep the hook as an optional
+outer layer: it gives the agent a faster pre-round-trip rejection and is the
+natural home for stricter-than-baseline, site-specific policy.
+
+**Residual / handoff.** This interim check is still a denylist — a hostile client
+can obfuscate around any pattern. It is a stopgap, not the answer: the sound,
+allowlist-shaped enforcement is *reject-unresolvable-stages* in the structured
+plan model above, which this item should be folded into once that lands. The
+daemon failing open must never be the difference between safe and unsafe; the
+hook failing open (misconfig, different client) likewise must not — the daemon is
+the backstop. Captured follow-up, not active work.
+
 ---
 
 ## Rung 6 — seL4-style end-to-end refinement (aspirational)
