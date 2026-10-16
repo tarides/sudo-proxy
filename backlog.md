@@ -74,6 +74,41 @@ rmcp's `transport-io` feature and serves over stdio, so the vulnerable code is
 not compiled in. If an HTTP/streamable-http transport is ever added, drop the
 ignore and require a patched rmcp instead. Captured follow-up, not active work.
 
+## Submit the plugin to the claude-plugins-community directory
+
+Optional discoverability step, added after the plugin packaging landed (PR #53).
+The decentralized flow (`/plugin marketplace add tarides/sudo-proxy` →
+`/plugin install sudo-proxy@tarides`) already works with no registration; this
+would additionally list sudo-proxy in Anthropic's curated community marketplace.
+Submit via the in-app form (claude.ai admin directory, or the Console plugin
+submission page). Expect **extra security scrutiny** because the plugin executes
+`sudo` — link the threat model, security audit, and the "no auto-approve"
+non-features from the plugin README so reviewers find them. Captured follow-up,
+not active work.
+
+## Emit audit records to the system logger (syslog / journald)
+
+Today there is **no durable record of requests**. The daemon writes audit lines
+only to its own stderr — the per-command line (`[id] [priv] [client] <pipeline>`,
+`server.rs:640`) solely under `--verbose`, and the unconditional `[unattended]`
+line (`server.rs:687`) only while a session `a`-grant is active. Both land in the
+terminal window's scrollback and vanish with it; nothing is written to disk, the
+systemd journal, or any audit facility. For a tool whose whole purpose is gating
+privileged execution, the absence of a tamper-evident, admin-controlled trail is
+a gap.
+
+**The fix.** Emit a structured audit record for every request — approved, denied,
+timed out, unattended — to the **system logger** (`syslog`/journald via `libc`
+`openlog`/`syslog`, or the `systemd` journal API under a feature flag), not a
+self-managed file. System-level is the point: records then inherit the host's
+journald rotation, retention, access control, and optional forwarding/sealing,
+and survive the terminal window closing. Record at least: request id, host,
+privileged flag, client version, the pipeline (argv), decision, and the
+decision path (prompted / unattended-grant / pkexec). Keep stderr lines as-is
+for live visibility. Decide the default (log-to-syslog on by default vs opt-in
+via a flag) and document the privacy/retention implications in the README.
+Captured follow-up, not active work.
+
 ---
 
 ## Rung 6 — seL4-style end-to-end refinement (aspirational)
