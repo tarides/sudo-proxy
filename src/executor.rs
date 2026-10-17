@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -10,7 +11,9 @@ use std::time::{Duration, Instant};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::protocol::{Request, Response, StageResult, ValidatedRequest};
+use crate::protocol::{
+    Plan, RedirTarget, Response, RunAs, Shell, StageResult, Stream, ValidatedRequest, WriteMode,
+};
 
 /// Hard cap on captured stdout/stderr per stream. A privileged
 /// `cat /dev/zero` would otherwise OOM the daemon. When the cap is
@@ -133,172 +136,697 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Execute a pipeline via pkexec (local/graphical mode).
-/// For multi-stage pipelines, wraps in `pkexec sh -c 'cmd1 | cmd2 | ...'`.
+/// Top-level escalation mechanism chosen by the dispatcher. It governs how an
+/// *escalated* leaf (one running as root or a named user) is spawned; a leaf
+/// running as the daemon's own user is always spawned directly, regardless of
+/// mode. `Direct` means the request is unprivileged — every leaf runs as the
+/// daemon user.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EscalationMode {
+    Direct,
+    Sudo,
+    Pkexec,
+}
+
+/// Execute a request's plan under pkexec (local/graphical mode).
 pub fn exec_pkexec(
     req: &ValidatedRequest,
     env: &HashMap<String, String>,
     tty_lock: &Mutex<()>,
 ) -> Response {
-    if req.pipeline.len() == 1 {
-        return exec_pkexec_stage(&req.pipeline[0], env, &req.id, tty_lock);
-    }
-
-    // Multi-stage: wrap entire pipeline in sh -c via pkexec
-    let shell_cmd = pipeline_to_shell(&req.pipeline, env);
-    let mut cmd = Command::new("pkexec");
-    cmd.args(["sh", "-c", &shell_cmd]);
-    cmd.current_dir("/");
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.env_clear();
-    // pkexec needs DISPLAY/WAYLAND_DISPLAY to show its dialog
-    if let Ok(v) = std::env::var("DISPLAY") {
-        cmd.env("DISPLAY", v);
-    }
-    if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
-        cmd.env("WAYLAND_DISPLAY", v);
-    }
-    if let Ok(v) = std::env::var("XAUTHORITY") {
-        cmd.env("XAUTHORITY", v);
-    }
-
-    run_single_command(&mut cmd, &req.id, exec_timeout(), Some(tty_lock))
+    run_plan(req, env, EscalationMode::Pkexec, Some(tty_lock))
 }
 
-/// Execute a pipeline via sudo (remote/TUI mode).
+/// Execute a request's plan under sudo (remote/TUI mode).
 pub fn exec_sudo(
     req: &ValidatedRequest,
     env: &HashMap<String, String>,
     tty_lock: &Mutex<()>,
 ) -> Response {
-    if req.pipeline.len() == 1 {
-        return exec_sudo_stage(&req.pipeline[0], env, &req.id, tty_lock);
-    }
-
-    exec_pipeline(req.inner(), env, EscalationMode::Sudo)
+    run_plan(req, env, EscalationMode::Sudo, Some(tty_lock))
 }
 
-/// Execute a pipeline directly as the current user (no privilege escalation).
+/// Execute a request's plan directly as the current user (no escalation).
 pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Response {
-    if req.pipeline.len() == 1 {
-        return exec_direct_stage(&req.pipeline[0], env, &req.id, req.forward_agent);
-    }
-
-    exec_pipeline(req.inner(), env, EscalationMode::Direct)
+    run_plan(req, env, EscalationMode::Direct, None)
 }
 
 // ---------------------------------------------------------------------------
-// Single-stage helpers
+// Structured plan execution
+//
+// A request's command is canonically a `Plan` tree (`Request::exec_plan`; a
+// flat `pipeline` desugars into one). Execution is two passes:
+//
+//   Pass A (`compile_plan`): a pure walk that threads an immutable context
+//   (env / cwd / run-as / accepted-exit-codes / stdio) down the tree. Context
+//   modifiers (setenv, chdir, run-as, with-accepted-exit-codes) and stdio
+//   modifiers (redirect, with-stdin-from) are transparent — they adjust the
+//   context and recurse. Only `run`/`system` leaves produce a process. The
+//   output is a flat `Vec<LeafPlan>` (one per leaf, in pre-order = prompt
+//   order) plus a `SeqNode` sequencing tree that references leaves by index.
+//
+//   Pass B (`run_seq`): interprets the sequencing tree — a `Pipe` group spawns
+//   its leaves connected by pipes, a `Seq` (the `seq` op) runs children in order and
+//   stops at the first non-accepted exit, a `Leaf` runs one process. Every
+//   process shares one plan-wide deadline.
+//
+// No shell is ever assembled on the privileged path: each leaf fork/execs its
+// literal argv, and an escalated leaf is `sudo [-u user] -- argv` / `pkexec
+// [--user user] argv`, never `sudo sh -c`. The one exception is an explicit
+// `System` leaf — the named, prompt-flagged opaque escape hatch.
 // ---------------------------------------------------------------------------
 
-fn exec_pkexec_stage(
-    argv: &[String],
-    env: &HashMap<String, String>,
-    id: &str,
-    tty_lock: &Mutex<()>,
-) -> Response {
-    let mut cmd = Command::new("pkexec");
-    for arg in argv {
-        cmd.arg(arg);
-    }
-    cmd.current_dir("/");
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.env_clear();
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    if let Ok(v) = std::env::var("DISPLAY") {
-        cmd.env("DISPLAY", v);
-    }
-    if let Ok(v) = std::env::var("WAYLAND_DISPLAY") {
-        cmd.env("WAYLAND_DISPLAY", v);
-    }
-    if let Ok(v) = std::env::var("XAUTHORITY") {
-        cmd.env("XAUTHORITY", v);
-    }
-
-    run_single_command(&mut cmd, id, exec_timeout(), Some(tty_lock))
+/// Per-leaf run-as context, resolved from the ambient `privileged` flag and any
+/// enclosing `RunAs` node.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LeafRunAs {
+    /// Run as the daemon's own user (no escalation).
+    Direct,
+    Root,
+    User(String),
 }
 
-fn exec_sudo_stage(
-    argv: &[String],
-    env: &HashMap<String, String>,
-    id: &str,
-    tty_lock: &Mutex<()>,
-) -> Response {
-    let mut cmd = Command::new("sudo");
-    for (k, v) in env {
-        cmd.arg(format!("{k}={v}"));
+impl LeafRunAs {
+    fn is_escalated(&self) -> bool {
+        !matches!(self, LeafRunAs::Direct)
     }
-    for arg in argv {
-        cmd.arg(arg);
-    }
-    cmd.current_dir("/");
-    // Close stdin so a privileged child like `sudo cat` doesn't inherit
-    // the daemon's controlling tty and block reading from it. sudo opens
-    // /dev/tty itself for password entry, so this doesn't break auth.
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-
-    run_single_command(&mut cmd, id, exec_timeout(), Some(tty_lock))
 }
 
-fn exec_direct_stage(
-    argv: &[String],
-    env: &HashMap<String, String>,
-    id: &str,
+#[derive(Clone, Debug)]
+enum InSpec {
+    Null,
+    File(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum OutSpec {
+    /// Captured into the response (piped + drained).
+    Capture,
+    File { path: String, append: bool },
+    DevNull,
+}
+
+#[derive(Clone, Debug)]
+enum ErrSpec {
+    Capture,
+    File { path: String, append: bool },
+    DevNull,
+    /// `2>&1` — stderr follows wherever stdout points.
+    ToStdout,
+}
+
+/// One fully-resolved process: the leaf of a compiled plan.
+struct LeafPlan {
+    argv: Vec<String>,
+    env: HashMap<String, String>,
+    cwd: String,
+    runas: LeafRunAs,
+    stdin: InSpec,
+    stdout: OutSpec,
+    stderr: ErrSpec,
+    /// True for a `System` (shell escape-hatch) leaf. The prompt flags it as
+    /// opaque; `resolved_bin` resolves only the shell.
+    opaque: bool,
+    /// `argv[0]` resolved through PATH + canonicalize, for the prompt. Computed
+    /// in Pass A so the prompt and the executor can never disagree.
+    resolved_bin: Option<PathBuf>,
+    /// Exit codes treated as success (besides 0) for seq short-circuiting.
+    accepted: Vec<i32>,
     forward_agent: bool,
-) -> Response {
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
-    cmd.current_dir("/");
-    cmd.stdin(Stdio::null());
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::piped());
-    cmd.env_clear();
-    for (k, v) in env {
-        cmd.env(k, v);
+    /// Pre-order index == position in the response's `stages` and in the
+    /// prompt render.
+    stage_id: usize,
+}
+
+/// The sequencing skeleton over the leaf list.
+enum SeqNode {
+    Leaf(usize),
+    Pipe(Vec<usize>),
+    Seq(Vec<SeqNode>),
+    Alt(Vec<SeqNode>),
+}
+
+/// Immutable compile context threaded down the tree.
+#[derive(Clone)]
+struct Ctx {
+    env: HashMap<String, String>,
+    cwd: String,
+    runas: LeafRunAs,
+    accepted: Vec<i32>,
+    forward_agent: bool,
+    stdin: InSpec,
+    stdout: OutSpec,
+    stderr: ErrSpec,
+}
+
+impl Ctx {
+    fn stdio_is_default(&self) -> bool {
+        matches!(self.stdin, InSpec::Null)
+            && self.stdout == OutSpec::Capture
+            && matches!(self.stderr, ErrSpec::Capture)
     }
-    if forward_agent {
-        if let Some(sock) = crate::server::forwarded_agent_socket() {
-            cmd.env("SSH_AUTH_SOCK", &sock);
+}
+
+struct Compiled {
+    leaves: Vec<LeafPlan>,
+    seq: SeqNode,
+}
+
+/// Compile `req.exec_plan()` into leaves + a sequencing tree. Ambient run-as is
+/// seeded from `req.privileged` (root when set, else the daemon user); `RunAs`
+/// nodes override it per-subtree.
+fn compile_plan(req: &ValidatedRequest, env: &HashMap<String, String>) -> Result<Compiled, String> {
+    let ambient = if req.privileged {
+        LeafRunAs::Root
+    } else {
+        LeafRunAs::Direct
+    };
+    let ctx = Ctx {
+        env: env.clone(),
+        cwd: "/".to_string(),
+        runas: ambient,
+        accepted: Vec::new(),
+        forward_agent: req.forward_agent,
+        stdin: InSpec::Null,
+        stdout: OutSpec::Capture,
+        stderr: ErrSpec::Capture,
+    };
+    let plan = req.exec_plan();
+    let mut leaves = Vec::new();
+    let seq = compile_seq(&plan, ctx, &mut leaves)?;
+    Ok(Compiled { leaves, seq })
+}
+
+/// Apply a `Setenv` node to a context, holding it to the same env allowlist as
+/// the request-level env so it cannot become a bypass.
+fn apply_setenv(ctx: &mut Ctx, key: &str, value: &str) -> Result<(), String> {
+    if key == "SSH_AUTH_SOCK" {
+        return Err("SSH_AUTH_SOCK cannot be set by setenv; use forward_agent instead".to_string());
+    }
+    if !is_env_allowed(key) {
+        return Err(format!("environment variable not allowed: {key}"));
+    }
+    ctx.env.insert(key.to_string(), value.to_string());
+    Ok(())
+}
+
+/// Apply a `RunAs` node to a context.
+fn apply_runas(ctx: &mut Ctx, who: &RunAs) {
+    ctx.runas = match who {
+        RunAs::Root => LeafRunAs::Root,
+        RunAs::User { name } => LeafRunAs::User(name.clone()),
+    };
+    // An escalated subtree never carries the daemon's agent socket.
+    ctx.forward_agent = false;
+}
+
+/// Compile a plan that may expand to a sequence / pipe / single process. The
+/// *context* modifiers (setenv / chdir / run-as / with-accepted-exit-codes) are
+/// transparent and may wrap a composite — they adjust the context and recurse.
+/// The *stdio* modifiers (redirect / with-stdin-from) target a single process,
+/// so they (and bare leaves) are delegated to `compile_leaf`.
+fn compile_seq(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<SeqNode, String> {
+    match plan {
+        Plan::Setenv { key, value, body } => {
+            apply_setenv(&mut ctx, key, value)?;
+            compile_seq(body, ctx, leaves)
+        }
+        Plan::Chdir { dir, body } => {
+            ctx.cwd = dir.clone();
+            compile_seq(body, ctx, leaves)
+        }
+        Plan::RunAs { who, body } => {
+            apply_runas(&mut ctx, who);
+            compile_seq(body, ctx, leaves)
+        }
+        Plan::WithAcceptedExitCodes { codes, body } => {
+            ctx.accepted = codes.clone();
+            compile_seq(body, ctx, leaves)
+        }
+        Plan::Seq { steps } => {
+            if !ctx.stdio_is_default() {
+                return Err("redirect / stdin-from of a seq is not supported".to_string());
+            }
+            let mut nodes = Vec::with_capacity(steps.len());
+            for s in steps {
+                nodes.push(compile_seq(s, ctx.clone(), leaves)?);
+            }
+            Ok(SeqNode::Seq(nodes))
+        }
+        Plan::Alt { steps } => {
+            if !ctx.stdio_is_default() {
+                return Err("redirect / stdin-from of an alt is not supported".to_string());
+            }
+            let mut nodes = Vec::with_capacity(steps.len());
+            for s in steps {
+                nodes.push(compile_seq(s, ctx.clone(), leaves)?);
+            }
+            Ok(SeqNode::Alt(nodes))
+        }
+        Plan::Pipe { stages } => {
+            if !ctx.stdio_is_default() {
+                return Err("redirect / stdin-from of a pipe is not supported".to_string());
+            }
+            compile_pipe(stages, ctx, leaves)
+        }
+        // Redirect / with-stdin-from / bare leaves — a single process.
+        _ => Ok(SeqNode::Leaf(compile_leaf(plan, ctx, leaves)?)),
+    }
+}
+
+/// Compile a plan that must resolve to exactly one process (a pipe stage, or a
+/// redirect / stdin-from body). Peels the transparent context and stdio
+/// modifiers and errors on a composite.
+fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<usize, String> {
+    match plan {
+        Plan::Run { argv } => Ok(push_leaf(argv.clone(), false, ctx, leaves)),
+        Plan::System { shell, script } => {
+            let bin = match shell {
+                Shell::Sh => "sh",
+                Shell::Bash => "bash",
+            };
+            let argv = vec![bin.to_string(), "-c".to_string(), script.clone()];
+            Ok(push_leaf(argv, true, ctx, leaves))
+        }
+        Plan::Setenv { key, value, body } => {
+            apply_setenv(&mut ctx, key, value)?;
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::Chdir { dir, body } => {
+            ctx.cwd = dir.clone();
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::RunAs { who, body } => {
+            apply_runas(&mut ctx, who);
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::WithAcceptedExitCodes { codes, body } => {
+            ctx.accepted = codes.clone();
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::Redirect { stream, target, body } => {
+            apply_redirect(&mut ctx, *stream, target)?;
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::WithStdinFrom { path, body } => {
+            ctx.stdin = InSpec::File(path.clone());
+            compile_leaf(body, ctx, leaves)
+        }
+        Plan::Seq { .. } | Plan::Alt { .. } | Plan::Pipe { .. } => {
+            Err("expected a single command here, found a composite plan".to_string())
         }
     }
-
-    run_single_command(&mut cmd, id, exec_timeout(), None)
 }
 
-/// Spawn `cmd`, drain stdout/stderr concurrently with caps, and wait for
-/// the child up to `timeout`. Kill the child on cap-hit or timeout so it
-/// doesn't outlive the daemon.
-/// `fg_lock` is `Some` for privileged children (sudo, pkexec) that need
-/// the controlling tty's foreground pgrp so sudo's `/dev/tty` password
-/// prompt doesn't EIO; the mutex serializes the swap against prompts
-/// (held by `server::handle_connection`). `None` for unprivileged
-/// children: they run with `stdin=null` and piped stdio, never read
-/// /dev/tty, and would needlessly serialize with daemon prompts.
-fn run_single_command(
-    cmd: &mut Command,
-    id: &str,
-    timeout: Duration,
-    fg_lock: Option<&Mutex<()>>,
+fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result<(), String> {
+    let out = |t: &RedirTarget| -> OutSpec {
+        match t {
+            RedirTarget::File { path, mode } => OutSpec::File {
+                path: path.clone(),
+                append: *mode == WriteMode::Append,
+            },
+            RedirTarget::DevNull => OutSpec::DevNull,
+        }
+    };
+    let err = |t: &RedirTarget| -> ErrSpec {
+        match t {
+            RedirTarget::File { path, mode } => ErrSpec::File {
+                path: path.clone(),
+                append: *mode == WriteMode::Append,
+            },
+            RedirTarget::DevNull => ErrSpec::DevNull,
+        }
+    };
+    match stream {
+        Stream::Stdout => ctx.stdout = out(target),
+        Stream::Stderr => ctx.stderr = err(target),
+        Stream::Both => {
+            // `&>file` / `with-outputs-to`: stdout to the target, stderr dup'd
+            // onto it (2>&1). This keeps a single file handle, not two racing
+            // truncating opens.
+            ctx.stdout = out(target);
+            ctx.stderr = ErrSpec::ToStdout;
+        }
+    }
+    Ok(())
+}
+
+/// Append a resolved leaf to the list and return its index (= stage id).
+fn push_leaf(argv: Vec<String>, opaque: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
+    let resolved_bin = argv.first().and_then(|name| which(name));
+    let stage_id = leaves.len();
+    leaves.push(LeafPlan {
+        argv,
+        env: ctx.env,
+        cwd: ctx.cwd,
+        runas: ctx.runas,
+        stdin: ctx.stdin,
+        stdout: ctx.stdout,
+        stderr: ctx.stderr,
+        opaque,
+        resolved_bin,
+        accepted: ctx.accepted,
+        forward_agent: ctx.forward_agent,
+        stage_id,
+    });
+    stage_id
+}
+
+fn compile_pipe(stages: &[Plan], ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<SeqNode, String> {
+    let n = stages.len();
+    let mut indices = Vec::with_capacity(n);
+    for (pos, stage) in stages.iter().enumerate() {
+        let idx = compile_leaf(stage, ctx.clone(), leaves)?;
+        // The pipe owns the stdout of every non-final stage, so it must not be
+        // independently redirected. (Put the redirect on the final stage.)
+        let is_last = pos == n - 1;
+        if !is_last && leaves[idx].stdout != OutSpec::Capture {
+            return Err(
+                "cannot redirect stdout of a non-final pipe stage; redirect the last stage"
+                    .to_string(),
+            );
+        }
+        indices.push(idx);
+    }
+    Ok(SeqNode::Pipe(indices))
+}
+
+// ---------------------------------------------------------------------------
+// Display projection — what the approval prompt renders
+// ---------------------------------------------------------------------------
+
+/// A leaf's run-as context for display at the prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LeafPrivilege {
+    /// Runs as the daemon's own user — no tag.
+    Direct,
+    /// `[ROOT]`.
+    Root,
+    /// `[as <name>]`.
+    User(String),
+}
+
+/// A displayable projection of one compiled plan leaf. The approval prompt
+/// renders these, so the human sees exactly the stages — resolved binary,
+/// run-as, redirections — that the executor will run. Built by the same
+/// `compile_plan` walk the executor uses, so the two cannot diverge.
+pub struct LeafView {
+    pub stage_id: usize,
+    pub argv: Vec<String>,
+    pub privilege: LeafPrivilege,
+    /// `argv[0]` resolved through PATH (for `System`, the shell).
+    pub resolved_bin: Option<PathBuf>,
+    /// True for a `System` escape-hatch leaf — rendered "opaque".
+    pub opaque: bool,
+    /// Human-readable redirection summary, e.g. `> /tmp/out`, `< in`, `2>&1`.
+    pub redirects: String,
+    /// True if this leaf is a stage of a pipe.
+    pub in_pipe: bool,
+}
+
+/// Compile a request's plan purely for display at the approval prompt. Uses an
+/// empty env (the environment affects execution, not the rendered structure),
+/// so the only errors are structural — the same ones the executor would hit.
+pub fn plan_display(req: &ValidatedRequest) -> Result<Vec<LeafView>, String> {
+    let empty = HashMap::new();
+    let compiled = compile_plan(req, &empty)?;
+    let mut in_pipe = vec![false; compiled.leaves.len()];
+    mark_pipe_members(&compiled.seq, &mut in_pipe);
+    Ok(compiled
+        .leaves
+        .iter()
+        .map(|l| LeafView {
+            stage_id: l.stage_id,
+            argv: l.argv.clone(),
+            privilege: match &l.runas {
+                LeafRunAs::Direct => LeafPrivilege::Direct,
+                LeafRunAs::Root => LeafPrivilege::Root,
+                LeafRunAs::User(n) => LeafPrivilege::User(n.clone()),
+            },
+            resolved_bin: l.resolved_bin.clone(),
+            opaque: l.opaque,
+            redirects: summarize_redirects(l),
+            in_pipe: in_pipe[l.stage_id],
+        })
+        .collect())
+}
+
+fn mark_pipe_members(node: &SeqNode, in_pipe: &mut [bool]) {
+    match node {
+        SeqNode::Leaf(_) => {}
+        SeqNode::Pipe(indices) => {
+            for &i in indices {
+                in_pipe[i] = true;
+            }
+        }
+        SeqNode::Seq(nodes) | SeqNode::Alt(nodes) => {
+            for n in nodes {
+                mark_pipe_members(n, in_pipe);
+            }
+        }
+    }
+}
+
+fn summarize_redirects(l: &LeafPlan) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let InSpec::File(p) = &l.stdin {
+        parts.push(format!("< {p}"));
+    }
+    match &l.stdout {
+        OutSpec::Capture => {}
+        OutSpec::DevNull => parts.push("> /dev/null".to_string()),
+        OutSpec::File { path, append } => {
+            parts.push(format!("{} {path}", if *append { ">>" } else { ">" }))
+        }
+    }
+    match &l.stderr {
+        ErrSpec::Capture => {}
+        ErrSpec::DevNull => parts.push("2> /dev/null".to_string()),
+        ErrSpec::ToStdout => parts.push("2>&1".to_string()),
+        ErrSpec::File { path, append } => {
+            parts.push(format!("2{} {path}", if *append { ">>" } else { ">" }))
+        }
+    }
+    parts.join(" ")
+}
+
+// ---------------------------------------------------------------------------
+// Pass B — run the compiled plan
+// ---------------------------------------------------------------------------
+
+/// Raw result of one leaf process. `ran == false` is a leaf that a short-
+/// circuited seq never reached.
+#[derive(Clone)]
+struct Outcome {
+    ran: bool,
+    exit: i32,
+    stdout: Vec<u8>,
+    stdout_truncated: bool,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+    /// Whether this leaf's stdout contributes to the aggregate response stdout
+    /// (true iff its stdout was `Capture`).
+    captured_stdout: bool,
+}
+
+impl Default for Outcome {
+    fn default() -> Self {
+        Outcome {
+            ran: false,
+            exit: -1,
+            stdout: Vec::new(),
+            stdout_truncated: false,
+            stderr: Vec::new(),
+            stderr_truncated: false,
+            captured_stdout: false,
+        }
+    }
+}
+
+/// Status a sequencing node reports up to its parent `seq`: enough to decide
+/// whether to short-circuit the sequence.
+struct StepStatus {
+    timed_out: bool,
+    spawn_error: Option<String>,
+    success: bool,
+}
+
+fn run_plan(
+    req: &ValidatedRequest,
+    env: &HashMap<String, String>,
+    mode: EscalationMode,
+    tty_lock: Option<&Mutex<()>>,
 ) -> Response {
+    let compiled = match compile_plan(req, env) {
+        Ok(c) => c,
+        Err(e) => return Response::error(&req.id, &format!("invalid plan: {e}")),
+    };
+    let total = exec_timeout();
+    let deadline = Instant::now() + total;
+    let mut outcomes = vec![Outcome::default(); compiled.leaves.len()];
+
+    let status = run_seq(
+        &compiled.seq,
+        &compiled.leaves,
+        mode,
+        deadline,
+        tty_lock,
+        &mut outcomes,
+    );
+
+    if status.timed_out {
+        return Response::error(
+            &req.id,
+            &format!("command timed out after {}s", total.as_secs()),
+        );
+    }
+    if let Some(msg) = status.spawn_error {
+        return Response::error(&req.id, &msg);
+    }
+
+    // Build the positional stage list (one per leaf, pre-order) and the
+    // aggregate stdout (every captured leaf, in order).
+    let mut stages = Vec::with_capacity(outcomes.len());
+    let mut stdout = Vec::new();
+    let mut stdout_truncated = false;
+    for o in &outcomes {
+        stages.push(StageResult {
+            exit_code: o.exit,
+            stderr: B64.encode(&o.stderr),
+            stderr_truncated: o.stderr_truncated,
+        });
+        if o.captured_stdout && o.ran {
+            stdout.extend_from_slice(&o.stdout);
+            stdout_truncated |= o.stdout_truncated;
+        }
+    }
+    Response::ok_with_truncation(&req.id, stages, &stdout, stdout_truncated)
+}
+
+fn run_seq(
+    node: &SeqNode,
+    leaves: &[LeafPlan],
+    mode: EscalationMode,
+    deadline: Instant,
+    tty_lock: Option<&Mutex<()>>,
+    outcomes: &mut [Outcome],
+) -> StepStatus {
+    match node {
+        SeqNode::Leaf(idx) => {
+            let leaf = &leaves[*idx];
+            // A single escalated leaf gets the controlling-tty foreground so a
+            // sudo/pkexec password prompt doesn't EIO. Unprivileged leaves run
+            // with stdin=null and never touch /dev/tty.
+            let fg = if leaf.runas.is_escalated() {
+                tty_lock
+            } else {
+                None
+            };
+            let o = run_one(leaf, mode, deadline, fg);
+            let st = StepStatus {
+                timed_out: o.timed_out,
+                spawn_error: o.spawn_error.clone(),
+                success: !o.timed_out
+                    && o.spawn_error.is_none()
+                    && exit_accepted(o.exit, &leaf.accepted),
+            };
+            outcomes[*idx] = o.into_outcome(leaf.stdout == OutSpec::Capture);
+            st
+        }
+        SeqNode::Pipe(indices) => run_pipe(indices, leaves, mode, deadline, outcomes),
+        SeqNode::Seq(nodes) => {
+            let mut last = StepStatus {
+                timed_out: false,
+                spawn_error: None,
+                success: true,
+            };
+            for n in nodes {
+                let st = run_seq(n, leaves, mode, deadline, tty_lock, outcomes);
+                let stop = st.timed_out || st.spawn_error.is_some() || !st.success;
+                last = st;
+                if stop {
+                    break;
+                }
+            }
+            last
+        }
+        SeqNode::Alt(nodes) => {
+            // Dual of `Seq`: run steps until one succeeds. Keep going past a
+            // non-accepted failure; stop on the first success (and on a timeout
+            // or spawn error, which abort the whole alt just as they do a seq).
+            let mut last = StepStatus {
+                timed_out: false,
+                spawn_error: None,
+                success: false,
+            };
+            for n in nodes {
+                let st = run_seq(n, leaves, mode, deadline, tty_lock, outcomes);
+                let stop = st.timed_out || st.spawn_error.is_some() || st.success;
+                last = st;
+                if stop {
+                    break;
+                }
+            }
+            last
+        }
+    }
+}
+
+fn exit_accepted(exit: i32, accepted: &[i32]) -> bool {
+    exit == 0 || accepted.contains(&exit)
+}
+
+/// One process: its raw run result plus the control-flow flags the sequencer
+/// needs. Distinct from `Outcome` so the per-leaf accepted-code and stdout-
+/// capture decisions stay with the caller.
+struct RunResult {
+    exit: i32,
+    stdout: Vec<u8>,
+    stdout_truncated: bool,
+    stderr: Vec<u8>,
+    stderr_truncated: bool,
+    timed_out: bool,
+    spawn_error: Option<String>,
+}
+
+impl RunResult {
+    fn into_outcome(self, captured_stdout: bool) -> Outcome {
+        Outcome {
+            ran: self.spawn_error.is_none(),
+            exit: self.exit,
+            stdout: self.stdout,
+            stdout_truncated: self.stdout_truncated,
+            stderr: self.stderr,
+            stderr_truncated: self.stderr_truncated,
+            captured_stdout,
+        }
+    }
+}
+
+/// Spawn and wait for a single leaf process against the shared deadline.
+fn run_one(
+    leaf: &LeafPlan,
+    mode: EscalationMode,
+    deadline: Instant,
+    fg_lock: Option<&Mutex<()>>,
+) -> RunResult {
+    let mut cmd = build_command(leaf, mode);
+    let stdout_file = match set_stdout(&mut cmd, &leaf.stdout) {
+        Ok(f) => f,
+        Err(e) => return spawn_err(format!("failed to open stdout redirect: {e}")),
+    };
+    if let Err(e) = set_stdin(&mut cmd, &leaf.stdin) {
+        return spawn_err(format!("failed to open stdin redirect: {e}"));
+    }
+    if let Err(e) = set_stderr(&mut cmd, &leaf.stderr, stdout_file.as_ref()) {
+        return spawn_err(format!("failed to open stderr redirect: {e}"));
+    }
+
     unsafe {
         cmd.pre_exec(|| {
-            // New process group so kill_group can SIGKILL the entire
-            // group on timeout — otherwise a wrapper like `sh -c '... &'`
-            // would leave grandchild processes orphaned to PID 1, holding
-            // stdio pipes open and blocking our drain threads forever.
-            //
-            // setpgid (vs the historical setsid) keeps the child in the
-            // *same session* as the daemon, so the controlling terminal
-            // stays reachable. Under setsid the child had no controlling
-            // tty, and `sudo` could not open /dev/tty for its password
+            // New process group so kill_group SIGKILLs the whole group on
+            // timeout. setpgid (not setsid) keeps the child in the daemon's
+            // session so an escalated child can reach /dev/tty for a password
             // prompt — see issue #19.
             libc::setpgid(0, 0);
             libc::umask(0o077);
@@ -308,130 +836,269 @@ fn run_single_command(
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return Response::error(id, &format!("failed to execute command: {e}")),
+        Err(e) => return spawn_err(format!("failed to execute command: {e}")),
     };
 
     let cpid = child.id() as libc::pid_t;
-    // Race-safe duplicate of the child's setpgid: closes the window
-    // between fork() and the child reaching its pre_exec hook. A second
-    // setpgid with the same args is harmless; if the child has already
-    // exec'd, EACCES is returned and we fall back to whatever the child
-    // managed to set itself.
     unsafe {
         let _ = libc::setpgid(cpid, cpid);
     }
-
-    // Hand the controlling terminal's foreground to the child so reads
-    // from /dev/tty (e.g. sudo's password prompt) don't raise SIGTTIN
-    // and stop the child. Best-effort — no-op when the daemon has no
-    // controlling tty (headless / detached run). Skipped for
-    // unprivileged children: they don't read /dev/tty and the swap's
-    // shared `tty_lock` would needlessly queue them behind prompts.
     let _fg = fg_lock.and_then(|m| ForegroundGuard::take(cpid, m));
 
-    // Drain stdout/stderr in threads so a child filling its stderr pipe
-    // doesn't block our read of stdout (or vice versa).
     let stdout_handle = child.stdout.take().map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
     let stderr_handle = child.stderr.take().map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
 
-    let deadline = Instant::now() + timeout;
     let exit = match wait_with_deadline(&mut child, deadline) {
-        Ok(s) => s,
+        Ok(s) => s.code().unwrap_or(-1),
         Err(WaitError::Timeout) => {
             kill_group(&mut child);
-            return Response::error(
-                id,
-                &format!("command timed out after {}s", timeout.as_secs()),
-            );
+            drain_join(stdout_handle);
+            drain_join(stderr_handle);
+            return RunResult {
+                exit: -1,
+                stdout: Vec::new(),
+                stdout_truncated: false,
+                stderr: Vec::new(),
+                stderr_truncated: false,
+                timed_out: true,
+                spawn_error: None,
+            };
         }
         Err(WaitError::Io(e)) => {
             kill_group(&mut child);
-            return Response::error(id, &format!("wait failed: {e}"));
+            drain_join(stdout_handle);
+            drain_join(stderr_handle);
+            return spawn_err(format!("wait failed: {e}"));
         }
     };
 
-    let (stdout_bytes, stdout_truncated) = stdout_handle
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-    let (stderr_bytes, stderr_truncated) = stderr_handle
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
+    let (stdout_bytes, stdout_truncated) = drain_join(stdout_handle);
+    let (stderr_bytes, stderr_truncated) = drain_join(stderr_handle);
 
-    let stage = StageResult {
-        exit_code: exit.code().unwrap_or(-1),
-        stderr: B64.encode(&stderr_bytes),
+    RunResult {
+        exit,
+        stdout: stdout_bytes,
+        stdout_truncated,
+        stderr: stderr_bytes,
         stderr_truncated,
-    };
-    Response::ok_with_truncation(id, vec![stage], &stdout_bytes, stdout_truncated)
+        timed_out: false,
+        spawn_error: None,
+    }
 }
 
-// ---------------------------------------------------------------------------
-// Pipeline execution
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy)]
-enum EscalationMode {
-    Sudo,
-    Direct,
+fn drain_join(h: Option<std::thread::JoinHandle<(Vec<u8>, bool)>>) -> (Vec<u8>, bool) {
+    h.map(|h| h.join().unwrap_or_default()).unwrap_or_default()
 }
 
-/// Execute a multi-stage pipeline by spawning N children connected by pipes.
-fn exec_pipeline(
-    req: &Request,
-    env: &HashMap<String, String>,
+fn spawn_err(msg: String) -> RunResult {
+    RunResult {
+        exit: -1,
+        stdout: Vec::new(),
+        stdout_truncated: false,
+        stderr: Vec::new(),
+        stderr_truncated: false,
+        timed_out: false,
+        spawn_error: Some(msg),
+    }
+}
+
+/// Build the `Command` for a leaf: program + args + env + cwd, with escalation
+/// applied. Stdio is configured by the caller (so pipe wiring can override it).
+/// No shell is ever introduced here — an escalated leaf is `sudo … -- argv` or
+/// `pkexec … argv`.
+fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Command {
+    match &leaf.runas {
+        LeafRunAs::Direct => {
+            let mut c = Command::new(&leaf.argv[0]);
+            c.args(&leaf.argv[1..]);
+            c.env_clear();
+            for (k, v) in &leaf.env {
+                c.env(k, v);
+            }
+            if leaf.forward_agent {
+                if let Some(sock) = crate::server::forwarded_agent_socket() {
+                    c.env("SSH_AUTH_SOCK", &sock);
+                }
+            }
+            c.current_dir(&leaf.cwd);
+            c
+        }
+        escalated => match mode {
+            EscalationMode::Pkexec => {
+                let mut c = Command::new("pkexec");
+                if let LeafRunAs::User(name) = escalated {
+                    c.arg("--user");
+                    c.arg(name);
+                }
+                for a in &leaf.argv {
+                    c.arg(a);
+                }
+                c.env_clear();
+                for (k, v) in &leaf.env {
+                    c.env(k, v);
+                }
+                // pkexec needs these to show its dialog.
+                for key in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY"] {
+                    if let Ok(v) = std::env::var(key) {
+                        c.env(key, v);
+                    }
+                }
+                c.current_dir(&leaf.cwd);
+                c
+            }
+            _ => {
+                // sudo: `sudo [-u user] K=V … -- argv`. The `--` stops option
+                // parsing so an argv[0] beginning with `-` is treated as the
+                // command, not a sudo flag.
+                let mut c = Command::new("sudo");
+                if let LeafRunAs::User(name) = escalated {
+                    c.arg("-u");
+                    c.arg(name);
+                }
+                for (k, v) in &leaf.env {
+                    c.arg(format!("{k}={v}"));
+                }
+                c.arg("--");
+                for a in &leaf.argv {
+                    c.arg(a);
+                }
+                c.current_dir(&leaf.cwd);
+                c
+            }
+        },
+    }
+}
+
+fn open_out(path: &str, append: bool) -> std::io::Result<File> {
+    let mut o = OpenOptions::new();
+    o.write(true).create(true);
+    if append {
+        o.append(true);
+    } else {
+        o.truncate(true);
+    }
+    o.open(path)
+}
+
+/// Configure a command's stdout. Returns the opened file handle when the target
+/// is a file, so a sibling `2>&1` stderr can be dup'd onto the same handle.
+fn set_stdout(cmd: &mut Command, spec: &OutSpec) -> std::io::Result<Option<File>> {
+    match spec {
+        OutSpec::Capture => {
+            cmd.stdout(Stdio::piped());
+            Ok(None)
+        }
+        OutSpec::DevNull => {
+            cmd.stdout(Stdio::null());
+            Ok(None)
+        }
+        OutSpec::File { path, append } => {
+            let f = open_out(path, *append)?;
+            cmd.stdout(f.try_clone()?);
+            Ok(Some(f))
+        }
+    }
+}
+
+fn set_stdin(cmd: &mut Command, spec: &InSpec) -> std::io::Result<()> {
+    match spec {
+        InSpec::Null => {
+            cmd.stdin(Stdio::null());
+        }
+        InSpec::File(path) => {
+            cmd.stdin(File::open(path)?);
+        }
+    }
+    Ok(())
+}
+
+fn set_stderr(cmd: &mut Command, spec: &ErrSpec, stdout_file: Option<&File>) -> std::io::Result<()> {
+    match spec {
+        ErrSpec::Capture => {
+            cmd.stderr(Stdio::piped());
+        }
+        ErrSpec::DevNull => {
+            cmd.stderr(Stdio::null());
+        }
+        ErrSpec::File { path, append } => {
+            cmd.stderr(open_out(path, *append)?);
+        }
+        ErrSpec::ToStdout => match stdout_file {
+            // `2>&1` only ever pairs with a `Both` redirect, whose target is a
+            // file or /dev/null — so stdout is a real fd we can dup, never a
+            // capture pipe.
+            Some(f) => {
+                cmd.stderr(f.try_clone()?);
+            }
+            None => {
+                cmd.stderr(Stdio::null());
+            }
+        },
+    }
+    Ok(())
+}
+
+/// Run a pipe group: spawn every stage connected by pipes, then collect all
+/// their results against the shared deadline. Pipe stages use `setsid` (not
+/// `setpgid`): a pipelined child cannot interactively prompt for a password, so
+/// it must be detached from the controlling tty and rely on cached credentials
+/// — matching the pre-plan pipeline behaviour.
+///
+/// Consequence: a privileged stage *inside a pipe* cannot prompt, and because it
+/// has no controlling tty, a credential cached on the daemon's tty may not be
+/// visible to it (depends on the host's sudoers `timestamp_type`: `global` yes,
+/// the common `tty` default likely not). Such a stage needs NOPASSWD or an
+/// already-`global`-cached credential, or it fails fast with "no tty present".
+/// Prefer a single privileged stage, which runs with `setpgid` + the foreground
+/// guard and *can* prompt. See the "Partial-`seq` retry hazard and the
+/// sudo-credential-in-pipe caveat" item in backlog.md.
+fn run_pipe(
+    indices: &[usize],
+    leaves: &[LeafPlan],
     mode: EscalationMode,
-) -> Response {
-    let n = req.pipeline.len();
-    assert!(n >= 2);
-
+    deadline: Instant,
+    outcomes: &mut [Outcome],
+) -> StepStatus {
+    let n = indices.len();
     let mut children: Vec<Child> = Vec::with_capacity(n);
     let mut prev_stdout: Option<Stdio> = None;
 
-    for (i, argv) in req.pipeline.iter().enumerate() {
-        let is_first = i == 0;
-        let is_last = i == n - 1;
+    for (pos, &li) in indices.iter().enumerate() {
+        let leaf = &leaves[li];
+        let is_first = pos == 0;
+        let is_last = pos == n - 1;
 
-        let mut cmd = match mode {
-            EscalationMode::Sudo => {
-                let mut c = Command::new("sudo");
-                for (k, v) in env {
-                    c.arg(format!("{k}={v}"));
-                }
-                for arg in argv {
-                    c.arg(arg);
-                }
-                c
-            }
-            EscalationMode::Direct => {
-                let mut c = Command::new(&argv[0]);
-                c.args(&argv[1..]);
-                c.env_clear();
-                for (k, v) in env {
-                    c.env(k, v);
-                }
-                if req.forward_agent {
-                    if let Some(sock) = crate::server::forwarded_agent_socket() {
-                        c.env("SSH_AUTH_SOCK", &sock);
-                    }
-                }
-                c
-            }
-        };
+        let mut cmd = build_command(leaf, mode);
 
-        cmd.current_dir("/");
-
-        // stdin: first stage gets null, later stages get the previous
-        // stage's stdout. sudo's password prompt reads from /dev/tty, not
-        // stdin, so closing stdin doesn't break authentication and prevents
-        // the first stage from blocking on the daemon's tty.
+        // stdin: first stage honours its own spec; later stages read the
+        // previous stage's stdout.
         if let Some(prev) = prev_stdout.take() {
             cmd.stdin(prev);
         } else if is_first {
-            cmd.stdin(Stdio::null());
+            if let Err(e) = set_stdin(&mut cmd, &leaf.stdin) {
+                let _guard = KillOnDrop::new(children);
+                return spawn_error_status(format!("failed to open stdin redirect: {e}"));
+            }
         }
 
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
+        // stdout: non-final stages feed the next stage; the final stage honours
+        // its own spec.
+        let stdout_file = if is_last {
+            match set_stdout(&mut cmd, &leaf.stdout) {
+                Ok(f) => f,
+                Err(e) => {
+                    let _guard = KillOnDrop::new(children);
+                    return spawn_error_status(format!("failed to open stdout redirect: {e}"));
+                }
+            }
+        } else {
+            cmd.stdout(Stdio::piped());
+            None
+        };
+        if let Err(e) = set_stderr(&mut cmd, &leaf.stderr, stdout_file.as_ref()) {
+            let _guard = KillOnDrop::new(children);
+            return spawn_error_status(format!("failed to open stderr redirect: {e}"));
+        }
 
         unsafe {
             cmd.pre_exec(|| {
@@ -451,37 +1118,41 @@ fn exec_pipeline(
                 children.push(child);
             }
             Err(e) => {
-                // Already-spawned children get killed via KillOnDrop below.
                 let _guard = KillOnDrop::new(children);
-                return Response::error(
-                    &req.id,
-                    &format!("failed to spawn pipeline stage {i}: {e}"),
-                );
+                return spawn_error_status(format!("failed to spawn pipeline stage {pos}: {e}"));
             }
         }
     }
 
-    collect_pipeline_results(&req.id, children, n, exec_timeout())
+    collect_group(indices, leaves, children, deadline, outcomes)
 }
 
-/// Collect results from all pipeline children with caps and a timeout.
-/// On panic in any of the spawned drain/wait threads, the KillOnDrop guard
-/// terminates every still-running child so we never orphan a process to PID 1.
-fn collect_pipeline_results(
-    id: &str,
+fn spawn_error_status(msg: String) -> StepStatus {
+    StepStatus {
+        timed_out: false,
+        spawn_error: Some(msg),
+        success: false,
+    }
+}
+
+/// Collect results from a spawned pipe group, writing each stage's outcome into
+/// `outcomes[stage_id]`. The group's controlling exit is the final stage's.
+fn collect_group(
+    indices: &[usize],
+    leaves: &[LeafPlan],
     children: Vec<Child>,
-    n: usize,
-    timeout: Duration,
-) -> Response {
+    deadline: Instant,
+    outcomes: &mut [Outcome],
+) -> StepStatus {
+    let n = children.len();
     let mut guard = KillOnDrop::new(children);
 
-    // Spawn one drainer per stderr (capped). The last stage's stdout is
-    // also drained in a thread for symmetry — we don't want to block on
-    // it while a sibling stage's stderr fills up.
+    // One stderr drainer per child (only where stderr was piped), plus the
+    // final stage's stdout drainer (only where it was captured).
     let mut stderr_handles = Vec::with_capacity(n);
     for child in guard.children.iter_mut() {
-        let stderr_pipe = child.stderr.take();
-        stderr_handles.push(stderr_pipe.map(|s| spawn_drain(s, MAX_OUTPUT_BYTES)));
+        let pipe = child.stderr.take();
+        stderr_handles.push(pipe.map(|s| spawn_drain(s, MAX_OUTPUT_BYTES)));
     }
     let stdout_handle = guard
         .children
@@ -489,11 +1160,7 @@ fn collect_pipeline_results(
         .and_then(|c| c.stdout.take())
         .map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
 
-    let deadline = Instant::now() + timeout;
     let mut exits: Vec<Option<ExitStatus>> = vec![None; n];
-
-    // Wait for each child up to the deadline. We poll in parallel by
-    // round-robining try_wait across all not-yet-exited children.
     loop {
         let mut all_done = true;
         for (i, child) in guard.children.iter_mut().enumerate() {
@@ -506,17 +1173,12 @@ fn collect_pipeline_results(
                 Err(_) => exits[i] = Some(synthetic_failure_status()),
             }
         }
-        if all_done {
-            break;
-        }
-        if Instant::now() >= deadline {
+        if all_done || Instant::now() >= deadline {
             break;
         }
         std::thread::sleep(WAIT_POLL_INTERVAL);
     }
 
-    // Anything not exited gets killed; record a synthetic failure status
-    // for those stages.
     let mut timed_out = false;
     for (i, child) in guard.children.iter_mut().enumerate() {
         if exits[i].is_none() {
@@ -526,31 +1188,37 @@ fn collect_pipeline_results(
         }
     }
 
-    let (stdout_bytes, stdout_truncated) = stdout_handle
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-
-    // All children have exited (or been killed); join their stderr drainers.
-    let mut stages = Vec::with_capacity(n);
+    let (stdout_bytes, stdout_truncated) = drain_join(stdout_handle);
+    let last_pos = n - 1;
     for (i, h) in stderr_handles.into_iter().enumerate() {
-        let (bytes, truncated) = h.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-        stages.push(StageResult {
-            exit_code: exits[i].as_ref().and_then(|s| s.code()).unwrap_or(-1),
-            stderr: B64.encode(&bytes),
+        let (bytes, truncated) = drain_join(h);
+        let li = indices[i];
+        let exit = exits[i].as_ref().and_then(|s| s.code()).unwrap_or(-1);
+        let captured = leaves[li].stdout == OutSpec::Capture;
+        outcomes[li] = Outcome {
+            ran: true,
+            exit,
+            stdout: if i == last_pos {
+                stdout_bytes.clone()
+            } else {
+                Vec::new()
+            },
+            stdout_truncated: i == last_pos && stdout_truncated,
+            stderr: bytes,
             stderr_truncated: truncated,
-        });
+            captured_stdout: captured && i == last_pos,
+        };
     }
 
-    // All children have been waited on already; defuse the guard.
     let _ = guard.into_inner();
 
-    if timed_out {
-        return Response::error(
-            id,
-            &format!("pipeline timed out after {}s", timeout.as_secs()),
-        );
+    let controlling_exit = outcomes[indices[last_pos]].exit;
+    let last_accepted = &leaves[indices[last_pos]].accepted;
+    StepStatus {
+        timed_out,
+        spawn_error: None,
+        success: !timed_out && exit_accepted(controlling_exit, last_accepted),
     }
-    Response::ok_with_truncation(id, stages, &stdout_bytes, stdout_truncated)
 }
 
 // ---------------------------------------------------------------------------
@@ -740,47 +1408,9 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Build a shell command string for a pipeline with env vars (used by pkexec multi-stage).
-fn pipeline_to_shell(pipeline: &[Vec<String>], env: &HashMap<String, String>) -> String {
-    let env_prefix: String = env
-        .iter()
-        .map(|(k, v)| format!("{}={}", shell_escape(k), shell_escape(v)))
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    let stages: Vec<String> = pipeline
-        .iter()
-        .map(|argv| {
-            argv.iter()
-                .map(|a| shell_escape(a))
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .collect();
-
-    if env_prefix.is_empty() {
-        stages.join(" | ")
-    } else {
-        format!("{} {}", env_prefix, stages.join(" | "))
-    }
-}
-
-fn shell_escape(s: &str) -> String {
-    if s.is_empty() {
-        return "''".to_string();
-    }
-    if s.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | '=' | ':' | ','))
-    {
-        return s.to_string();
-    }
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::prop::Rng;
     use std::time::Duration;
 
     fn pid_alive(pid: u32) -> bool {
@@ -858,82 +1488,231 @@ mod tests {
         }
     }
 
-    // === Property: shell_escape round-trips through /bin/sh ==============
-    //
-    // Spec clause (Rung 2; proof obligation for Rung 5 Creusot on the output
-    // grammar of shell_escape): for every input `s`, the word produced by
-    // `shell_escape(s)`, evaluated by /bin/sh as a single argument, reproduces
-    // `s` byte-for-byte. A break here is a pipeline command-injection —
-    // multi-stage requests are assembled into `sh -c '<stage> | <stage>'`.
+    // The shell_escape round-trip property that lived here is retired with the
+    // code it guarded: this increment removes all shell-string assembly from
+    // the execution path (`pipeline_to_shell` / `pkexec sh -c` are gone). The
+    // only surviving shell is an explicit `System` leaf, whose script is passed
+    // verbatim as a single `-c` argument — nothing is quoted or re-assembled,
+    // so there is no escaping grammar left to verify. The structural
+    // "no shell on the privileged path" invariant is verified directly below.
 
-    /// The predicate. Returns `Ok(())` on a faithful round-trip, or
-    /// `Err((escaped, sh_output))` describing the divergence. This is the
-    /// clause a Rung 5 contract will discharge; here it is checked by feeding
-    /// it generated inputs (`prop_*`) and known vectors.
-    fn shell_escape_roundtrips_through_sh(s: &str) -> Result<(), (String, Vec<u8>)> {
-        use std::process::Command;
-        let esc = shell_escape(s);
-        // printf %s makes the escaped word the sole argument. Empty PATH:
-        // even if escaping failed, an injected word resolves to nothing
-        // executable rather than a real command.
-        let out = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("printf %s {esc}"))
-            .env("PATH", "")
-            .current_dir("/")
-            .output()
-            .expect("spawn /bin/sh");
-        if out.stdout == s.as_bytes() {
-            Ok(())
-        } else {
-            Err((esc, out.stdout))
+    // === Structured-plan properties (Rung 2) ============================
+    use crate::prop::Rng;
+    use crate::protocol::{Plan, Request, RunAs, Shell, ValidatedRequest};
+
+    fn mk_plan_req(plan: Plan, privileged: bool) -> ValidatedRequest {
+        let req = Request::new_plan(
+            String::new(),
+            "test".into(),
+            plan,
+            HashMap::new(),
+            String::new(),
+            privileged,
+            false,
+        );
+        ValidatedRequest::validate(req).expect("valid plan request")
+    }
+
+    /// Count `Run`/`System` leaves in a plan tree (the pre-order leaf set the
+    /// executor and the prompt both enumerate).
+    fn count_leaves(p: &Plan) -> usize {
+        match p {
+            Plan::Run { .. } | Plan::System { .. } => 1,
+            Plan::Seq { steps } | Plan::Alt { steps } => steps.iter().map(count_leaves).sum(),
+            Plan::Pipe { stages } => stages.iter().map(count_leaves).sum(),
+            Plan::Redirect { body, .. }
+            | Plan::WithStdinFrom { body, .. }
+            | Plan::Setenv { body, .. }
+            | Plan::Chdir { body, .. }
+            | Plan::RunAs { body, .. }
+            | Plan::WithAcceptedExitCodes { body, .. } => count_leaves(body),
         }
     }
 
-    // Driver: sweep the predicate over a metacharacter-heavy alphabet (quotes,
-    // $, backticks, backslash, |, ;, &, spaces, parens, braces) — exactly the
-    // bytes that could break out of single-quoting. Newline/NUL/control chars
-    // are excluded because validate_request rejects them before shell_escape
-    // is ever reached, so they are not part of this function's input domain.
-    #[test]
-    fn prop_shell_escape_roundtrips_through_sh() {
-        let alphabet: &[u8] = b"abc01 '\"\\$`|;&()<>*?{}[]=:,.-_/!#%^~@ \t";
-        let mut rng = Rng::new(0x9E3779B97F4A7C15);
-        let mut failures = Vec::new();
+    fn word(rng: &mut Rng) -> String {
+        // Benign, allowlist-safe characters only; never empty.
+        let alpha = b"abcdef0123456789";
+        let s = rng.string(alpha, 5);
+        if s.is_empty() {
+            "x".into()
+        } else {
+            s
+        }
+    }
 
-        for _ in 0..5000 {
-            let s = rng.string(alphabet, 23);
-            if let Err((esc, output)) = shell_escape_roundtrips_through_sh(&s) {
-                failures.push((s, esc, output));
+    /// A plan that always compiles to exactly one leaf: bare leaves plus the
+    /// single-process modifiers. Used for pipe stages and redirect bodies.
+    fn random_single(rng: &mut Rng, depth: usize) -> Plan {
+        if depth == 0 || rng.below(2) == 0 {
+            if rng.below(6) == 0 {
+                return Plan::System {
+                    shell: if rng.below(2) == 0 { Shell::Sh } else { Shell::Bash },
+                    script: word(rng),
+                };
+            }
+            let n = 1 + rng.below(3);
+            return Plan::Run {
+                argv: (0..n).map(|_| word(rng)).collect(),
+            };
+        }
+        match rng.below(4) {
+            0 => Plan::Setenv {
+                key: "LANG".into(),
+                value: word(rng),
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+            1 => Plan::Chdir {
+                dir: "/".into(),
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+            2 => Plan::RunAs {
+                who: if rng.below(2) == 0 {
+                    RunAs::Root
+                } else {
+                    RunAs::User { name: word(rng) }
+                },
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+            _ => Plan::WithAcceptedExitCodes {
+                codes: vec![rng.below(5) as i32],
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+        }
+    }
+
+    /// A random, always-compilable plan tree. Composite modifiers wrap
+    /// composites; stdio modifiers and pipe stages wrap single processes.
+    fn random_plan(rng: &mut Rng, depth: usize) -> Plan {
+        if depth == 0 || rng.below(3) == 0 {
+            return random_single(rng, depth);
+        }
+        match rng.below(7) {
+            0 => Plan::Seq {
+                steps: (0..1 + rng.below(3))
+                    .map(|_| random_plan(rng, depth - 1))
+                    .collect(),
+            },
+            6 => Plan::Alt {
+                steps: (0..1 + rng.below(3))
+                    .map(|_| random_plan(rng, depth - 1))
+                    .collect(),
+            },
+            1 => Plan::Pipe {
+                stages: (0..2 + rng.below(2))
+                    .map(|_| random_single(rng, depth - 1))
+                    .collect(),
+            },
+            2 => Plan::Setenv {
+                key: "TZ".into(),
+                value: word(rng),
+                body: Box::new(random_plan(rng, depth - 1)),
+            },
+            3 => Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(random_plan(rng, depth - 1)),
+            },
+            4 => Plan::Redirect {
+                stream: Stream::Stdout,
+                target: RedirTarget::DevNull,
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+            _ => Plan::WithStdinFrom {
+                path: "/dev/null".into(),
+                body: Box::new(random_single(rng, depth - 1)),
+            },
+        }
+    }
+
+    // Spec clause (Rung 2): `plan_display` is total and panic-free over random
+    // plan trees, and its leaf set is **structurally identical** to the tree's
+    // pre-order `Run`/`System` leaves — same count, contiguous stage ids
+    // `0..n`, same `argv[0]` in order. This is the regression that would have
+    // caught the `bash -lc` hollowing: the rendered stages are exactly the
+    // stages the executor runs.
+    #[test]
+    fn prop_plan_display_is_structurally_identical_to_the_tree() {
+        let mut rng = Rng::new(0xD1CE_5EED_u64);
+        for _ in 0..4000 {
+            let plan = random_plan(&mut rng, 5);
+            let privileged = rng.below(2) == 0;
+            let req = mk_plan_req(plan.clone(), privileged);
+
+            let views = plan_display(&req).expect("random plan must compile");
+            // Same number of stages as Run/System leaves.
+            assert_eq!(views.len(), count_leaves(&plan), "leaf count mismatch");
+            // Stage ids are exactly 0..n, in order.
+            for (i, v) in views.iter().enumerate() {
+                assert_eq!(v.stage_id, i, "stage ids must be contiguous 0..n");
+                assert!(!v.argv.is_empty(), "every stage has a command");
             }
         }
-        assert!(
-            failures.is_empty(),
-            "shell_escape round-trip failures (input, escaped, sh-output): {:?}",
-            &failures[..failures.len().min(5)]
-        );
     }
 
-    // Targeted regression vectors alongside the random sweep, checked through
-    // the same predicate.
+    // Spec clause (Rung 2): compiling a random plan for execution is total and
+    // panic-free, and produces exactly `count_leaves` planned processes.
     #[test]
-    fn shell_escape_known_injection_vectors_are_inert() {
-        let vectors = [
-            "'; touch /tmp/sudo_proxy_pwned; '",
-            "$(touch /tmp/sudo_proxy_pwned)",
-            "`touch /tmp/sudo_proxy_pwned`",
-            "a'b\"c\\d",
-            "'\''",
-            "",
-            "$IFS",
-            "x|y",
-        ];
-        for v in vectors {
-            assert!(
-                shell_escape_roundtrips_through_sh(v).is_ok(),
-                "shell_escape failed to neutralize {v:?} -> {:?}",
-                shell_escape(v)
-            );
+    fn prop_compile_plan_is_total() {
+        let mut rng = Rng::new(0x5EED_D1CE_u64);
+        for _ in 0..4000 {
+            let plan = random_plan(&mut rng, 5);
+            let privileged = rng.below(2) == 0;
+            let req = mk_plan_req(plan.clone(), privileged);
+            let compiled = compile_plan(&req, &HashMap::new()).expect("compiles");
+            assert_eq!(compiled.leaves.len(), count_leaves(&plan));
         }
+    }
+
+    // Spec clause (Rung 2): the no-shell-on-privileged-path invariant, checked
+    // structurally on the built `Command`. An escalated, non-opaque leaf is
+    // spawned as `sudo [-u user] -- <literal argv>` / `pkexec [--user u] argv`
+    // — the real binary is argv[0], and no `sh -c` / `bash -c` wrapper is ever
+    // introduced. The only shell is an explicit `System` leaf.
+    #[test]
+    fn escalated_leaf_is_literal_argv_never_a_shell_wrapper() {
+        let leaf = |runas: LeafRunAs| LeafPlan {
+            argv: vec!["sysctl".into(), "-w".into(), "vm.mmap_rnd_bits=28".into()],
+            env: HashMap::new(),
+            cwd: "/".into(),
+            runas,
+            stdin: InSpec::Null,
+            stdout: OutSpec::Capture,
+            stderr: ErrSpec::Capture,
+            opaque: false,
+            resolved_bin: None,
+            accepted: Vec::new(),
+            forward_agent: false,
+            stage_id: 0,
+        };
+
+        // Root under sudo: `sudo -- sysctl -w …`, no shell.
+        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Sudo);
+        assert_eq!(c.get_program().to_str().unwrap(), "sudo");
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--".to_string()), "sudo must use -- : {args:?}");
+        assert!(args.ends_with(&["sysctl".into(), "-w".into(), "vm.mmap_rnd_bits=28".into()]));
+        assert!(
+            !args.iter().any(|a| a == "-c"),
+            "no shell -c on the privileged path: {args:?}"
+        );
+
+        // Named user under sudo: `sudo -u alice -- …`.
+        let c = build_command(&leaf(LeafRunAs::User("alice".into())), EscalationMode::Sudo);
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(&args[0], "-u");
+        assert_eq!(&args[1], "alice");
+
+        // Pkexec root: `pkexec sysctl …` (no shell).
+        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec);
+        assert_eq!(c.get_program().to_str().unwrap(), "pkexec");
+
+        // Direct leaf: program IS the literal binary.
+        let c = build_command(&leaf(LeafRunAs::Direct), EscalationMode::Direct);
+        assert_eq!(c.get_program().to_str().unwrap(), "sysctl");
     }
 }

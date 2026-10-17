@@ -139,3 +139,36 @@ fn has_dangerous_chars_matches_spec_per_char() {
         || matches!(u, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069);
     assert_eq!(got, expected);
 }
+
+/// Proof: the structured-plan leaf check is panic-free and agrees with the
+/// per-char danger spec. A `Plan::Run` whose single argv element is one symbolic
+/// character validates iff that character is not dangerous — i.e. the recursive
+/// `Plan::validate_tree` applies exactly the same `has_dangerous_chars` gate to a
+/// plan leaf that the flat-pipeline path applies to an argv element. This is the
+/// Rung 3 discharge of the structured-plan leaf clause of the Rung 2
+/// `prop_plan_display_is_structurally_identical_to_the_tree` / validation
+/// predicates.
+///
+/// Scope mirrors `has_dangerous_chars_matches_spec_per_char`: one leaf, one
+/// character bounded below `0x2100` (every forbidden range lies ≤ `0x2069`), so
+/// the single-leaf result generalises — `validate_tree` is a fold applying that
+/// same per-char predicate to every string leaf. `unwind(6)` bounds the single
+/// ≤3-byte char decode plus the one-element argv loop.
+#[kani::proof]
+#[kani::unwind(6)]
+fn plan_run_leaf_matches_dangerous_char_spec() {
+    let c: char = kani::any();
+    kani::assume((c as u32) < 0x2100);
+
+    let mut buf = [0u8; 4];
+    let s: &str = c.encode_utf8(&mut buf);
+
+    let plan = crate::protocol::Plan::Run {
+        argv: vec![s.to_string()],
+    };
+    let mut nodes = 0usize;
+    let accepted = plan.validate_tree(0, &mut nodes).is_ok();
+
+    // A single non-dangerous char is accepted; a dangerous one is rejected.
+    assert_eq!(accepted, !crate::protocol::has_dangerous_chars(s));
+}

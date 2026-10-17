@@ -232,3 +232,120 @@ fn missing_privileged_field_defaults_to_privileged() {
     assert_eq!(s.prompter.call_count(), 1);
     assert_eq!(parsed["id"], "defprivd");
 }
+
+// === Structured plan, at the wire ======================================
+
+use sudo_proxy::protocol::{Plan, Request, RunAs};
+
+fn plan_req(id: &str, plan: Plan, privileged: bool) -> Request {
+    let mut req = Request::new_plan(
+        String::new(),
+        "test".into(),
+        plan,
+        Default::default(),
+        String::new(),
+        privileged,
+        false,
+    );
+    req.id = id.to_string();
+    req.time = iso_now();
+    req
+}
+
+/// A dangerous char anywhere in a plan leaf is rejected at the daemon, same as
+/// in a flat pipeline.
+#[test]
+fn plan_dangerous_leaf_rejected() {
+    let s = server();
+    let plan = Plan::Run {
+        argv: vec!["echo".into(), "x\u{202E}y".into()],
+    };
+    let resp = s.send(&plan_req("v-plan-bidi", plan, false));
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("forbidden"));
+}
+
+/// A request may not carry both a `pipeline` and a `plan`.
+#[test]
+fn plan_and_pipeline_both_set_rejected() {
+    let s = server();
+    let mut req = plan_req(
+        "v-both",
+        Plan::Run { argv: vec!["true".into()] },
+        false,
+    );
+    req.pipeline = vec![vec!["true".into()]];
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("both pipeline and plan"));
+}
+
+/// An over-nested plan is rejected by the depth bound before any prompt.
+#[test]
+fn plan_overdeep_rejected() {
+    let s = server();
+    let mut p = Plan::Run { argv: vec!["true".into()] };
+    for _ in 0..40 {
+        p = Plan::RunAs {
+            who: RunAs::Root,
+            body: Box::new(p),
+        };
+    }
+    let resp = s.send(&plan_req("v-deep", p, true));
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("nesting exceeds"));
+}
+
+/// A structurally-invalid-but-char-clean plan (a redirect wrapping a seq) is
+/// rejected before prompting — the daemon never asks the human to approve
+/// something it cannot run.
+#[test]
+fn plan_structural_error_rejected_without_prompt() {
+    let s = server();
+    let plan = Plan::Redirect {
+        stream: sudo_proxy::protocol::Stream::Stdout,
+        target: sudo_proxy::protocol::RedirTarget::DevNull,
+        body: Box::new(Plan::Seq {
+            steps: vec![
+                Plan::Run { argv: vec!["true".into()] },
+                Plan::Run { argv: vec!["true".into()] },
+            ],
+        }),
+    };
+    let resp = s.send(&plan_req("v-struct", plan, false));
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("invalid plan"));
+    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+}
+
+/// A redirect wrapping an `alt` is structurally invalid (stdio modifiers target
+/// a single process, not a composite) and is rejected before prompting.
+#[test]
+fn plan_redirect_of_alt_rejected_without_prompt() {
+    let s = server();
+    let plan = Plan::Redirect {
+        stream: sudo_proxy::protocol::Stream::Stdout,
+        target: sudo_proxy::protocol::RedirTarget::DevNull,
+        body: Box::new(Plan::Alt {
+            steps: vec![
+                Plan::Run { argv: vec!["false".into()] },
+                Plan::Run { argv: vec!["true".into()] },
+            ],
+        }),
+    };
+    let resp = s.send(&plan_req("v-alt-struct", plan, false));
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("invalid plan"));
+    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+}
+
+/// A valid unprivileged plan runs end-to-end and returns Ok.
+#[test]
+fn plan_valid_runs() {
+    let s = server();
+    let plan = Plan::Run {
+        argv: vec!["true".into()],
+    };
+    let resp = s.send(&plan_req("v-plan-ok", plan, false));
+    assert_eq!(resp.status, Status::Ok, "got: {:?}", resp);
+}

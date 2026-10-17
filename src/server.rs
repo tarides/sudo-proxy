@@ -557,8 +557,9 @@ fn handle_connection(
     // Agent forwarding is unprivileged-only. A privileged child runs under
     // sudo (which env_resets) or pkexec (which we env_clear), so the socket
     // would be silently dropped — but we reject explicitly so a misconfigured
-    // caller fails loudly instead of being puzzled by a missing key.
-    if req.forward_agent && req.privileged {
+    // caller fails loudly instead of being puzzled by a missing key. A plan
+    // that escalates via a `run-as` node counts as privileged here too.
+    if req.forward_agent && req.effective_privileged() {
         let resp = Response::error(
             &req.id,
             "forward_agent is only allowed for unprivileged commands",
@@ -638,14 +639,30 @@ fn handle_connection(
         crate::protocol::Action::Exec => {}
     }
 
-    if verbose {
-        let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
-        let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
-        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
-        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, pipeline_display);
+    // Reject a structurally-invalid plan (e.g. redirect of a composite, a
+    // disallowed setenv) before prompting — the human should never be asked to
+    // approve something the executor cannot run. Cheap compile; the executor
+    // compiles again at run time.
+    if let Err(msg) = crate::executor::plan_display(&req) {
+        let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
+        let _ = write_response(&mut stream, &resp);
+        return;
     }
 
-    let resp = if req.privileged {
+    let effective_privileged = req.effective_privileged();
+
+    if verbose {
+        let priv_label = if effective_privileged {
+            "privileged"
+        } else {
+            "unprivileged"
+        };
+        let cmd_display = crate::tui::command_summary(&req);
+        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
+        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, cmd_display);
+    }
+
+    let resp = if effective_privileged {
         if pkexec_only && mode == Mode::Local {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
             exec_pkexec(&req, &env, &tty_lock)
@@ -687,7 +704,7 @@ fn handle_connection(
         eprintln!(
             "[{}] [unattended] {}",
             req.id,
-            crate::tui::pipeline_join(&req.pipeline)
+            crate::tui::command_summary(&req)
         );
         if let Ok(_g) = tty_lock.try_lock() {
             let _ = tui::display_banner(&req);
@@ -726,9 +743,9 @@ fn handle_connection(
     // unprivileged path uses try_lock so a still-pending privileged prompt
     // never delays an unprivileged command's completion. Skip pkexec
     // because pkexec has its own dialog.
-    let used_pkexec = req.privileged && pkexec_only && mode == Mode::Local;
+    let used_pkexec = effective_privileged && pkexec_only && mode == Mode::Local;
     if !used_pkexec {
-        if req.privileged {
+        if effective_privileged {
             let _g = lock_recover(&tty_lock);
             let _ = result_sink.display(&resp);
         } else if let Ok(_g) = tty_lock.try_lock() {
@@ -1189,6 +1206,7 @@ mod tests {
             session: rand_chars(rng, 6),
             time: crate::datetime::now_iso8601(),
             pipeline: std::mem::take(&mut pipeline),
+            plan: None,
             action: crate::protocol::Action::Exec,
             env,
             reason: rand_chars(rng, 8),

@@ -46,6 +46,51 @@ fn read_timeout_for(privileged: bool, timeout_ms: Option<u64>) -> Option<Duratio
         None => None,
     }
 }
+
+/// Build the outgoing `Request` from the tool parameters. Exactly one command
+/// form is accepted: a structured `plan`, or the legacy `pipeline` / `argv`.
+/// The daemon re-validates; this is only the client-side assembly.
+fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String> {
+    let has_plan = params.plan.is_some();
+    let has_pipeline = params.pipeline.as_ref().is_some_and(|p| !p.is_empty());
+    let has_argv = params.argv.as_ref().is_some_and(|a| !a.is_empty());
+    if has_plan && (has_pipeline || has_argv) {
+        return Err("Provide either `plan` or `argv`/`pipeline`, not both.".to_string());
+    }
+
+    let session = "sudo-proxy-mcp".to_string();
+    let env = params.env.clone().unwrap_or_default();
+    let reason = params.description.clone().unwrap_or_default();
+
+    if let Some(plan_json) = &params.plan {
+        let plan: protocol::Plan = serde_json::from_value(plan_json.clone())
+            .map_err(|e| format!("invalid plan: {e}"))?;
+        Ok(Request::new_plan(
+            host,
+            session,
+            plan,
+            env,
+            reason,
+            params.privileged,
+            params.forward_agent,
+        ))
+    } else {
+        let pipeline = match (&params.pipeline, &params.argv) {
+            (Some(p), _) if !p.is_empty() => p.clone(),
+            (_, Some(argv)) if !argv.is_empty() => vec![argv.clone()],
+            _ => return Err("Either `argv`, `pipeline`, or `plan` must be provided.".to_string()),
+        };
+        Ok(Request::new(
+            host,
+            session,
+            pipeline,
+            env,
+            reason,
+            params.privileged,
+            params.forward_agent,
+        ))
+    }
+}
 /// Total timeout for control requests (stop/ping). They never wait on a
 /// human, so anything beyond connect + one round-trip means trouble.
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
@@ -85,6 +130,33 @@ pub struct ExecuteParams {
     /// Pipeline of commands, each as an argument array. Use this for piped commands like [["ls", "/tmp"], ["wc", "-l"]].
     #[serde(default)]
     pub pipeline: Option<Vec<Vec<String>>>,
+
+    /// Structured execution plan (advanced; mutually exclusive with `argv`/`pipeline`).
+    /// A JSON object the daemon executes *directly* — no shell on the privileged
+    /// path — and renders stage by stage at the approval prompt, so every real
+    /// binary and per-stage privilege is visible. Prefer this over wrapping
+    /// commands in `bash -lc`. Nodes are `op`-tagged, e.g.
+    /// {"op":"run","argv":["sysctl","-w","vm.mmap_rnd_bits=28"]};
+    /// {"op":"pipe","stages":[{"op":"run",...},{"op":"run",...}]};
+    /// {"op":"seq","steps":[...]} (sequence, stops on first failure);
+    /// {"op":"alt","steps":[...]} (alternatives, runs until one succeeds, ≈ `||`);
+    /// {"op":"run-as","as":"root","do":{...}} or {"op":"run-as","as":"user","name":"alice","do":{...}};
+    /// {"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{...}};
+    /// {"op":"setenv","key":"LANG","value":"C","do":{...}}; {"op":"chdir","dir":"/srv","do":{...}};
+    /// {"op":"system","shell":"bash","script":"..."} (explicit opaque escape hatch).
+    /// Semantics to plan around: a `seq` runs its steps in order and STOPS at
+    /// the first failing step — the earlier steps have already run and their
+    /// effects are committed, so make early steps idempotent (or put the
+    /// riskiest / privileged step first) and do not blindly resubmit a failed
+    /// plan; the response's per-stage exit codes show which steps ran (a skipped
+    /// step reports exit -1) so you can resume from the failure instead. An
+    /// `alt` is the dual: it runs its steps in order but STOPS at the first
+    /// SUCCESS, continuing past failures — use it for `probe || fallback`. A
+    /// privileged stage placed INSIDE a `pipe` cannot prompt for a sudo
+    /// password; if it may need one, make it a standalone `run-as` stage rather
+    /// than a pipe stage (or ensure passwordless sudo on the host).
+    #[serde(default)]
+    pub plan: Option<serde_json::Value>,
 
     /// Target host (omit for localhost)
     #[serde(default)]
@@ -197,11 +269,23 @@ impl McpProxy {
         // self-target cannot route SSH-to-self around local policy.
         let target = normalize_host(params.host.as_deref());
 
+        // Build the request from exactly one command form: a structured `plan`,
+        // or the legacy `pipeline` / `argv`. The request is built before the
+        // policy checks below so they can key off the plan's *effective*
+        // privilege (a plan may escalate via a `run-as` node even with
+        // `privileged: false`).
+        let host_field = target.clone().unwrap_or_default();
+        let req = match build_request(&params, host_field) {
+            Ok(r) => r,
+            Err(e) => return Ok(error_result(e)),
+        };
+        let effective_privileged = req.effective_privileged();
+
         // Delegate-to-Bash (G7): an unprivileged command on the local machine
         // is refused — the agent's own Bash tool already applies the same
         // controls, so sudo-proxy running it would only be a second, weaker
         // gate. sudo-proxy is for privilege escalation and for remote hosts.
-        if target.is_none() && !params.privileged {
+        if target.is_none() && !effective_privileged {
             return Ok(error_result(
                 "Refusing to run an unprivileged command on the local machine. \
                  Use your Bash tool instead — it applies the same controls without a \
@@ -211,12 +295,17 @@ impl McpProxy {
             ));
         }
 
+        if params.forward_agent && effective_privileged {
+            return Ok(error_result(
+                "forward_agent is only allowed with privileged: false".to_string(),
+            ));
+        }
+
         let socket_path = socket_for_host(target.as_deref());
         // Issue #54: the wall-clock `timeout` is opt-in for unprivileged
-        // commands (see `read_timeout_for`). Computed here so the decision is
-        // visible next to routing; `params.privileged` is Copy so it stays
-        // readable after the request is built below.
-        let read_timeout = read_timeout_for(params.privileged, params.timeout);
+        // commands (see `read_timeout_for`). A plan that escalates is treated as
+        // privileged for the timeout default, too.
+        let read_timeout = read_timeout_for(effective_privileged, params.timeout);
 
         if !socket_path.exists() {
             return Ok(error_result(format!(
@@ -225,34 +314,7 @@ impl McpProxy {
             )));
         }
 
-        // Build pipeline from either `pipeline` or `argv` parameter
-        let pipeline = match (params.pipeline, params.argv) {
-            (Some(p), _) if !p.is_empty() => p,
-            (_, Some(argv)) if !argv.is_empty() => vec![argv],
-            _ => {
-                return Ok(error_result(
-                    "Either `argv` or `pipeline` must be provided.".to_string(),
-                ));
-            }
-        };
-
         let host_name = target.clone().unwrap_or_else(|| "localhost".into());
-
-        if params.forward_agent && params.privileged {
-            return Ok(error_result(
-                "forward_agent is only allowed with privileged: false".to_string(),
-            ));
-        }
-
-        let req = Request::new(
-            target.unwrap_or_default(),
-            "sudo-proxy-mcp".to_string(),
-            pipeline,
-            params.env.unwrap_or_default(),
-            params.description.unwrap_or_default(),
-            params.privileged,
-            params.forward_agent,
-        );
 
         let result = send_request(&socket_path, &req, read_timeout).await;
 
