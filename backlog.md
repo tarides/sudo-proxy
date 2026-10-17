@@ -164,8 +164,8 @@ on top:**
   requests `3a7cb1f9`, `e6aeb649`, `942cd83f`, `b1f6294a`). Dune actions are
   synchronous; `concurrent` still joins. We need launch-and-detach returning the
   pid as a structured field (not a shell `$!`).
-- **`||` fallback.** `progn` ≈ `;`/`&&` (stops on failure); there is no
-  run-on-failure branch for the log's `pgrep … || echo none`. Add it, or fold it
+- ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `seq`) runs steps until
+  one succeeds, covering `pgrep … || echo none`. A first-class op, not a fold
   into `with-accepted-exit-codes`.
 - **Append redirection (`>>`).** `with-stdout-to` truncates; no append mode.
 - **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Dune resolves

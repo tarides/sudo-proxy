@@ -318,6 +318,27 @@ fn plan_structural_error_rejected_without_prompt() {
     assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
 }
 
+/// A redirect wrapping an `alt` is structurally invalid (stdio modifiers target
+/// a single process, not a composite) and is rejected before prompting.
+#[test]
+fn plan_redirect_of_alt_rejected_without_prompt() {
+    let s = server();
+    let plan = Plan::Redirect {
+        stream: sudo_proxy::protocol::Stream::Stdout,
+        target: sudo_proxy::protocol::RedirTarget::DevNull,
+        body: Box::new(Plan::Alt {
+            steps: vec![
+                Plan::Run { argv: vec!["false".into()] },
+                Plan::Run { argv: vec!["true".into()] },
+            ],
+        }),
+    };
+    let resp = s.send(&plan_req("v-alt-struct", plan, false));
+    assert_eq!(resp.status, Status::Error);
+    assert!(resp.message.as_deref().unwrap().contains("invalid plan"));
+    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+}
+
 /// A valid unprivileged plan runs end-to-end and returns Ok.
 #[test]
 fn plan_valid_runs() {

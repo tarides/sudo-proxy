@@ -60,6 +60,11 @@ fn plan_to_string(plan: &Plan) -> String {
             .map(plan_to_string)
             .collect::<Vec<_>>()
             .join(" ; "),
+        Plan::Alt { steps } => steps
+            .iter()
+            .map(plan_to_string)
+            .collect::<Vec<_>>()
+            .join(" || "),
         Plan::Redirect { stream, target, body } => {
             let op = match (stream, target) {
                 (Stream::Stdout, RedirTarget::File { path, mode }) => {

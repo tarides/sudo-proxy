@@ -139,6 +139,7 @@ pub struct ExecuteParams {
     /// {"op":"run","argv":["sysctl","-w","vm.mmap_rnd_bits=28"]};
     /// {"op":"pipe","stages":[{"op":"run",...},{"op":"run",...}]};
     /// {"op":"seq","steps":[...]} (sequence, stops on first failure);
+    /// {"op":"alt","steps":[...]} (alternatives, runs until one succeeds, ≈ `||`);
     /// {"op":"run-as","as":"root","do":{...}} or {"op":"run-as","as":"user","name":"alice","do":{...}};
     /// {"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{...}};
     /// {"op":"setenv","key":"LANG","value":"C","do":{...}}; {"op":"chdir","dir":"/srv","do":{...}};
@@ -148,7 +149,9 @@ pub struct ExecuteParams {
     /// effects are committed, so make early steps idempotent (or put the
     /// riskiest / privileged step first) and do not blindly resubmit a failed
     /// plan; the response's per-stage exit codes show which steps ran (a skipped
-    /// step reports exit -1) so you can resume from the failure instead. A
+    /// step reports exit -1) so you can resume from the failure instead. An
+    /// `alt` is the dual: it runs its steps in order but STOPS at the first
+    /// SUCCESS, continuing past failures — use it for `probe || fallback`. A
     /// privileged stage placed INSIDE a `pipe` cannot prompt for a sudo
     /// password; if it may need one, make it a standalone `run-as` stage rather
     /// than a pipe stage (or ensure passwordless sudo on the host).

@@ -151,6 +151,83 @@ fn accepted_exit_codes_allow_seq_to_continue() {
     );
 }
 
+/// An alt stops at the first succeeding step; later alternatives do not run.
+#[test]
+fn alt_short_circuits_on_success() {
+    let plan = Plan::Alt {
+        steps: vec![
+            run(&["true"]),
+            run(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
+        ],
+    };
+    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    assert_eq!(resp.stages.len(), 2);
+    assert_eq!(resp.stages[0].exit_code, 0, "true exits 0");
+    assert_eq!(
+        resp.stages[1].exit_code, -1,
+        "second alternative must not run after a success"
+    );
+    assert!(
+        !decode_stdout(&resp).contains("SHOULD_NOT_RUN"),
+        "second alternative must not run after a success"
+    );
+}
+
+/// An alt runs the next alternative when a step fails.
+#[test]
+fn alt_runs_fallback_on_failure() {
+    let plan = Plan::Alt {
+        steps: vec![run(&["false"]), run(&["sh", "-c", "printf fallback"])],
+    };
+    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    assert_eq!(resp.stages.len(), 2);
+    assert_eq!(resp.stages[0].exit_code, 1, "false exits 1");
+    assert!(
+        decode_stdout(&resp).contains("fallback"),
+        "the fallback alternative should run after a failure: {resp:?}"
+    );
+}
+
+/// When every alternative fails, all of them run and the last failure stands.
+#[test]
+fn alt_all_fail_runs_every_step() {
+    let plan = Plan::Alt {
+        steps: vec![run(&["false"]), run(&["false"])],
+    };
+    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    assert_eq!(resp.stages.len(), 2);
+    assert_eq!(resp.stages[0].exit_code, 1);
+    assert_eq!(resp.stages[1].exit_code, 1, "both alternatives run");
+}
+
+/// `with-accepted-exit-codes` makes a non-zero exit count as success, so the
+/// alt stops there and does not run the fallback.
+#[test]
+fn accepted_exit_code_stops_alt() {
+    let plan = Plan::Alt {
+        steps: vec![
+            Plan::WithAcceptedExitCodes {
+                codes: vec![1],
+                body: Box::new(run(&["false"])),
+            },
+            run(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
+        ],
+    };
+    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    assert_eq!(
+        resp.stages[1].exit_code, -1,
+        "an accepted exit counts as success and stops the alt"
+    );
+    assert!(
+        !decode_stdout(&resp).contains("SHOULD_NOT_RUN"),
+        "an accepted exit should stop the alt: {resp:?}"
+    );
+}
+
 /// The explicit `System` escape hatch runs a shell script verbatim.
 #[test]
 fn system_escape_hatch_runs() {
