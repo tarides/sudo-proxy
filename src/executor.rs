@@ -263,6 +263,7 @@ enum SeqNode {
     Leaf(usize),
     Pipe(Vec<usize>),
     Seq(Vec<SeqNode>),
+    Alt(Vec<SeqNode>),
 }
 
 /// Immutable compile context threaded down the tree.
@@ -372,6 +373,16 @@ fn compile_seq(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<
             }
             Ok(SeqNode::Seq(nodes))
         }
+        Plan::Alt { steps } => {
+            if !ctx.stdio_is_default() {
+                return Err("redirect / stdin-from of an alt is not supported".to_string());
+            }
+            let mut nodes = Vec::with_capacity(steps.len());
+            for s in steps {
+                nodes.push(compile_seq(s, ctx.clone(), leaves)?);
+            }
+            Ok(SeqNode::Alt(nodes))
+        }
         Plan::Pipe { stages } => {
             if !ctx.stdio_is_default() {
                 return Err("redirect / stdin-from of a pipe is not supported".to_string());
@@ -421,7 +432,7 @@ fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result
             ctx.stdin = InSpec::File(path.clone());
             compile_leaf(body, ctx, leaves)
         }
-        Plan::Seq { .. } | Plan::Pipe { .. } => {
+        Plan::Seq { .. } | Plan::Alt { .. } | Plan::Pipe { .. } => {
             Err("expected a single command here, found a composite plan".to_string())
         }
     }
@@ -568,7 +579,7 @@ fn mark_pipe_members(node: &SeqNode, in_pipe: &mut [bool]) {
                 in_pipe[i] = true;
             }
         }
-        SeqNode::Seq(nodes) => {
+        SeqNode::Seq(nodes) | SeqNode::Alt(nodes) => {
             for n in nodes {
                 mark_pipe_members(n, in_pipe);
             }
@@ -732,6 +743,25 @@ fn run_seq(
             for n in nodes {
                 let st = run_seq(n, leaves, mode, deadline, tty_lock, outcomes);
                 let stop = st.timed_out || st.spawn_error.is_some() || !st.success;
+                last = st;
+                if stop {
+                    break;
+                }
+            }
+            last
+        }
+        SeqNode::Alt(nodes) => {
+            // Dual of `Seq`: run steps until one succeeds. Keep going past a
+            // non-accepted failure; stop on the first success (and on a timeout
+            // or spawn error, which abort the whole alt just as they do a seq).
+            let mut last = StepStatus {
+                timed_out: false,
+                spawn_error: None,
+                success: false,
+            };
+            for n in nodes {
+                let st = run_seq(n, leaves, mode, deadline, tty_lock, outcomes);
+                let stop = st.timed_out || st.spawn_error.is_some() || st.success;
                 last = st;
                 if stop {
                     break;
@@ -1488,7 +1518,7 @@ mod tests {
     fn count_leaves(p: &Plan) -> usize {
         match p {
             Plan::Run { .. } | Plan::System { .. } => 1,
-            Plan::Seq { steps } => steps.iter().map(count_leaves).sum(),
+            Plan::Seq { steps } | Plan::Alt { steps } => steps.iter().map(count_leaves).sum(),
             Plan::Pipe { stages } => stages.iter().map(count_leaves).sum(),
             Plan::Redirect { body, .. }
             | Plan::WithStdinFrom { body, .. }
@@ -1556,8 +1586,13 @@ mod tests {
         if depth == 0 || rng.below(3) == 0 {
             return random_single(rng, depth);
         }
-        match rng.below(6) {
+        match rng.below(7) {
             0 => Plan::Seq {
+                steps: (0..1 + rng.below(3))
+                    .map(|_| random_plan(rng, depth - 1))
+                    .collect(),
+            },
+            6 => Plan::Alt {
                 steps: (0..1 + rng.below(3))
                     .map(|_| random_plan(rng, depth - 1))
                     .collect(),

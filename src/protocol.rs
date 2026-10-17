@@ -119,6 +119,9 @@ pub enum Plan {
     Run { argv: Vec<String> },
     /// Sequence; stop at the first non-accepted exit (Dune `progn`, ≈ `&&`/`;`).
     Seq { steps: Vec<Plan> },
+    /// Alternatives; run steps until one succeeds, continuing past a non-accepted
+    /// exit and stopping on the first success (≈ `||`). Dual of `seq`.
+    Alt { steps: Vec<Plan> },
     /// Connect stdout→stdin left-to-right (Dune `pipe-stdout`, = `|`).
     Pipe { stages: Vec<Plan> },
     /// Redirect a stream of the inner plan to a file or /dev/null.
@@ -208,6 +211,14 @@ impl Plan {
                     s.validate_tree(depth + 1, nodes)?;
                 }
             }
+            Plan::Alt { steps } => {
+                if steps.is_empty() {
+                    return Err("alt must have at least one step".to_string());
+                }
+                for s in steps {
+                    s.validate_tree(depth + 1, nodes)?;
+                }
+            }
             Plan::Pipe { stages } => {
                 if stages.len() < 2 {
                     return Err("pipe must have at least two stages".to_string());
@@ -261,7 +272,9 @@ impl Plan {
         match self {
             Plan::Run { .. } | Plan::System { .. } => false,
             Plan::RunAs { .. } => true,
-            Plan::Seq { steps } => steps.iter().any(Plan::contains_runas),
+            Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter().any(Plan::contains_runas)
+            }
             Plan::Pipe { stages } => stages.iter().any(Plan::contains_runas),
             Plan::Redirect { body, .. }
             | Plan::WithStdinFrom { body, .. }
@@ -279,7 +292,9 @@ impl Plan {
             Plan::Run { .. } | Plan::System { .. } => false,
             Plan::RunAs { who: RunAs::Root, .. } => true,
             Plan::RunAs { who: RunAs::User { .. }, body } => body.contains_root(),
-            Plan::Seq { steps } => steps.iter().any(Plan::contains_root),
+            Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter().any(Plan::contains_root)
+            }
             Plan::Pipe { stages } => stages.iter().any(Plan::contains_root),
             Plan::Redirect { body, .. }
             | Plan::WithStdinFrom { body, .. }
@@ -799,6 +814,21 @@ mod tests {
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exec_plan(), req.exec_plan());
 
+        // An `alt` plan round-trips with its own `op` tag.
+        let alt = Request::new_plan(
+            String::new(),
+            "s".into(),
+            Plan::Alt { steps: vec![run(&["false"]), run(&["true"])] },
+            HashMap::new(),
+            String::new(),
+            true,
+            false,
+        );
+        let alt_json = serde_json::to_string(&alt).unwrap();
+        assert!(alt_json.contains(r#""op":"alt""#), "tagged form missing: {alt_json}");
+        let alt_back: Request = serde_json::from_str(&alt_json).unwrap();
+        assert_eq!(alt_back.exec_plan(), alt.exec_plan());
+
         // A pipeline request must not serialize a `plan` key.
         let flat = exec_request();
         let flat_json = serde_json::to_string(&flat).unwrap();
@@ -893,5 +923,12 @@ mod tests {
             HashMap::new(), String::new(), false, false,
         );
         assert!(ValidatedRequest::validate(short_pipe).is_err());
+
+        let empty_alt = Request::new_plan(
+            String::new(), "s".into(),
+            Plan::Alt { steps: vec![] },
+            HashMap::new(), String::new(), false, false,
+        );
+        assert!(ValidatedRequest::validate(empty_alt).is_err());
     }
 }
