@@ -259,14 +259,14 @@ daemon failing open must never be the difference between safe and unsafe; the
 hook failing open (misconfig, different client) likewise must not — the daemon is
 the backstop. Captured follow-up, not active work.
 
-## Partial-`seq` retry hazard and the sudo-credential-in-pipe caveat
+## Partial-`run` retry hazard and the sudo-credential-in-pipe caveat
 
 Surfaced while reviewing the structured-plan executor (the plan model above,
 first increment landed). Two interacting behaviours deserve a safer story than
 "the caller must know."
 
-**The retry hazard.** A `seq` runs its steps in order and stops at the first
-non-accepted failure (`executor.rs`, `run_seq` → `SeqNode::Seq`). When a later
+**The retry hazard.** A `run` (≈ `&&`) runs its steps in order and stops at the
+first non-accepted failure (`executor.rs`, `run_seq` → `SeqNode::Run`). When a later
 step fails, the earlier steps' side effects are **already committed**. The
 response marks which stages ran (per-stage exit codes; a skipped stage carries
 the `-1` not-run sentinel), but nothing stops a caller from resubmitting the
