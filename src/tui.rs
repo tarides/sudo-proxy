@@ -47,7 +47,12 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
 /// pastes and runs as you, and a privileged one pastes and runs with auth. Used
 /// for the `Command:` line, logs, and the compact banner.
 pub fn command_summary(req: &ValidatedRequest) -> String {
-    cmd_render(&req.exec_plan(), "").0
+    // Seed the escalation prefix from the ambient privilege flag, mirroring the
+    // executor (a `privileged` request runs every leaf as root). A `run-as` node
+    // overrides it per-subtree. So each leaf is `sudo`'d individually — never a
+    // single `sudo sh -c '…'`, which would put a shell back on the root path.
+    let ambient_sudo = if req.privileged { "sudo " } else { "" };
+    cmd_render(&req.exec_plan(), ambient_sudo).0
 }
 
 /// Shell operator precedence, loosest to tightest. Drives parenthesization: a
@@ -1193,6 +1198,29 @@ mod tests {
             3,
             "missing binary: once in resolves + twice in steps: {out}"
         );
+    }
+
+    /// `command_summary` threads `sudo` onto each leaf for a privileged request
+    /// (never a single `sudo sh -c`), and adds nothing for an unprivileged one.
+    #[test]
+    fn command_threads_ambient_sudo_for_privileged_request() {
+        use crate::protocol::{Plan, Request, ValidatedRequest};
+        let exec = |a: &[&str]| Plan::Exec { argv: a.iter().map(|s| s.to_string()).collect() };
+        let mk = |privileged: bool| {
+            let plan = Plan::Run { steps: vec![exec(&["id", "-un"]), exec(&["id", "-u"])] };
+            ValidatedRequest::validate(Request::new_plan(
+                String::new(),
+                "t".into(),
+                plan,
+                std::collections::HashMap::new(),
+                String::new(),
+                privileged,
+                false,
+            ))
+            .expect("valid")
+        };
+        assert_eq!(command_summary(&mk(true)), "sudo id -un && sudo id -u");
+        assert_eq!(command_summary(&mk(false)), "id -un && id -u");
     }
 
     // Shared sentinel style for the coloring tests: LIGHT = ambient root,
