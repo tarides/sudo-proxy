@@ -14,8 +14,8 @@ use sudo_proxy::protocol::{
 
 mod common;
 
-fn run(argv: &[&str]) -> Plan {
-    Plan::Run {
+fn exec(argv: &[&str]) -> Plan {
+    Plan::Exec {
         argv: argv.iter().map(|s| s.to_string()).collect(),
     }
 }
@@ -40,12 +40,12 @@ fn decode_stdout(resp: &sudo_proxy::protocol::Response) -> String {
 /// A pipe nested inside a seq: three leaves, and the response's stage list and
 /// aggregate stdout match the pre-order leaf layout.
 #[test]
-fn pipe_inside_seq_runs_and_aggregates() {
-    let plan = Plan::Seq {
+fn pipe_inside_run_runs_and_aggregates() {
+    let plan = Plan::Run {
         steps: vec![
-            run(&["echo", "alpha"]),
+            exec(&["echo", "alpha"]),
             Plan::Pipe {
-                stages: vec![run(&["echo", "hi"]), run(&["wc", "-c"])],
+                stages: vec![exec(&["echo", "hi"]), exec(&["wc", "-c"])],
             },
         ],
     };
@@ -70,7 +70,7 @@ fn redirect_stdout_to_file_truncate() {
             path: path.to_string_lossy().into_owned(),
             mode: WriteMode::Truncate,
         },
-        body: Box::new(run(&["printf", "hello-file"])),
+        body: Box::new(exec(&["printf", "hello-file"])),
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
@@ -91,7 +91,7 @@ fn redirect_stdout_append() {
             path: path.to_string_lossy().into_owned(),
             mode: WriteMode::Append,
         },
-        body: Box::new(run(&["printf", "more"])),
+        body: Box::new(exec(&["printf", "more"])),
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
@@ -104,20 +104,20 @@ fn setenv_is_visible_to_the_stage() {
     let plan = Plan::Setenv {
         key: "LANG".into(),
         value: "xyz-sentinel".into(),
-        body: Box::new(run(&["sh", "-c", "printf %s \"$LANG\""])),
+        body: Box::new(exec(&["sh", "-c", "printf %s \"$LANG\""])),
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(decode_stdout(&resp), "xyz-sentinel");
 }
 
-/// A seq stops at the first failing step; later stages do not run.
+/// A `run` (&&) stops at the first failing step; later stages do not run.
 #[test]
-fn seq_short_circuits_on_failure() {
-    let plan = Plan::Seq {
+fn run_short_circuits_on_failure() {
+    let plan = Plan::Run {
         steps: vec![
-            run(&["false"]),
-            run(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
+            exec(&["false"]),
+            exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
@@ -130,17 +130,35 @@ fn seq_short_circuits_on_failure() {
     );
 }
 
+/// A `seq` (;) runs every step regardless of a non-accepted failure — the dual
+/// of `run`'s short-circuit. Both stages run; status is the last step's.
+#[test]
+fn seq_runs_every_step_despite_failure() {
+    let plan = Plan::Seq {
+        steps: vec![exec(&["false"]), exec(&["sh", "-c", "printf ran-anyway"])],
+    };
+    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    assert_eq!(resp.stages.len(), 2);
+    assert_eq!(resp.stages[0].exit_code, 1, "false exits 1");
+    assert_eq!(resp.stages[1].exit_code, 0, "second stage still runs");
+    assert!(
+        decode_stdout(&resp).contains("ran-anyway"),
+        "a `;` seq must not short-circuit on failure: {resp:?}"
+    );
+}
+
 /// `with-accepted-exit-codes` lets a non-zero exit count as success, so the
 /// seq continues past it.
 #[test]
-fn accepted_exit_codes_allow_seq_to_continue() {
-    let plan = Plan::Seq {
+fn accepted_exit_codes_allow_run_to_continue() {
+    let plan = Plan::Run {
         steps: vec![
             Plan::WithAcceptedExitCodes {
                 codes: vec![1],
-                body: Box::new(run(&["false"])),
+                body: Box::new(exec(&["false"])),
             },
-            run(&["sh", "-c", "printf continued"]),
+            exec(&["sh", "-c", "printf continued"]),
         ],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
@@ -156,8 +174,8 @@ fn accepted_exit_codes_allow_seq_to_continue() {
 fn alt_short_circuits_on_success() {
     let plan = Plan::Alt {
         steps: vec![
-            run(&["true"]),
-            run(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
+            exec(&["true"]),
+            exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
@@ -178,7 +196,7 @@ fn alt_short_circuits_on_success() {
 #[test]
 fn alt_runs_fallback_on_failure() {
     let plan = Plan::Alt {
-        steps: vec![run(&["false"]), run(&["sh", "-c", "printf fallback"])],
+        steps: vec![exec(&["false"]), exec(&["sh", "-c", "printf fallback"])],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
@@ -194,7 +212,7 @@ fn alt_runs_fallback_on_failure() {
 #[test]
 fn alt_all_fail_runs_every_step() {
     let plan = Plan::Alt {
-        steps: vec![run(&["false"]), run(&["false"])],
+        steps: vec![exec(&["false"]), exec(&["false"])],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
@@ -211,9 +229,9 @@ fn accepted_exit_code_stops_alt() {
         steps: vec![
             Plan::WithAcceptedExitCodes {
                 codes: vec![1],
-                body: Box::new(run(&["false"])),
+                body: Box::new(exec(&["false"])),
             },
-            run(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
+            exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
@@ -231,8 +249,8 @@ fn accepted_exit_code_stops_alt() {
 /// The explicit `System` escape hatch runs a shell script verbatim.
 #[test]
 fn system_escape_hatch_runs() {
-    let plan = Plan::System {
-        shell: sudo_proxy::protocol::Shell::Sh,
+    let plan = Plan::Shell {
+        shell: sudo_proxy::protocol::ShellProc::Sh,
         script: "printf hatch-ran".into(),
     };
     let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
@@ -248,7 +266,7 @@ fn plan_request_end_to_end_through_daemon() {
     let server = common::start_test_server(common::TestServerOpts::default());
 
     let plan = Plan::Pipe {
-        stages: vec![run(&["printf", "a\\nb\\nc\\n"]), run(&["wc", "-l"])],
+        stages: vec![exec(&["printf", "a\\nb\\nc\\n"]), exec(&["wc", "-l"])],
     };
     let mut req = Request::new_plan(
         String::new(),

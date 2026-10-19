@@ -136,21 +136,23 @@ pub struct ExecuteParams {
     /// path — and renders stage by stage at the approval prompt, so every real
     /// binary and per-stage privilege is visible. Prefer this over wrapping
     /// commands in `bash -lc`. Nodes are `op`-tagged, e.g.
-    /// {"op":"run","argv":["sysctl","-w","vm.mmap_rnd_bits=28"]};
-    /// {"op":"pipe","stages":[{"op":"run",...},{"op":"run",...}]};
-    /// {"op":"seq","steps":[...]} (sequence, stops on first failure);
-    /// {"op":"alt","steps":[...]} (alternatives, runs until one succeeds, ≈ `||`);
+    /// {"op":"exec","argv":["sysctl","-w","vm.mmap_rnd_bits=28"]} (one command);
+    /// {"op":"pipe","stages":[{"op":"exec",...},{"op":"exec",...}]} (= `|`);
+    /// {"op":"run","steps":[...]} (≈ `&&`: run in order, stop on first failure);
+    /// {"op":"seq","steps":[...]} (≈ `;`: run every step regardless of exit);
+    /// {"op":"alt","steps":[...]} (≈ `||`: run until one succeeds);
     /// {"op":"run-as","as":"root","do":{...}} or {"op":"run-as","as":"user","name":"alice","do":{...}};
     /// {"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{...}};
     /// {"op":"setenv","key":"LANG","value":"C","do":{...}}; {"op":"chdir","dir":"/srv","do":{...}};
-    /// {"op":"system","shell":"bash","script":"..."} (explicit opaque escape hatch).
-    /// Semantics to plan around: a `seq` runs its steps in order and STOPS at
-    /// the first failing step — the earlier steps have already run and their
+    /// {"op":"shell","shell":"bash","script":"..."} (explicit opaque escape hatch).
+    /// Semantics to plan around: a `run` (`&&`) runs its steps in order and STOPS
+    /// at the first failing step — the earlier steps have already run and their
     /// effects are committed, so make early steps idempotent (or put the
     /// riskiest / privileged step first) and do not blindly resubmit a failed
     /// plan; the response's per-stage exit codes show which steps ran (a skipped
-    /// step reports exit -1) so you can resume from the failure instead. An
-    /// `alt` is the dual: it runs its steps in order but STOPS at the first
+    /// step reports exit -1) so you can resume from the failure instead. A `seq`
+    /// (`;`) instead runs every step regardless of exit (a timeout / spawn
+    /// failure still aborts). An `alt` (`||`) runs its steps until the first
     /// SUCCESS, continuing past failures — use it for `probe || fallback`. A
     /// privileged stage placed INSIDE a `pipe` cannot prompt for a sudo
     /// password; if it may need one, make it a standalone `run-as` stage rather

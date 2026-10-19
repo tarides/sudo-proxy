@@ -42,11 +42,11 @@ pub fn command_summary(req: &ValidatedRequest) -> String {
 /// the detailed per-leaf resolution happens in the multi-line prompt render.
 fn plan_to_string(plan: &Plan) -> String {
     match plan {
-        Plan::Run { argv } => shell_join(argv),
-        Plan::System { shell, script } => {
+        Plan::Exec { argv } => shell_join(argv),
+        Plan::Shell { shell, script } => {
             let bin = match shell {
-                crate::protocol::Shell::Sh => "sh",
-                crate::protocol::Shell::Bash => "bash",
+                crate::protocol::ShellProc::Sh => "sh",
+                crate::protocol::ShellProc::Bash => "bash",
             };
             shell_join(&[bin.to_string(), "-c".to_string(), script.clone()])
         }
@@ -55,6 +55,11 @@ fn plan_to_string(plan: &Plan) -> String {
             .map(plan_to_string)
             .collect::<Vec<_>>()
             .join(" | "),
+        Plan::Run { steps } => steps
+            .iter()
+            .map(plan_to_string)
+            .collect::<Vec<_>>()
+            .join(" && "),
         Plan::Seq { steps } => steps
             .iter()
             .map(plan_to_string)
@@ -742,20 +747,20 @@ mod tests {
     /// `/usr/bin/bash` resolves line. A `System` stage is flagged opaque.
     #[test]
     fn plan_stages_render_per_leaf_privilege_and_resolves() {
-        use crate::protocol::{Plan, Request, RunAs, Shell, ValidatedRequest};
+        use crate::protocol::{Plan, Request, RunAs, ShellProc, ValidatedRequest};
 
-        let plan = Plan::Seq {
+        let plan = Plan::Run {
             steps: vec![
                 Plan::RunAs {
                     who: RunAs::Root,
-                    body: Box::new(Plan::Run { argv: vec!["true".into()] }),
+                    body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
                 },
                 Plan::RunAs {
                     who: RunAs::User { name: "alice".into() },
-                    body: Box::new(Plan::Run { argv: vec!["true".into()] }),
+                    body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
                 },
-                Plan::System {
-                    shell: Shell::Sh,
+                Plan::Shell {
+                    shell: ShellProc::Sh,
                     script: "echo hi".into(),
                 },
             ],
@@ -795,7 +800,7 @@ mod tests {
         let req = ValidatedRequest::validate(Request::new_plan(
             String::new(),
             "t".into(),
-            Plan::Run { argv: vec!["true".into()] },
+            Plan::Exec { argv: vec!["true".into()] },
             std::collections::HashMap::new(),
             String::new(),
             false,

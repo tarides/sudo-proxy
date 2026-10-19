@@ -257,7 +257,7 @@ fn plan_req(id: &str, plan: Plan, privileged: bool) -> Request {
 #[test]
 fn plan_dangerous_leaf_rejected() {
     let s = server();
-    let plan = Plan::Run {
+    let plan = Plan::Exec {
         argv: vec!["echo".into(), "x\u{202E}y".into()],
     };
     let resp = s.send(&plan_req("v-plan-bidi", plan, false));
@@ -271,7 +271,7 @@ fn plan_and_pipeline_both_set_rejected() {
     let s = server();
     let mut req = plan_req(
         "v-both",
-        Plan::Run { argv: vec!["true".into()] },
+        Plan::Exec { argv: vec!["true".into()] },
         false,
     );
     req.pipeline = vec![vec!["true".into()]];
@@ -284,7 +284,7 @@ fn plan_and_pipeline_both_set_rejected() {
 #[test]
 fn plan_overdeep_rejected() {
     let s = server();
-    let mut p = Plan::Run { argv: vec!["true".into()] };
+    let mut p = Plan::Exec { argv: vec!["true".into()] };
     for _ in 0..40 {
         p = Plan::RunAs {
             who: RunAs::Root,
@@ -305,10 +305,10 @@ fn plan_structural_error_rejected_without_prompt() {
     let plan = Plan::Redirect {
         stream: sudo_proxy::protocol::Stream::Stdout,
         target: sudo_proxy::protocol::RedirTarget::DevNull,
-        body: Box::new(Plan::Seq {
+        body: Box::new(Plan::Run {
             steps: vec![
-                Plan::Run { argv: vec!["true".into()] },
-                Plan::Run { argv: vec!["true".into()] },
+                Plan::Exec { argv: vec!["true".into()] },
+                Plan::Exec { argv: vec!["true".into()] },
             ],
         }),
     };
@@ -328,8 +328,8 @@ fn plan_redirect_of_alt_rejected_without_prompt() {
         target: sudo_proxy::protocol::RedirTarget::DevNull,
         body: Box::new(Plan::Alt {
             steps: vec![
-                Plan::Run { argv: vec!["false".into()] },
-                Plan::Run { argv: vec!["true".into()] },
+                Plan::Exec { argv: vec!["false".into()] },
+                Plan::Exec { argv: vec!["true".into()] },
             ],
         }),
     };
@@ -343,7 +343,7 @@ fn plan_redirect_of_alt_rejected_without_prompt() {
 #[test]
 fn plan_valid_runs() {
     let s = server();
-    let plan = Plan::Run {
+    let plan = Plan::Exec {
         argv: vec!["true".into()],
     };
     let resp = s.send(&plan_req("v-plan-ok", plan, false));

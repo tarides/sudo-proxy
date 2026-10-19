@@ -225,14 +225,14 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --forward-agent  Forward the local SSH agent to the command (unprivileged only)");
                 eprintln!("  --plan JSON      Send a structured plan request (as the MCP does). The");
                 eprintln!("                   JSON is an op-tagged Plan, e.g.");
-                eprintln!(r#"                   '{{"op":"alt","steps":[{{"op":"run","argv":["false"]}},{{"op":"run","argv":["echo","fallback"]}}]}}'"#);
+                eprintln!(r#"                   '{{"op":"alt","steps":[{{"op":"exec","argv":["false"]}},{{"op":"exec","argv":["echo","fallback"]}}]}}'"#);
                 eprintln!("  --plan-file PATH Read the plan JSON from a file ('-' for stdin)");
                 eprintln!();
                 eprintln!("Pipeline example:");
                 eprintln!("  sudo-request --no-privilege ls /tmp '|' wc -l");
                 eprintln!();
                 eprintln!("Plan example (drives the full structured surface like the MCP):");
-                eprintln!(r#"  sudo-request --no-privilege --plan '{{"op":"run","argv":["id"]}}'"#);
+                eprintln!(r#"  sudo-request --no-privilege --plan '{{"op":"exec","argv":["id"]}}'"#);
                 std::process::exit(0);
             }
             "--socket" => {
@@ -388,7 +388,7 @@ mod tests {
     /// validator accepts — the same path the MCP `execute` tool takes.
     #[test]
     fn plan_json_builds_a_valid_plan_request() {
-        let json = r#"{"op":"alt","steps":[{"op":"run","argv":["false"]},{"op":"run","argv":["true"]}]}"#;
+        let json = r#"{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["true"]}]}"#;
         let req = build_request(&opts_with_plan(Some(json))).expect("build");
         assert!(req.plan.is_some(), "request must carry a plan");
         assert!(req.pipeline.is_empty(), "plan request must not carry a pipeline");
