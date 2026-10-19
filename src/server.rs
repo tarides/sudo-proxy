@@ -362,6 +362,11 @@ pub struct ServerConfig {
     pub mode: Mode,
     pub pkexec_only: bool,
     pub verbose: bool,
+    /// Log each request's command as pretty-printed JSON (just the `plan`, or a
+    /// legacy `pipeline`) to stderr, before validation — a debug aid for
+    /// inspecting what a client (e.g. the MCP server) actually sent. Independent
+    /// of `verbose`.
+    pub log_json: bool,
     /// Whether this daemon *may* offer the session-scoped `a` answer at an
     /// unprivileged prompt (invariant G7, first barrier). Read from the
     /// `unattended_eligible` policy in `hosts.json` at startup and immutable
@@ -377,6 +382,7 @@ impl Default for ServerConfig {
             mode: Mode::Local,
             pkexec_only: false,
             verbose: false,
+            log_json: false,
             unattended_eligible: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
@@ -463,6 +469,7 @@ pub fn run(
         let mode = config.mode;
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
+        let log_json = config.log_json;
         let unattended_grant = Arc::clone(&unattended_grant);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
@@ -473,6 +480,7 @@ pub fn run(
                 mode,
                 pkexec_only,
                 verbose,
+                log_json,
                 unattended_eligible,
                 unattended_grant,
                 prompter,
@@ -485,6 +493,32 @@ pub fn run(
     }
 }
 
+/// For `--log-json`: print just the command portion of a received request — the
+/// `plan` (or, for a legacy flat request, the `pipeline`) — pretty-printed
+/// (2-space indent, one element per line) to stderr. Serializing the *typed*
+/// `Plan` keeps serde's on-wire key order (`op` first, then fields in
+/// declaration order) rather than the alphabetical order a `Value` round-trip
+/// would impose. Falls back to the whole raw line if the body is not valid JSON.
+fn log_plan_json(line: &[u8]) {
+    let raw = || String::from_utf8_lossy(line).trim_end().to_string();
+    let Ok(req) = serde_json::from_slice::<Request>(line) else {
+        eprintln!("[json] {}", raw());
+        return;
+    };
+    let (label, pretty) = if let Some(plan) = &req.plan {
+        ("plan", serde_json::to_string_pretty(plan))
+    } else if !req.pipeline.is_empty() {
+        ("pipeline", serde_json::to_string_pretty(&req.pipeline))
+    } else {
+        eprintln!("[json] (control request — no plan)");
+        return;
+    };
+    match pretty {
+        Ok(s) => eprintln!("[json] {label}:\n{s}"),
+        Err(_) => eprintln!("[json] {}", raw()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_connection(
     mut stream: UnixStream,
@@ -492,6 +526,7 @@ fn handle_connection(
     mode: Mode,
     pkexec_only: bool,
     verbose: bool,
+    log_json: bool,
     unattended_eligible: bool,
     unattended_grant: Arc<AtomicBool>,
     prompter: Arc<dyn Prompter>,
@@ -530,6 +565,12 @@ fn handle_connection(
             return;
         }
     };
+
+    // JSON logging (debug aid): pretty-print just the command portion of the
+    // request, before validation. Gated on its own flag.
+    if log_json {
+        log_plan_json(&line);
+    }
 
     let req: Request = match serde_json::from_slice(&line) {
         Ok(r) => r,
