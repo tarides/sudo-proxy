@@ -13,6 +13,8 @@ struct Opts {
     login: Option<String>,
     pkexec: bool,
     verbose: bool,
+    /// Log each request's command (the `plan`) as pretty-printed JSON to stderr.
+    log_json: bool,
     /// `None` = take the default from `hosts.json` (`policy.unattended_eligible`).
     /// `Some(_)` = an explicit CLI flag was passed and overrides the file.
     unattended_eligible: Option<bool>,
@@ -91,6 +93,7 @@ fn main() {
         mode,
         pkexec_only: opts.pkexec,
         verbose: opts.verbose,
+        log_json: opts.log_json,
         unattended_eligible,
         ..Default::default()
     };
@@ -132,6 +135,7 @@ fn parse_args(args: &[String]) -> Opts {
     let mut login = None;
     let mut pkexec = false;
     let mut verbose = false;
+    let mut log_json = false;
     // Tri-state: None means "no CLI flag passed, use hosts.json policy",
     // Some(_) means an explicit flag overrides the file.
     let mut unattended_eligible: Option<bool> = None;
@@ -153,12 +157,13 @@ fn parse_args(args: &[String]) -> Opts {
             }
             "--pkexec" => pkexec = true,
             "--verbose" | "-v" => verbose = true,
+            "--log-json" => log_json = true,
             "--unattended-eligible" => unattended_eligible = Some(true),
             "--no-unattended-eligible" => unattended_eligible = Some(false),
             "--forward-agent" => forward_agent = true,
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--forward-agent]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -169,6 +174,7 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("  --host HOST                 Connect to remote host via SSH tunnel");
                 eprintln!("  --pkexec                    Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
                 eprintln!("  --verbose, -v               Print startup info and log each request to stderr");
+                eprintln!("  --log-json                  Log each request's plan as pretty-printed JSON to stderr");
                 eprintln!("  --unattended-eligible       Allow a human to grant unattended unprivileged execution");
                 eprintln!("                              for this session via the prompt's `a` answer (overrides hosts.json;");
                 eprintln!("                              the grant is in-memory only and never persisted)");
@@ -188,6 +194,7 @@ fn parse_args(args: &[String]) -> Opts {
         login,
         pkexec,
         verbose,
+        log_json,
         unattended_eligible,
         forward_agent,
     }

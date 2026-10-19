@@ -362,6 +362,11 @@ pub struct ServerConfig {
     pub mode: Mode,
     pub pkexec_only: bool,
     pub verbose: bool,
+    /// Log each request's command as pretty-printed JSON (just the `plan`, or a
+    /// legacy `pipeline`) to stderr, before validation — a debug aid for
+    /// inspecting what a client (e.g. the MCP server) actually sent. Independent
+    /// of `verbose`.
+    pub log_json: bool,
     /// Whether this daemon *may* offer the session-scoped `a` answer at an
     /// unprivileged prompt (invariant G7, first barrier). Read from the
     /// `unattended_eligible` policy in `hosts.json` at startup and immutable
@@ -377,6 +382,7 @@ impl Default for ServerConfig {
             mode: Mode::Local,
             pkexec_only: false,
             verbose: false,
+            log_json: false,
             unattended_eligible: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
@@ -463,6 +469,7 @@ pub fn run(
         let mode = config.mode;
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
+        let log_json = config.log_json;
         let unattended_grant = Arc::clone(&unattended_grant);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
@@ -473,6 +480,7 @@ pub fn run(
                 mode,
                 pkexec_only,
                 verbose,
+                log_json,
                 unattended_eligible,
                 unattended_grant,
                 prompter,
@@ -485,6 +493,32 @@ pub fn run(
     }
 }
 
+/// For `--log-json`: print just the command portion of a received request — the
+/// `plan` (or, for a legacy flat request, the `pipeline`) — pretty-printed
+/// (2-space indent, one element per line) to stderr. Serializing the *typed*
+/// `Plan` keeps serde's on-wire key order (`op` first, then fields in
+/// declaration order) rather than the alphabetical order a `Value` round-trip
+/// would impose. Falls back to the whole raw line if the body is not valid JSON.
+fn log_plan_json(line: &[u8]) {
+    let raw = || String::from_utf8_lossy(line).trim_end().to_string();
+    let Ok(req) = serde_json::from_slice::<Request>(line) else {
+        eprintln!("[json] {}", raw());
+        return;
+    };
+    let (label, pretty) = if let Some(plan) = &req.plan {
+        ("plan", serde_json::to_string_pretty(plan))
+    } else if !req.pipeline.is_empty() {
+        ("pipeline", serde_json::to_string_pretty(&req.pipeline))
+    } else {
+        eprintln!("[json] (control request — no plan)");
+        return;
+    };
+    match pretty {
+        Ok(s) => eprintln!("[json] {label}:\n{s}"),
+        Err(_) => eprintln!("[json] {}", raw()),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_connection(
     mut stream: UnixStream,
@@ -492,6 +526,7 @@ fn handle_connection(
     mode: Mode,
     pkexec_only: bool,
     verbose: bool,
+    log_json: bool,
     unattended_eligible: bool,
     unattended_grant: Arc<AtomicBool>,
     prompter: Arc<dyn Prompter>,
@@ -531,6 +566,12 @@ fn handle_connection(
         }
     };
 
+    // JSON logging (debug aid): pretty-print just the command portion of the
+    // request, before validation. Gated on its own flag.
+    if log_json {
+        log_plan_json(&line);
+    }
+
     let req: Request = match serde_json::from_slice(&line) {
         Ok(r) => r,
         Err(e) => {
@@ -557,8 +598,9 @@ fn handle_connection(
     // Agent forwarding is unprivileged-only. A privileged child runs under
     // sudo (which env_resets) or pkexec (which we env_clear), so the socket
     // would be silently dropped — but we reject explicitly so a misconfigured
-    // caller fails loudly instead of being puzzled by a missing key.
-    if req.forward_agent && req.privileged {
+    // caller fails loudly instead of being puzzled by a missing key. A plan
+    // that escalates via a `run-as` node counts as privileged here too.
+    if req.forward_agent && req.effective_privileged() {
         let resp = Response::error(
             &req.id,
             "forward_agent is only allowed for unprivileged commands",
@@ -638,14 +680,30 @@ fn handle_connection(
         crate::protocol::Action::Exec => {}
     }
 
-    if verbose {
-        let priv_label = if req.privileged { "privileged" } else { "unprivileged" };
-        let pipeline_display = crate::tui::pipeline_join(&req.pipeline);
-        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
-        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, pipeline_display);
+    // Reject a structurally-invalid plan (e.g. redirect of a composite, a
+    // disallowed setenv) before prompting — the human should never be asked to
+    // approve something the executor cannot run. Cheap compile; the executor
+    // compiles again at run time.
+    if let Err(msg) = crate::executor::plan_display(&req) {
+        let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
+        let _ = write_response(&mut stream, &resp);
+        return;
     }
 
-    let resp = if req.privileged {
+    let effective_privileged = req.effective_privileged();
+
+    if verbose {
+        let priv_label = if effective_privileged {
+            "privileged"
+        } else {
+            "unprivileged"
+        };
+        let cmd_display = crate::tui::command_summary(&req);
+        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
+        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, cmd_display);
+    }
+
+    let resp = if effective_privileged {
         if pkexec_only && mode == Mode::Local {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
             exec_pkexec(&req, &env, &tty_lock)
@@ -687,7 +745,7 @@ fn handle_connection(
         eprintln!(
             "[{}] [unattended] {}",
             req.id,
-            crate::tui::pipeline_join(&req.pipeline)
+            crate::tui::command_summary(&req)
         );
         if let Ok(_g) = tty_lock.try_lock() {
             let _ = tui::display_banner(&req);
@@ -726,9 +784,9 @@ fn handle_connection(
     // unprivileged path uses try_lock so a still-pending privileged prompt
     // never delays an unprivileged command's completion. Skip pkexec
     // because pkexec has its own dialog.
-    let used_pkexec = req.privileged && pkexec_only && mode == Mode::Local;
+    let used_pkexec = effective_privileged && pkexec_only && mode == Mode::Local;
     if !used_pkexec {
-        if req.privileged {
+        if effective_privileged {
             let _g = lock_recover(&tty_lock);
             let _ = result_sink.display(&resp);
         } else if let Ok(_g) = tty_lock.try_lock() {
@@ -1189,6 +1247,7 @@ mod tests {
             session: rand_chars(rng, 6),
             time: crate::datetime::now_iso8601(),
             pipeline: std::mem::take(&mut pipeline),
+            plan: None,
             action: crate::protocol::Action::Exec,
             env,
             reason: rand_chars(rng, 8),
