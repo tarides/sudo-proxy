@@ -246,6 +246,45 @@ fn accepted_exit_code_stops_alt() {
     );
 }
 
+/// The `Command:` one-liner is real, copy-paste-executable shell: running it in
+/// `sh -c` must produce the same aggregate stdout as the plan executor. Exercises
+/// quoting (an arg with `;`), `setenv` scoping, `&&`, and a `|` pipe.
+#[test]
+fn command_oneliner_matches_executor_for_privilege_free_plan() {
+    let plan = Plan::Setenv {
+        key: "LANG".into(),
+        value: "C".into(),
+        body: Box::new(Plan::Run {
+            steps: vec![
+                exec(&["echo", "a;b"]), // the `;` must be quoted or sh re-parses it
+                Plan::Pipe {
+                    stages: vec![exec(&["echo", "hello world"]), exec(&["wc", "-w"])],
+                },
+            ],
+        }),
+    };
+    let req = make_plan_req(plan);
+
+    // 1. Via the plan executor.
+    let resp = exec_direct(&req, &HashMap::new());
+    assert_eq!(resp.status, Status::Ok, "got {resp:?}");
+    let via_plan = decode_stdout(&resp);
+
+    // 2. Via the rendered Command one-liner, run in a real shell.
+    let oneliner = sudo_proxy::tui::command_summary(&req);
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&oneliner)
+        .output()
+        .expect("run sh");
+    let via_sh = String::from_utf8_lossy(&out.stdout).into_owned();
+
+    assert_eq!(
+        via_plan, via_sh,
+        "Command one-liner `{oneliner}` must reproduce the plan's output"
+    );
+}
+
 /// The explicit `System` escape hatch runs a shell script verbatim.
 #[test]
 fn system_escape_hatch_runs() {
