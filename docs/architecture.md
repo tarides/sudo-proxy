@@ -2,6 +2,59 @@
 
 [← README](../README.md)
 
+## Security model vs. agent harnesses
+
+sudo-proxy and the permission model of an agent CLI harness (Claude Code, Codex
+CLI, and similar) differ on two axes. Getting these straight explains why
+sudo-proxy leans so hard on the displayed-equals-executed guarantee.
+
+**1. The gatekeeper (human vs. software).** Both are *mediated*: the model never
+executes anything itself — it only emits a *request* that something else decides
+on and runs. The difference is what sits in the gate:
+
+- A **harness** gates with **software**: configured permission rules
+  (allow / ask / deny), optionally a safety classifier, and a human prompt only
+  on the "ask" path. The designed-for case is **automated** — an allowlisted
+  command runs with no human in the loop.
+- **sudo-proxy** gates with a **mandatory human keypress** on `/dev/tty` for
+  *every* command, fail-closed (default deny, 60 s timeout). There is **no
+  classifier and no auto-approve** for privileged commands; software only
+  *rejects* (dangerous characters, structural invalidity, replay/freshness) — it
+  never *approves*. The human is the sole approving authority.
+
+**2. Privilege direction (escalate vs. confine).** This is the deeper difference
+in assumption:
+
+- A **harness** performs capability *restriction*. The agent already runs **as
+  you**, with your ambient privileges; the harness *narrows* that to a safe
+  subset. Its executor (the Bash tool) runs **unprivileged** — no escalation.
+- **sudo-proxy** performs capability *escalation*. The client/agent has **no
+  privilege of its own**; sudo-proxy *grants* one it otherwise lacks —
+  `sudo` / `pkexec` to **root or another user** — and binds each grant to a
+  human who read the exact command.
+
+| | Agent harness (Claude Code, Codex CLI) | sudo-proxy |
+|---|---|---|
+| Model's role | emits a tool request | emits a request (MCP / socket client) |
+| Gate | permission rules + optional classifier + optional human | **mandatory human** per command; no classifier |
+| Default decision | can be fully automated | never automated (always a keypress) |
+| Executor privilege | your own (ambient) | **escalated** (root / other user) |
+| Purpose | **confine** an agent that runs as you | **escalate** beyond what the agent has |
+| Failure mode | depends on policy | fail-closed to a human (default deny) |
+
+Both start from the same premise — the model's output is an *untrusted request*,
+not an authorization — and answer "who authorizes it?" differently: **software
+policy** (harness) vs. **a human reading the literal command** (sudo-proxy).
+Because the authorizer is a human rather than a classifier, sudo-proxy's entire
+security reduces to *what that human can see and comprehend at the prompt* —
+hence invariants **G1** (nothing privileged runs without a human approving the
+exact command shown) and the per-stage resolved-binary rendering
+([REVIEWING.md](../REVIEWING.md)).
+
+The two are **complementary, not competing**: the harness confines the agent to
+your privileges; sudo-proxy is how the agent reaches *past* them for a rare
+privileged action — with a human, not a classifier, as the escalation authority.
+
 ## Project structure
 
 ```
