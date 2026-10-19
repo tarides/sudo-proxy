@@ -4,9 +4,11 @@ use std::path::PathBuf;
 use std::process;
 use std::time::Duration;
 
+use std::collections::HashMap;
+
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
-use sudo_proxy::protocol::{Request, Response, Status};
+use sudo_proxy::protocol::{Plan, Request, Response, Status};
 use sudo_proxy::server::default_socket_path;
 
 /// Default read timeout for waiting on the daemon's response. Must exceed
@@ -32,23 +34,23 @@ fn main() {
         }
     };
 
-    if opts.pipeline.is_empty() || opts.pipeline.iter().all(|s| s.is_empty()) {
+    if opts.plan.is_none()
+        && (opts.pipeline.is_empty() || opts.pipeline.iter().all(|s| s.is_empty()))
+    {
         eprintln!("error: no command specified");
         eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
         process::exit(1);
     }
 
-    let socket_path = opts.socket.unwrap_or_else(default_socket_path);
+    let socket_path = opts.socket.clone().unwrap_or_else(default_socket_path);
 
-    let req = Request::new(
-        hostname(),
-        opts.session,
-        opts.pipeline,
-        std::collections::HashMap::new(),
-        opts.reason.unwrap_or_default(),
-        opts.privileged,
-        opts.forward_agent,
-    );
+    let req = match build_request(&opts) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+    };
 
     // Connect and send
     let mut stream = match UnixStream::connect(&socket_path) {
@@ -148,6 +150,38 @@ fn main() {
     }
 }
 
+/// Assemble the outgoing `Request` from parsed options. A `--plan` / `--plan-file`
+/// JSON builds a structured plan request exactly as the MCP `execute` tool does
+/// (`mcp::build_request`): parse the JSON into a `Plan` and call `new_plan`.
+/// Otherwise the legacy flat `pipeline` is sent. The daemon re-validates either
+/// way; this is only client-side assembly.
+fn build_request(opts: &Opts) -> Result<Request, String> {
+    let reason = opts.reason.clone().unwrap_or_default();
+    if let Some(plan_json) = &opts.plan {
+        let plan: Plan =
+            serde_json::from_str(plan_json).map_err(|e| format!("invalid plan JSON: {e}"))?;
+        Ok(Request::new_plan(
+            hostname(),
+            opts.session.clone(),
+            plan,
+            HashMap::new(),
+            reason,
+            opts.privileged,
+            opts.forward_agent,
+        ))
+    } else {
+        Ok(Request::new(
+            hostname(),
+            opts.session.clone(),
+            opts.pipeline.clone(),
+            HashMap::new(),
+            reason,
+            opts.privileged,
+            opts.forward_agent,
+        ))
+    }
+}
+
 struct Opts {
     socket: Option<PathBuf>,
     reason: Option<String>,
@@ -156,6 +190,9 @@ struct Opts {
     privileged: bool,
     forward_agent: bool,
     pipeline: Vec<Vec<String>>,
+    /// Raw plan JSON from `--plan` or `--plan-file`; mutually exclusive with a
+    /// trailing command / pipeline.
+    plan: Option<String>,
 }
 
 fn parse_args() -> Result<Opts, String> {
@@ -166,6 +203,8 @@ fn parse_args() -> Result<Opts, String> {
     let mut print = false;
     let mut privileged = true;
     let mut forward_agent = false;
+    let mut plan: Option<String> = None;
+    let mut plan_file: Option<PathBuf> = None;
     let mut argv = Vec::new();
     let mut i = 0;
 
@@ -184,9 +223,16 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
                 eprintln!("  --no-privilege   Run command without privilege escalation");
                 eprintln!("  --forward-agent  Forward the local SSH agent to the command (unprivileged only)");
+                eprintln!("  --plan JSON      Send a structured plan request (as the MCP does). The");
+                eprintln!("                   JSON is an op-tagged Plan, e.g.");
+                eprintln!(r#"                   '{{"op":"alt","steps":[{{"op":"run","argv":["false"]}},{{"op":"run","argv":["echo","fallback"]}}]}}'"#);
+                eprintln!("  --plan-file PATH Read the plan JSON from a file ('-' for stdin)");
                 eprintln!();
                 eprintln!("Pipeline example:");
                 eprintln!("  sudo-request --no-privilege ls /tmp '|' wc -l");
+                eprintln!();
+                eprintln!("Plan example (drives the full structured surface like the MCP):");
+                eprintln!(r#"  sudo-request --no-privilege --plan '{{"op":"run","argv":["id"]}}'"#);
                 std::process::exit(0);
             }
             "--socket" => {
@@ -219,6 +265,16 @@ fn parse_args() -> Result<Opts, String> {
             "--forward-agent" => {
                 forward_agent = true;
             }
+            "--plan" => {
+                i += 1;
+                plan = Some(args.get(i).ok_or("--plan requires a JSON value")?.clone());
+            }
+            "--plan-file" => {
+                i += 1;
+                plan_file = Some(PathBuf::from(
+                    args.get(i).ok_or("--plan-file requires a path")?,
+                ));
+            }
             other if other.starts_with("--") => {
                 return Err(format!("unknown option: {other}"));
             }
@@ -241,6 +297,20 @@ fn parse_args() -> Result<Opts, String> {
         );
     }
 
+    // Resolve the plan source: --plan (inline) or --plan-file (path, '-' = stdin).
+    let plan = match (plan, plan_file) {
+        (Some(_), Some(_)) => return Err("--plan and --plan-file are mutually exclusive".to_string()),
+        (Some(json), None) => Some(json),
+        (None, Some(path)) => Some(read_plan_file(&path)?),
+        (None, None) => None,
+    };
+
+    if plan.is_some() && !pipeline.is_empty() {
+        return Err(
+            "provide either a plan (--plan/--plan-file) or a command/pipeline, not both".to_string(),
+        );
+    }
+
     Ok(Opts {
         socket,
         reason,
@@ -249,7 +319,22 @@ fn parse_args() -> Result<Opts, String> {
         privileged,
         forward_agent,
         pipeline,
+        plan,
     })
+}
+
+/// Read plan JSON from a file, or from stdin when the path is `-`.
+fn read_plan_file(path: &std::path::Path) -> Result<String, String> {
+    if path.as_os_str() == "-" {
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buf)
+            .map_err(|e| format!("could not read plan from stdin: {e}"))?;
+        Ok(buf)
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| format!("could not read plan file {}: {e}", path.display()))
+    }
 }
 
 /// Split a flat argv on literal `|` tokens into pipeline stages.
@@ -279,5 +364,51 @@ fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sudo_proxy::protocol::ValidatedRequest;
+
+    fn opts_with_plan(json: Option<&str>) -> Opts {
+        Opts {
+            socket: None,
+            reason: None,
+            session: "sudo-request-cli".to_string(),
+            print: false,
+            privileged: false,
+            forward_agent: false,
+            pipeline: vec![],
+            plan: json.map(|s| s.to_string()),
+        }
+    }
+
+    /// A `--plan` JSON is assembled into a plan-bearing request that the daemon's
+    /// validator accepts — the same path the MCP `execute` tool takes.
+    #[test]
+    fn plan_json_builds_a_valid_plan_request() {
+        let json = r#"{"op":"alt","steps":[{"op":"run","argv":["false"]},{"op":"run","argv":["true"]}]}"#;
+        let req = build_request(&opts_with_plan(Some(json))).expect("build");
+        assert!(req.plan.is_some(), "request must carry a plan");
+        assert!(req.pipeline.is_empty(), "plan request must not carry a pipeline");
+        ValidatedRequest::validate(req).expect("daemon-side validation should accept it");
+    }
+
+    /// Malformed plan JSON is rejected at assembly, before anything is sent.
+    #[test]
+    fn invalid_plan_json_is_rejected() {
+        assert!(build_request(&opts_with_plan(Some("{not json"))).is_err());
+    }
+
+    /// With no plan, the legacy flat pipeline is sent unchanged.
+    #[test]
+    fn no_plan_sends_flat_pipeline() {
+        let mut opts = opts_with_plan(None);
+        opts.pipeline = vec![vec!["id".to_string()]];
+        let req = build_request(&opts).expect("build");
+        assert!(req.plan.is_none());
+        assert_eq!(req.pipeline, vec![vec!["id".to_string()]]);
+    }
 }
 

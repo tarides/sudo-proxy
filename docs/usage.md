@@ -63,7 +63,18 @@ sudo-request --no-privilege ls /etc
 
 # Tag the request with a session name (default: sudo-request-cli)
 sudo-request --session my-project apt update
+
+# Send a structured plan (assembled like the MCP execute tool). Drives the full
+# plan surface — seq / alt / pipe / redirect / run-as / setenv / chdir / system.
+sudo-request --no-privilege \
+    --plan '{"op":"alt","steps":[{"op":"run","argv":["false"]},{"op":"run","argv":["echo","none"]}]}'
+
+# ...or read the plan JSON from a file ('-' for stdin)
+sudo-request --no-privilege --plan-file ./scratch/plan.json
 ```
+
+To drive a new feature end-to-end through the real daemon and human gate before
+merging, see [testing.md](testing.md).
 
 ## Remote hosts over SSH
 
