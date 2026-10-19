@@ -89,13 +89,13 @@ pub enum RunAs {
     User { name: String },
 }
 
-/// Which shell an explicit `System` escape-hatch node runs. Named so the
+/// Which interpreter an explicit `Shell` escape-hatch node runs. Named so the
 /// prompt can render the stage as "opaque — resolves only the shell": this is
 /// the *only* place a shell re-enters the execution path, and it is never
 /// hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum Shell {
+pub enum ShellProc {
     Sh,
     Bash,
 }
@@ -114,13 +114,18 @@ pub enum Shell {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "kebab-case")]
 pub enum Plan {
-    /// A single literal command: prog + args. No word-splitting, globbing, or
-    /// substitution — the leaf of every tree.
-    Run { argv: Vec<String> },
-    /// Sequence; stop at the first non-accepted exit (Dune `progn`, ≈ `&&`/`;`).
+    /// A single literal command: prog + args (one `execve`). No word-splitting,
+    /// globbing, or substitution — the leaf of every tree.
+    Exec { argv: Vec<String> },
+    /// Run steps in order, stopping at the first non-accepted exit (≈ `&&`).
+    /// Status is the last step that ran. Dune `progn` with short-circuit.
+    Run { steps: Vec<Plan> },
+    /// Run every step in order regardless of exit (≈ `;`). A non-accepted exit
+    /// does not stop the rest; a timeout or spawn failure still aborts. Status
+    /// is the last step's.
     Seq { steps: Vec<Plan> },
     /// Alternatives; run steps until one succeeds, continuing past a non-accepted
-    /// exit and stopping on the first success (≈ `||`). Dual of `seq`.
+    /// exit and stopping on the first success (≈ `||`). Dual of `run`.
     Alt { steps: Vec<Plan> },
     /// Connect stdout→stdin left-to-right (Dune `pipe-stdout`, = `|`).
     Pipe { stages: Vec<Plan> },
@@ -171,7 +176,7 @@ pub enum Plan {
     /// EXPLICIT opaque escape hatch (Dune `system`/`bash`). Rendered at the
     /// prompt as "opaque — resolves only the shell"; a strict policy mode
     /// rejects it. The sole surviving shell path, and always named.
-    System { shell: Shell, script: String },
+    Shell { shell: ShellProc, script: String },
 }
 
 impl Plan {
@@ -199,25 +204,17 @@ impl Plan {
             }
         };
         match self {
-            Plan::Run { argv } => {
+            Plan::Exec { argv } => {
                 if argv.is_empty() {
-                    return Err("run stage must have a command".to_string());
+                    return Err("exec stage must have a command".to_string());
                 }
                 for a in argv {
                     check(a, "argv element")?;
                 }
             }
-            Plan::Seq { steps } => {
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
                 if steps.is_empty() {
-                    return Err("seq must have at least one step".to_string());
-                }
-                for s in steps {
-                    s.validate_tree(depth + 1, nodes)?;
-                }
-            }
-            Plan::Alt { steps } => {
-                if steps.is_empty() {
-                    return Err("alt must have at least one step".to_string());
+                    return Err("run/seq/alt must have at least one step".to_string());
                 }
                 for s in steps {
                     s.validate_tree(depth + 1, nodes)?;
@@ -262,7 +259,7 @@ impl Plan {
             Plan::WithAcceptedExitCodes { body, .. } => {
                 body.validate_tree(depth + 1, nodes)?;
             }
-            Plan::System { script, .. } => {
+            Plan::Shell { script, .. } => {
                 check(script, "system script")?;
             }
         }
@@ -274,9 +271,9 @@ impl Plan {
     /// this drives `Request::effective_privileged`.
     pub fn contains_runas(&self) -> bool {
         match self {
-            Plan::Run { .. } | Plan::System { .. } => false,
+            Plan::Exec { .. } | Plan::Shell { .. } => false,
             Plan::RunAs { .. } => true,
-            Plan::Seq { steps } | Plan::Alt { steps } => {
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
                 steps.iter().any(Plan::contains_runas)
             }
             Plan::Pipe { stages } => stages.iter().any(Plan::contains_runas),
@@ -293,10 +290,10 @@ impl Plan {
     /// escalation is to a named non-root user).
     pub fn contains_root(&self) -> bool {
         match self {
-            Plan::Run { .. } | Plan::System { .. } => false,
+            Plan::Exec { .. } | Plan::Shell { .. } => false,
             Plan::RunAs { who: RunAs::Root, .. } => true,
             Plan::RunAs { who: RunAs::User { .. }, body } => body.contains_root(),
-            Plan::Seq { steps } | Plan::Alt { steps } => {
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
                 steps.iter().any(Plan::contains_root)
             }
             Plan::Pipe { stages } => stages.iter().any(Plan::contains_root),
@@ -313,15 +310,15 @@ impl Plan {
 /// becomes a bare `Run`; multiple stages become a `Pipe`. Ambient privilege is
 /// **not** encoded here — the executor seeds its run-as context from
 /// `Request::privileged`, so a desugared tree and an explicit plan are handled
-/// uniformly. An empty pipeline (control actions only) yields an empty `Seq`,
+/// uniformly. An empty pipeline (control actions only) yields an empty `Run`,
 /// which never reaches execution.
 fn desugar_pipeline(pipeline: &[Vec<String>]) -> Plan {
     let mut stages: Vec<Plan> = pipeline
         .iter()
-        .map(|argv| Plan::Run { argv: argv.clone() })
+        .map(|argv| Plan::Exec { argv: argv.clone() })
         .collect();
     match stages.len() {
-        0 => Plan::Seq { steps: vec![] },
+        0 => Plan::Run { steps: vec![] },
         1 => stages.pop().unwrap(),
         _ => Plan::Pipe { stages },
     }
@@ -781,8 +778,8 @@ mod tests {
 
     // === Structured plan schema ===========================================
 
-    fn run(argv: &[&str]) -> Plan {
-        Plan::Run { argv: argv.iter().map(|s| s.to_string()).collect() }
+    fn exec(argv: &[&str]) -> Plan {
+        Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
     }
 
     /// A single-stage pipeline desugars to a bare `Run`; a multi-stage pipeline
@@ -791,12 +788,12 @@ mod tests {
     #[test]
     fn desugar_pipeline_shapes() {
         let single = desugar_pipeline(&[vec!["ls".into(), "-l".into()]]);
-        assert_eq!(single, run(&["ls", "-l"]));
+        assert_eq!(single, exec(&["ls", "-l"]));
 
         let multi = desugar_pipeline(&[vec!["ls".into()], vec!["wc".into(), "-l".into()]]);
-        assert_eq!(multi, Plan::Pipe { stages: vec![run(&["ls"]), run(&["wc", "-l"])] });
+        assert_eq!(multi, Plan::Pipe { stages: vec![exec(&["ls"]), exec(&["wc", "-l"])] });
 
-        assert_eq!(desugar_pipeline(&[]), Plan::Seq { steps: vec![] });
+        assert_eq!(desugar_pipeline(&[]), Plan::Run { steps: vec![] });
     }
 
     /// An explicit `plan` round-trips through JSON with the `op`-tagged form,
@@ -807,14 +804,14 @@ mod tests {
         let req = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::Seq { steps: vec![run(&["true"]), run(&["false"])] },
+            Plan::Run { steps: vec![exec(&["true"]), exec(&["false"])] },
             HashMap::new(),
             String::new(),
             true,
             false,
         );
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""op":"seq""#), "tagged form missing: {json}");
+        assert!(json.contains(r#""op":"run""#), "tagged form missing: {json}");
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exec_plan(), req.exec_plan());
 
@@ -822,7 +819,7 @@ mod tests {
         let alt = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::Alt { steps: vec![run(&["false"]), run(&["true"])] },
+            Plan::Alt { steps: vec![exec(&["false"]), exec(&["true"])] },
             HashMap::new(),
             String::new(),
             true,
@@ -848,7 +845,7 @@ mod tests {
         let root = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::RunAs { who: RunAs::Root, body: Box::new(run(&["id", "-un"])) },
+            Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["id", "-un"])) },
             HashMap::new(),
             String::new(),
             true,
@@ -864,16 +861,16 @@ mod tests {
         );
 
         // The exact JSON shapes the MCP `plan` doc advertises must parse.
-        let doc_root = r#"{"op":"run-as","as":"root","do":{"op":"run","argv":["id"]}}"#;
-        let doc_user = r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"run","argv":["id"]}}"#;
+        let doc_root = r#"{"op":"run-as","as":"root","do":{"op":"exec","argv":["id"]}}"#;
+        let doc_user = r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#;
         let p_root: Plan = serde_json::from_str(doc_root).unwrap();
         let p_user: Plan = serde_json::from_str(doc_user).unwrap();
-        assert_eq!(p_root, Plan::RunAs { who: RunAs::Root, body: Box::new(run(&["id"])) });
+        assert_eq!(p_root, Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["id"])) });
         assert_eq!(
             p_user,
             Plan::RunAs {
                 who: RunAs::User { name: "alice".into() },
-                body: Box::new(run(&["id"])),
+                body: Box::new(exec(&["id"])),
             }
         );
     }
@@ -887,7 +884,7 @@ mod tests {
             "s".into(),
             Plan::RunAs {
                 who: RunAs::Root,
-                body: Box::new(run(&["sysctl", "-w", "x=1"])),
+                body: Box::new(exec(&["sysctl", "-w", "x=1"])),
             },
             HashMap::new(),
             String::new(),
@@ -900,13 +897,13 @@ mod tests {
         // A named-user RunAs still forces the privileged gate, but is not root.
         req.plan = Some(Plan::RunAs {
             who: RunAs::User { name: "alice".into() },
-            body: Box::new(run(&["dune", "build"])),
+            body: Box::new(exec(&["dune", "build"])),
         });
         assert!(req.effective_privileged());
         assert!(!req.runs_as_root());
 
         // A plain plan with no RunAs and no flag is unprivileged.
-        req.plan = Some(run(&["ls"]));
+        req.plan = Some(exec(&["ls"]));
         req.privileged = false;
         assert!(!req.effective_privileged());
     }
@@ -919,7 +916,7 @@ mod tests {
             Plan::Setenv {
                 key: "LANG".into(),
                 value: "x\u{1b}y".into(), // ESC in a setenv value
-                body: Box::new(run(&["true"])),
+                body: Box::new(exec(&["true"])),
             },
             HashMap::new(),
             String::new(),
@@ -933,7 +930,7 @@ mod tests {
     #[test]
     fn validate_rejects_both_pipeline_and_plan() {
         let mut req = exec_request();
-        req.plan = Some(run(&["ls"]));
+        req.plan = Some(exec(&["ls"]));
         let err = ValidatedRequest::validate(req).unwrap_err();
         assert!(err.contains("both pipeline and plan"), "got: {err}");
     }
@@ -941,7 +938,7 @@ mod tests {
     #[test]
     fn validate_rejects_overdeep_plan() {
         // Nest RunAs past MAX_PLAN_DEPTH.
-        let mut p = run(&["true"]);
+        let mut p = exec(&["true"]);
         for _ in 0..(MAX_PLAN_DEPTH + 2) {
             p = Plan::RunAs { who: RunAs::Root, body: Box::new(p) };
         }
@@ -955,14 +952,14 @@ mod tests {
     #[test]
     fn validate_rejects_empty_run_and_short_pipe() {
         let empty_run = Request::new_plan(
-            String::new(), "s".into(), Plan::Run { argv: vec![] },
+            String::new(), "s".into(), Plan::Exec { argv: vec![] },
             HashMap::new(), String::new(), false, false,
         );
         assert!(ValidatedRequest::validate(empty_run).is_err());
 
         let short_pipe = Request::new_plan(
             String::new(), "s".into(),
-            Plan::Pipe { stages: vec![run(&["ls"])] },
+            Plan::Pipe { stages: vec![exec(&["ls"])] },
             HashMap::new(), String::new(), false, false,
         );
         assert!(ValidatedRequest::validate(short_pipe).is_err());

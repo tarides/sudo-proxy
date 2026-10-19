@@ -11,8 +11,8 @@ the MCP `execute` tool) will experience it.
 
 The key enabler is `sudo-request --plan`, which assembles a structured `Plan`
 request the same way the MCP tool does (`mcp::build_request`), so you can drive
-the full plan surface (`seq`, `alt`, `pipe`, `redirect`, `run-as`, `setenv`,
-`chdir`, `system`) from the command line — no MCP client and no hand-written
+the full plan surface (`exec`, `run` (`&&`), `seq` (`;`), `alt` (`||`), `pipe`,
+`redirect`, `run-as`, `setenv`, `chdir`, `shell`) from the command line — no MCP client and no hand-written
 socket JSON required.
 
 ## Setup
@@ -39,7 +39,7 @@ cargo build --release
 # A structured plan — the same assembly the MCP execute tool performs
 ./target/release/sudo-request --socket /tmp/sp-test.sock --no-privilege --print \
     --reason "try alt" \
-    --plan '{"op":"alt","steps":[{"op":"run","argv":["false"]},{"op":"run","argv":["echo","fallback-ran"]}]}'
+    --plan '{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["echo","fallback-ran"]}]}'
 ```
 
 When the request arrives, Terminal A shows the per-stage prompt — each stage with

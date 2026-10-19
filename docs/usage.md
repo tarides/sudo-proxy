@@ -65,9 +65,10 @@ sudo-request --no-privilege ls /etc
 sudo-request --session my-project apt update
 
 # Send a structured plan (assembled like the MCP execute tool). Drives the full
-# plan surface — seq / alt / pipe / redirect / run-as / setenv / chdir / system.
+# plan surface — exec / run(&&) / seq(;) / alt(||) / pipe / redirect / run-as /
+# setenv / chdir / shell.
 sudo-request --no-privilege \
-    --plan '{"op":"alt","steps":[{"op":"run","argv":["false"]},{"op":"run","argv":["echo","none"]}]}'
+    --plan '{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["echo","none"]}]}'
 
 # ...or read the plan JSON from a file ('-' for stdin)
 sudo-request --no-privilege --plan-file ./scratch/plan.json

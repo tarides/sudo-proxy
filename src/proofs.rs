@@ -141,7 +141,7 @@ fn has_dangerous_chars_matches_spec_per_char() {
 }
 
 /// Proof: the structured-plan leaf check is panic-free and agrees with the
-/// per-char danger spec. A `Plan::Run` whose single argv element is one symbolic
+/// per-char danger spec. A `Plan::Exec` whose single argv element is one symbolic
 /// character validates iff that character is not dangerous — i.e. the recursive
 /// `Plan::validate_tree` applies exactly the same `has_dangerous_chars` gate to a
 /// plan leaf that the flat-pipeline path applies to an argv element. This is the
@@ -163,7 +163,7 @@ fn plan_run_leaf_matches_dangerous_char_spec() {
     let mut buf = [0u8; 4];
     let s: &str = c.encode_utf8(&mut buf);
 
-    let plan = crate::protocol::Plan::Run {
+    let plan = crate::protocol::Plan::Exec {
         argv: vec![s.to_string()],
     };
     let mut nodes = 0usize;

@@ -12,7 +12,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
 use crate::protocol::{
-    Plan, RedirTarget, Response, RunAs, Shell, StageResult, Stream, ValidatedRequest, WriteMode,
+    Plan, RedirTarget, Response, RunAs, ShellProc, StageResult, Stream, ValidatedRequest, WriteMode,
 };
 
 /// Hard cap on captured stdout/stderr per stream. A privileged
@@ -262,7 +262,11 @@ struct LeafPlan {
 enum SeqNode {
     Leaf(usize),
     Pipe(Vec<usize>),
+    /// `&&` — run in order, stop at first failure.
+    Run(Vec<SeqNode>),
+    /// `;` — run all in order regardless of exit status.
     Seq(Vec<SeqNode>),
+    /// `||` — run in order, stop at first success.
     Alt(Vec<SeqNode>),
 }
 
@@ -363,6 +367,16 @@ fn compile_seq(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<
             ctx.accepted = codes.clone();
             compile_seq(body, ctx, leaves)
         }
+        Plan::Run { steps } => {
+            if !ctx.stdio_is_default() {
+                return Err("redirect / stdin-from of a run is not supported".to_string());
+            }
+            let mut nodes = Vec::with_capacity(steps.len());
+            for s in steps {
+                nodes.push(compile_seq(s, ctx.clone(), leaves)?);
+            }
+            Ok(SeqNode::Run(nodes))
+        }
         Plan::Seq { steps } => {
             if !ctx.stdio_is_default() {
                 return Err("redirect / stdin-from of a seq is not supported".to_string());
@@ -399,11 +413,11 @@ fn compile_seq(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<
 /// modifiers and errors on a composite.
 fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result<usize, String> {
     match plan {
-        Plan::Run { argv } => Ok(push_leaf(argv.clone(), false, ctx, leaves)),
-        Plan::System { shell, script } => {
+        Plan::Exec { argv } => Ok(push_leaf(argv.clone(), false, ctx, leaves)),
+        Plan::Shell { shell, script } => {
             let bin = match shell {
-                Shell::Sh => "sh",
-                Shell::Bash => "bash",
+                ShellProc::Sh => "sh",
+                ShellProc::Bash => "bash",
             };
             let argv = vec![bin.to_string(), "-c".to_string(), script.clone()];
             Ok(push_leaf(argv, true, ctx, leaves))
@@ -432,7 +446,7 @@ fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result
             ctx.stdin = InSpec::File(path.clone());
             compile_leaf(body, ctx, leaves)
         }
-        Plan::Seq { .. } | Plan::Alt { .. } | Plan::Pipe { .. } => {
+        Plan::Run { .. } | Plan::Seq { .. } | Plan::Alt { .. } | Plan::Pipe { .. } => {
             Err("expected a single command here, found a composite plan".to_string())
         }
     }
@@ -579,7 +593,7 @@ fn mark_pipe_members(node: &SeqNode, in_pipe: &mut [bool]) {
                 in_pipe[i] = true;
             }
         }
-        SeqNode::Seq(nodes) | SeqNode::Alt(nodes) => {
+        SeqNode::Run(nodes) | SeqNode::Seq(nodes) | SeqNode::Alt(nodes) => {
             for n in nodes {
                 mark_pipe_members(n, in_pipe);
             }
@@ -734,7 +748,9 @@ fn run_seq(
             st
         }
         SeqNode::Pipe(indices) => run_pipe(indices, leaves, mode, deadline, outcomes),
-        SeqNode::Seq(nodes) => {
+        SeqNode::Run(nodes) => {
+            // `&&` — run in order, stop at the first non-accepted failure (or a
+            // timeout / spawn error). Status is the last step that ran.
             let mut last = StepStatus {
                 timed_out: false,
                 spawn_error: None,
@@ -750,10 +766,30 @@ fn run_seq(
             }
             last
         }
+        SeqNode::Seq(nodes) => {
+            // `;` — run every step regardless of exit status. Only a timeout or
+            // spawn failure (infrastructure errors the daemon treats as fatal
+            // everywhere) aborts; a non-accepted exit does not. Status is the
+            // last step that ran.
+            let mut last = StepStatus {
+                timed_out: false,
+                spawn_error: None,
+                success: true,
+            };
+            for n in nodes {
+                let st = run_seq(n, leaves, mode, deadline, tty_lock, outcomes);
+                let stop = st.timed_out || st.spawn_error.is_some();
+                last = st;
+                if stop {
+                    break;
+                }
+            }
+            last
+        }
         SeqNode::Alt(nodes) => {
-            // Dual of `Seq`: run steps until one succeeds. Keep going past a
+            // Dual of `Run`: run steps until one succeeds. Keep going past a
             // non-accepted failure; stop on the first success (and on a timeout
-            // or spawn error, which abort the whole alt just as they do a seq).
+            // or spawn error, which abort the whole alt just as they do a run).
             let mut last = StepStatus {
                 timed_out: false,
                 spawn_error: None,
@@ -1498,7 +1534,7 @@ mod tests {
 
     // === Structured-plan properties (Rung 2) ============================
     use crate::prop::Rng;
-    use crate::protocol::{Plan, Request, RunAs, Shell, ValidatedRequest};
+    use crate::protocol::{Plan, Request, RunAs, ShellProc, ValidatedRequest};
 
     fn mk_plan_req(plan: Plan, privileged: bool) -> ValidatedRequest {
         let req = Request::new_plan(
@@ -1517,8 +1553,10 @@ mod tests {
     /// executor and the prompt both enumerate).
     fn count_leaves(p: &Plan) -> usize {
         match p {
-            Plan::Run { .. } | Plan::System { .. } => 1,
-            Plan::Seq { steps } | Plan::Alt { steps } => steps.iter().map(count_leaves).sum(),
+            Plan::Exec { .. } | Plan::Shell { .. } => 1,
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter().map(count_leaves).sum()
+            }
             Plan::Pipe { stages } => stages.iter().map(count_leaves).sum(),
             Plan::Redirect { body, .. }
             | Plan::WithStdinFrom { body, .. }
@@ -1545,13 +1583,13 @@ mod tests {
     fn random_single(rng: &mut Rng, depth: usize) -> Plan {
         if depth == 0 || rng.below(2) == 0 {
             if rng.below(6) == 0 {
-                return Plan::System {
-                    shell: if rng.below(2) == 0 { Shell::Sh } else { Shell::Bash },
+                return Plan::Shell {
+                    shell: if rng.below(2) == 0 { ShellProc::Sh } else { ShellProc::Bash },
                     script: word(rng),
                 };
             }
             let n = 1 + rng.below(3);
-            return Plan::Run {
+            return Plan::Exec {
                 argv: (0..n).map(|_| word(rng)).collect(),
             };
         }
@@ -1586,13 +1624,18 @@ mod tests {
         if depth == 0 || rng.below(3) == 0 {
             return random_single(rng, depth);
         }
-        match rng.below(7) {
-            0 => Plan::Seq {
+        match rng.below(8) {
+            0 => Plan::Run {
                 steps: (0..1 + rng.below(3))
                     .map(|_| random_plan(rng, depth - 1))
                     .collect(),
             },
             6 => Plan::Alt {
+                steps: (0..1 + rng.below(3))
+                    .map(|_| random_plan(rng, depth - 1))
+                    .collect(),
+            },
+            7 => Plan::Seq {
                 steps: (0..1 + rng.below(3))
                     .map(|_| random_plan(rng, depth - 1))
                     .collect(),
