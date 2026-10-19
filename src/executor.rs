@@ -1075,10 +1075,24 @@ fn set_stderr(cmd: &mut Command, spec: &ErrSpec, stdout_file: Option<&File>) -> 
 }
 
 /// Run a pipe group: spawn every stage connected by pipes, then collect all
-/// their results against the shared deadline. Pipe stages use `setsid` (not
-/// `setpgid`): a pipelined child cannot interactively prompt for a password, so
-/// it must be detached from the controlling tty and rely on cached credentials
-/// — matching the pre-plan pipeline behaviour.
+/// their results against the shared deadline.
+///
+/// Pipe stages use `setsid` (not the `setpgid` + foreground-guard a lone
+/// escalated leaf gets in `run_one`). The reason is job control, not a property
+/// of `setsid` itself: a controlling terminal has exactly **one** foreground
+/// process group, and pipe stages run **concurrently** — so they cannot each be
+/// handed the tty to prompt on. Rather than arbitrate the tty across live
+/// pipeline members, the daemon detaches them all (`setsid`, no controlling tty).
+/// A standalone leaf has no such concurrency, so it keeps `setpgid` (stays in the
+/// daemon's session) and is handed the tty foreground, and *can* prompt.
+///
+/// This is the point where the daemon is, in effect, a shell's *executor*:
+/// fork/exec, pipe wiring, process groups, and tty job control (the
+/// `ForegroundGuard` `tcsetpgrp` handoff, `setsid` for pipeline members) are
+/// exactly what an interactive shell does. What it deliberately omits is the
+/// shell's *parser* (word-splitting, globbing, `$(…)`, profile) — so "no shell on
+/// the privileged path" means no shell *language* on the path, not no process
+/// orchestration, which is now the daemon's own.
 ///
 /// Consequence: a privileged stage *inside a pipe* cannot prompt, and because it
 /// has no controlling tty, a credential cached on the daemon's tty may not be
@@ -1086,7 +1100,7 @@ fn set_stderr(cmd: &mut Command, spec: &ErrSpec, stdout_file: Option<&File>) -> 
 /// the common `tty` default likely not). Such a stage needs NOPASSWD or an
 /// already-`global`-cached credential, or it fails fast with "no tty present".
 /// Prefer a single privileged stage, which runs with `setpgid` + the foreground
-/// guard and *can* prompt. See the "Partial-`seq` retry hazard and the
+/// guard and *can* prompt. See the "Partial-`run` retry hazard and the
 /// sudo-credential-in-pipe caveat" item in backlog.md.
 fn run_pipe(
     indices: &[usize],
