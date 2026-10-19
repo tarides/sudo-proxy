@@ -167,7 +167,8 @@ on top:**
 - ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `seq`) runs steps until
   one succeeds, covering `pgrep … || echo none`. A first-class op, not a fold
   into `with-accepted-exit-codes`.
-- **Append redirection (`>>`).** `with-stdout-to` truncates; no append mode.
+- ~~**Append redirection (`>>`).**~~ *Landed:* `redirect` takes `mode:"append"`
+  alongside `"truncate"` (and `stream:"both"` for `2>&1`).
 - **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Dune resolves
   `%{…}` at rule-eval, not runtime — so it has no runtime `$(…)` either, which
   *confirms* our plan: promote the common cases to first-class ops (a read-file op
@@ -186,6 +187,49 @@ resolve." The plan executor flags any such stage (`opaque — resolves only the
 shell`) and a policy mode rejects it — making `no-opaque-blob` a special case of
 daemon-side *reject-unresolvable-stages*, enforced structurally and for every
 client rather than by regex in one user's hook.
+
+## Make the shell escape hatch avoidable (plan-model design goal + remaining levers)
+
+**The design goal.** The `Plan` type's *raison d'être* is to make its `Shell`
+constructor (the opaque escape hatch, formerly `System`) unnecessary: every
+structured op exists so a given shell feature need not be expressed by shelling
+out. The real invariant is **no shell on the privileged path**; `Shell` is the
+one node that breaks displayed-equals-executed — it resolves only the shell
+binary, so its inner commands are invisible at the prompt. The goal is therefore
+not to *delete* `Shell` (the shell tail — runtime `$(…)`, `$!`, globbing,
+word-splitting, profile functions — is open-ended) but to **shrink-and-flag**:
+drive real usage into structured ops, and keep every remaining shell use loud,
+countable, and policy-rejectable. Read each `Shell` node as measurable debt — a
+prompt to ask "what op would have avoided this?" That loop already produced `alt`
+(for `||`) and `seq` (for `;`). See
+[docs/architecture.md](docs/architecture.md) ("Security model vs. agent
+harnesses") for the framing.
+
+**Remaining levers** (rough payoff order):
+
+1. **Close the `exec sh -c` loophole** (highest payoff). The goal is quietly
+   defeated today not by `Shell` but by its dishonest sibling: a plain `Exec`
+   leaf (or pipe stage) `["sh","-c","<script>"]` puts a full shell on the path
+   **without** the opaque flag — it renders as a tame `exec` stage with
+   `/usr/bin/sh` resolved while a whole script hides in one argv element. (Seen
+   in the live campaign: C1/C2 used `sh -c "…;…"` leaves to sequence what the
+   type couldn't yet express.) Fix: have `validate_tree` recognize an
+   `Exec`/pipe-stage whose `argv[0]` is a shell (`sh`/`bash`/`dash`/`zsh`/…) with
+   a `-c` and treat it exactly like a `Shell` node — same opaque flag at the
+   prompt, same strict-mode fate. Without this, every other lever is bypassable.
+2. **Implement the documented strict policy mode.** `protocol.rs` already promises
+   "a strict policy mode rejects it," but no such mode exists. Add a per-daemon
+   policy (`hosts.json` `policy.no_shell` and/or a `--no-shell` flag) that
+   **rejects** any `Shell` node — and, with lever 1, any `exec sh -c` — before
+   prompting: "structured or nothing" for operators who want it. Folds into the
+   *reject-unresolvable-stages* idea in the structured-plan section above.
+3. **Catalogue the shell tail as first-class op proposals.** The two most common
+   forces in the log.1 trail that still require the hatch: a `detach` op
+   (backgrounding + a structured pid return, replacing `nohup … & echo $!`) and a
+   read-file op (replacing `$(cat /proc/…)`). See the "Gaps Dune does NOT cover"
+   list above. Each retired force converts an opaque stage into reviewable ones.
+
+Captured follow-up, not active work.
 
 ## Move the `no-opaque-blob` floor into the daemon (interim, ahead of the plan model)
 
