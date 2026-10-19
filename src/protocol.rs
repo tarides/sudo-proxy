@@ -152,8 +152,12 @@ pub enum Plan {
         body: Box<Plan>,
     },
     /// Run the inner plan under a specific privilege context — `[ROOT]` or
-    /// `[as <user>]`. The axis Dune lacks; see `RunAs`.
+    /// `[as <user>]`. The axis Dune lacks; see `RunAs`. `who` is flattened, so
+    /// the wire form is `{"op":"run-as","as":"root","do":{…}}` /
+    /// `{"op":"run-as","as":"user","name":"…","do":{…}}` (matching the MCP docs),
+    /// not a nested `"who":{…}` object.
     RunAs {
+        #[serde(flatten)]
         who: RunAs,
         #[serde(rename = "do")]
         body: Box<Plan>,
@@ -833,6 +837,45 @@ mod tests {
         let flat = exec_request();
         let flat_json = serde_json::to_string(&flat).unwrap();
         assert!(!flat_json.contains("plan"), "flat request leaked plan key: {flat_json}");
+    }
+
+    /// `run-as` uses the flattened wire form documented by the MCP tool —
+    /// `{"op":"run-as","as":"root","do":{…}}` — not a nested `"who":{…}` object.
+    /// Both root and named-user forms round-trip, and the exact JSON the MCP doc
+    /// advertises deserializes. (Regression guard for finding F1.)
+    #[test]
+    fn run_as_wire_form_is_flattened_and_matches_docs() {
+        let root = Request::new_plan(
+            String::new(),
+            "s".into(),
+            Plan::RunAs { who: RunAs::Root, body: Box::new(run(&["id", "-un"])) },
+            HashMap::new(),
+            String::new(),
+            true,
+            false,
+        );
+        let json = serde_json::to_string(&root).unwrap();
+        assert!(json.contains(r#""op":"run-as""#), "op tag missing: {json}");
+        assert!(json.contains(r#""as":"root""#), "flattened `as` missing: {json}");
+        assert!(!json.contains(r#""who""#), "`who` should be flattened away: {json}");
+        assert_eq!(
+            serde_json::from_str::<Request>(&json).unwrap().exec_plan(),
+            root.exec_plan()
+        );
+
+        // The exact JSON shapes the MCP `plan` doc advertises must parse.
+        let doc_root = r#"{"op":"run-as","as":"root","do":{"op":"run","argv":["id"]}}"#;
+        let doc_user = r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"run","argv":["id"]}}"#;
+        let p_root: Plan = serde_json::from_str(doc_root).unwrap();
+        let p_user: Plan = serde_json::from_str(doc_user).unwrap();
+        assert_eq!(p_root, Plan::RunAs { who: RunAs::Root, body: Box::new(run(&["id"])) });
+        assert_eq!(
+            p_user,
+            Plan::RunAs {
+                who: RunAs::User { name: "alice".into() },
+                body: Box::new(run(&["id"])),
+            }
+        );
     }
 
     /// `effective_privileged` is true for a top-level privileged flag, and also
