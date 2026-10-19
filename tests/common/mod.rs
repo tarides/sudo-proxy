@@ -155,6 +155,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             mode: opts.mode,
             pkexec_only: opts.pkexec_only,
             verbose: false,
+            log_json: false,
             unattended_eligible: opts.unattended_eligible,
             max_in_flight: opts.max_in_flight,
         };
