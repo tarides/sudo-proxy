@@ -108,14 +108,21 @@ fn redir_arrow(mode: crate::protocol::WriteMode) -> &'static str {
     }
 }
 
-/// Bold/dim/reset styling for the approval prompt — no color. All escapes are
-/// empty when NO_COLOR is set (https://no-color.org), so the prompt degrades to
-/// plain text. Output always targets /dev/tty, so this is the only gate needed.
+/// Styling for the approval prompt. `bold`/`dim`/`reset` are weight-only; `root`
+/// and `user` colorize the escalation tags so a `[ROOT]` stage stands out (bold
+/// red) from a named-user stage (bold yellow). All escapes are empty when
+/// NO_COLOR is set (https://no-color.org), so the prompt degrades to plain text
+/// (the `[ROOT]` / `[as user]` text tags still carry the information). Output
+/// always targets /dev/tty, so this is the only gate needed.
 #[derive(Clone, Copy)]
 struct Style {
     bold: &'static str,
     dim: &'static str,
     reset: &'static str,
+    /// Highlight for a root stage's tag (bold red).
+    root: &'static str,
+    /// Highlight for a named-user stage's tag (bold yellow).
+    user: &'static str,
 }
 
 fn style() -> Style {
@@ -126,9 +133,15 @@ fn style() -> Style {
 /// process-wide environment.
 fn style_for(no_color: bool) -> Style {
     if no_color {
-        Style { bold: "", dim: "", reset: "" }
+        Style { bold: "", dim: "", reset: "", root: "", user: "" }
     } else {
-        Style { bold: "\x1b[1m", dim: "\x1b[2m", reset: "\x1b[0m" }
+        Style {
+            bold: "\x1b[1m",
+            dim: "\x1b[2m",
+            reset: "\x1b[0m",
+            root: "\x1b[1;31m",
+            user: "\x1b[1;33m",
+        }
     }
 }
 
@@ -279,7 +292,7 @@ pub fn prompt_tty(
     let tty_r = File::open("/dev/tty")?;
 
     let st = style();
-    let Style { bold, dim, reset } = st;
+    let Style { bold, dim, reset, .. } = st;
 
     writeln!(tty_w, "\n{bold}━━━ Privilege Request ━━━{reset}")?;
     writeln!(
@@ -389,12 +402,15 @@ fn write_question_line<W: Write>(
     )
 }
 
-/// Render every stage of a compiled plan, one block per leaf: a header line
-/// with the run-as tag, the stage's argv (and any redirections), then its
-/// resolved real binary. A single plain unprivileged stage degrades to the
-/// classic one-line `Resolves:` form so simple prompts stay simple.
+/// Render a compiled plan below the `Command:` line, in three bands: a
+/// deduplicated **Resolves** block (every distinct real binary the plan runs,
+/// shown once), then the numbered **per-stage** list — each stage with its
+/// run-as tag (root/user colorized) and redirections, but *without* a per-stage
+/// resolve line (those are consolidated in the block above). A single plain
+/// unprivileged stage degrades to the classic one-line `Resolves:` form so
+/// simple prompts stay simple.
 fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
-    let Style { bold, dim, reset } = *style;
+    let Style { bold, dim, reset, root, user } = *style;
 
     // Simple case: one stage, no escalation, not opaque, no redirections — keep
     // the familiar single `Resolves:` line.
@@ -409,12 +425,17 @@ fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> 
         return Ok(());
     }
 
+    // Band 1: one consolidated, de-duplicated resolve block for the whole plan.
+    write_resolve_block(w, views, style)?;
+
+    // Band 2: the numbered per-stage list (run-as tags colorized), no per-stage
+    // resolve line — the structure the human approves, stage by stage.
     let shown = views.len().min(MAX_DISPLAY_STAGES);
     for view in &views[..shown] {
         let tag = match &view.privilege {
             LeafPrivilege::Direct => String::new(),
-            LeafPrivilege::Root => format!("{bold}[ROOT]{reset} "),
-            LeafPrivilege::User(name) => format!("{bold}[as {name}]{reset} "),
+            LeafPrivilege::Root => format!("{root}[ROOT]{reset} "),
+            LeafPrivilege::User(name) => format!("{user}[as {name}]{reset} "),
         };
         let redir = if view.redirects.is_empty() {
             String::new()
@@ -427,20 +448,6 @@ fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> 
             n = view.stage_id + 1,
             cmd = truncate_for_display(&shell_join(&view.argv)),
         )?;
-        // Resolve line for the stage, indented under it.
-        write!(w, "       ")?;
-        if view.opaque {
-            match &view.resolved_bin {
-                Some(p) => writeln!(
-                    w,
-                    "{bold}opaque — resolves only the shell: {}{reset}",
-                    p.display()
-                )?,
-                None => writeln!(w, "{bold}opaque — shell not found in PATH{reset}")?,
-            }
-        } else if let Some(name) = view.argv.first() {
-            write_resolves_line(w, name, style)?;
-        }
     }
     if views.len() > shown {
         let hidden = views.len() - shown;
@@ -450,6 +457,67 @@ fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> 
         )?;
     }
     Ok(())
+}
+
+/// The deduplicated `Resolves:` block: one line per distinct binary the plan
+/// runs, in first-seen order, so a binary used by several stages appears once.
+/// Entries with the same name *and* resolution collapse; distinct names stay
+/// apart even when they share a multi-call binary (`echo` vs `cat` on uutils).
+/// `System`/`Shell` stages render as the opaque-shell marker.
+fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
+    let Style { bold, reset, .. } = *style;
+    let mut seen = std::collections::HashSet::new();
+    let mut entries: Vec<(String, String)> = Vec::new();
+    for view in views {
+        let name = view.argv.first().cloned().unwrap_or_default();
+        let detail = if view.opaque {
+            match &view.resolved_bin {
+                Some(p) => format!(
+                    "{bold}opaque — resolves only the shell: {}{reset}",
+                    p.display()
+                ),
+                None => format!("{bold}opaque — shell not found in PATH{reset}"),
+            }
+        } else {
+            resolve_detail(&name, style)
+        };
+        if seen.insert(format!("{name}\u{0}{detail}")) {
+            entries.push((name, detail));
+        }
+    }
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let width = entries.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    writeln!(w, "Resolves:")?;
+    for (name, detail) in &entries {
+        writeln!(w, "  {name:<width$}  {detail}")?;
+    }
+    Ok(())
+}
+
+/// The resolution detail for a command name (the text after `Resolves:`),
+/// always naming a concrete path. Used by the consolidated resolve block; it
+/// mirrors `write_resolves_line`'s symlink display but never elides — the block
+/// shows every binary, even one supplied as an already-canonical absolute path.
+fn resolve_detail(cmd_name: &str, style: &Style) -> String {
+    let Style { bold, dim, reset, .. } = *style;
+    let resolved = match which(cmd_name) {
+        Some(p) => p,
+        None => return format!("{bold}(not found in PATH){reset}"),
+    };
+    let resolved_str = resolved.display().to_string();
+    match std::fs::canonicalize(&resolved) {
+        Ok(canonical) => {
+            let canonical_str = canonical.display().to_string();
+            if canonical_str != resolved_str {
+                format!("{resolved_str} {bold}->{reset} {canonical_str}")
+            } else {
+                resolved_str
+            }
+        }
+        Err(_) => format!("{resolved_str} {dim}(canonicalize failed){reset}"),
+    }
 }
 
 /// Write the `Resolves:` line for a command name. PATH-searches the
@@ -467,7 +535,7 @@ fn write_plan_stages<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> 
 ///   flag `(canonicalize failed)` so the prompt is honest about not
 ///   having verified the target.
 fn write_resolves_line<W: Write>(w: &mut W, cmd_name: &str, style: &Style) -> io::Result<()> {
-    let Style { bold, dim, reset } = *style;
+    let Style { bold, dim, reset, .. } = *style;
     let resolved = match which(cmd_name) {
         Some(p) => p,
         None => {
@@ -540,7 +608,7 @@ pub fn display_result(resp: &Response) -> io::Result<()> {
 
 /// Write the command result to any writer. Truncate stdout/stderr to 3 lines.
 pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
-    let Style { bold, dim, reset } = style();
+    let Style { bold, dim, reset, .. } = style();
 
     match resp.status {
         Status::Ok => {
@@ -737,7 +805,7 @@ mod tests {
 
     fn render_resolves(cmd_name: &str) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "B", dim: "D", reset: "R" };
+        let st = Style { bold: "B", dim: "D", reset: "R", root: "ROOT", user: "USR" };
         write_resolves_line(&mut buf, cmd_name, &st).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
@@ -778,7 +846,7 @@ mod tests {
 
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "" };
+        let st = Style { bold: "", dim: "", reset: "", root: "", user: "" };
         write_plan_stages(&mut buf, &views, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
 
@@ -786,10 +854,97 @@ mod tests {
         assert!(out.contains("[as alice]"), "missing user tag: {out}");
         assert!(
             out.contains("opaque — resolves only the shell"),
-            "System stage must be flagged opaque: {out}"
+            "Shell stage must be flagged opaque: {out}"
         );
-        // The two `true` stages each get their own resolved line.
-        assert_eq!(out.matches("Resolves:").count(), 2, "one resolves per non-opaque stage: {out}");
+        // One consolidated resolve block (not one `Resolves:` per stage), sitting
+        // above the numbered per-stage list.
+        assert_eq!(
+            out.matches("Resolves:").count(),
+            1,
+            "a single consolidated resolve block: {out}"
+        );
+        let resolves_at = out.find("Resolves:").unwrap();
+        let stage1_at = out.find("1. ").unwrap();
+        assert!(resolves_at < stage1_at, "resolve block must precede the stage list: {out}");
+        // All three stages are still listed, numbered.
+        for n in ["1. ", "2. ", "3. "] {
+            assert!(out.contains(n), "missing stage {n}: {out}");
+        }
+    }
+
+    /// The resolve block de-duplicates: a binary run by several stages appears
+    /// once. Uses a name guaranteed absent from PATH so the resolution is
+    /// deterministic (`(not found in PATH)`), then asserts it shows up once
+    /// despite two stages using it.
+    #[test]
+    fn resolve_block_dedupes_repeated_binary() {
+        use crate::protocol::{Plan, Request, ValidatedRequest};
+        let missing = "sudo-proxy-no-such-binary-xyz";
+        let plan = Plan::Run {
+            steps: vec![
+                Plan::Exec { argv: vec![missing.into(), "a".into()] },
+                Plan::Exec { argv: vec![missing.into(), "b".into()] },
+                Plan::Exec { argv: vec!["echo".into(), "done".into()] },
+            ],
+        };
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            false,
+            false,
+        ))
+        .expect("valid");
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "", root: "", user: "" };
+        write_plan_stages(&mut buf, &views, &st).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+        // Two stages run the missing binary, but it resolves once in the block.
+        assert_eq!(
+            out.matches("(not found in PATH)").count(),
+            1,
+            "repeated binary must de-duplicate in the resolve block: {out}"
+        );
+        // ...while both stages still appear in the numbered list.
+        assert!(out.contains("1. ") && out.contains("2. ") && out.contains("3. "), "{out}");
+    }
+
+    /// A root stage's tag is colorized with the `root` escape (and NO_COLOR —
+    /// empty escapes — degrades it to the plain `[ROOT]` text tag).
+    #[test]
+    fn root_stage_tag_is_colorized() {
+        use crate::protocol::{Plan, Request, RunAs, ValidatedRequest};
+        let plan = Plan::Run {
+            steps: vec![
+                Plan::RunAs {
+                    who: RunAs::Root,
+                    body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+                },
+                Plan::Exec { argv: vec!["echo".into(), "hi".into()] },
+            ],
+        };
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            true,
+            false,
+        ))
+        .expect("valid");
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "RESET", root: "ROOTCOLOR", user: "USERCOLOR" };
+        write_plan_stages(&mut buf, &views, &st).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+        assert!(
+            out.contains("ROOTCOLOR[ROOT]RESET"),
+            "root tag must be wrapped in the root color escape: {out}"
+        );
     }
 
     /// A simple single unprivileged command keeps the classic one-line
@@ -809,7 +964,7 @@ mod tests {
         .expect("valid");
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "" };
+        let st = Style { bold: "", dim: "", reset: "", root: "", user: "" };
         write_plan_stages(&mut buf, &views, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
         assert!(out.starts_with("Resolves:"), "compact form expected: {out}");
