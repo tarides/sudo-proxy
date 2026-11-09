@@ -1,0 +1,90 @@
+{
+  "op": "chdir",
+  "dir": "/home/user/proj-ocaml",
+  "do": {
+    "op": "seq",
+    "steps": [
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "worktree",
+          "remove",
+          "--force",
+          "/home/user/wt-130tsan"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "branch",
+          "-D",
+          "_stage_130review"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "echo",
+          "=== worktrees ==="
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "worktree",
+          "list"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "echo",
+          "=== tsan switch kept? ==="
+        ]
+      },
+      {
+        "op": "run",
+        "steps": [
+          {
+            "op": "pipe",
+            "stages": [
+              {
+                "op": "redirect",
+                "stream": "stderr",
+                "target": {
+                  "to": "dev-null"
+                },
+                "do": {
+                  "op": "exec",
+                  "argv": [
+                    "opam",
+                    "switch",
+                    "list",
+                    "-s"
+                  ]
+                }
+              },
+              {
+                "op": "exec",
+                "argv": [
+                  "grep",
+                  "tsan"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "exec",
+            "argv": [
+              "echo",
+              "(ocaml+tsan switch retained for reuse)"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

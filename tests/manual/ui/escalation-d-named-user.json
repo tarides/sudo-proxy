@@ -1,0 +1,4 @@
+{"op": "run", "steps": [
+  {"op": "exec", "argv": ["echo", "hi"]},
+  {"op": "run-as", "as": "user", "name": "nobody", "do": {"op": "exec", "argv": ["id", "-un"]}}
+]}

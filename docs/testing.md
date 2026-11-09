@@ -84,6 +84,54 @@ fallback-ran
   handler, not in the daemon, which is exactly what lets you drive unprivileged
   local plans here for testing.
 
+## Checking the approval prompt
+
+The plan files under `tests/manual/` exist to check what a human sees at the
+prompt: the copy-pasteable `Command:` line, the deduplicated `Resolves:` block,
+the numbered `Steps:` outline, and the escalation colours. You check these by
+eye, so this is a manual step. `tests/manual_corpus.rs` only guarantees that
+every file still parses and renders.
+
+For most of these the prompt is the result, so decline them (`n`). Approve only
+the ones you want to see run.
+
+### UI checks (`tests/manual/ui/`)
+
+Send each one and compare the prompt with the expected column:
+
+| File | Flags | Expect |
+|---|---|---|
+| `showcase.json` | `--no-privilege` | `Command:` reads `(export LANG=C; echo 'a;b' && echo 'hello world' \| wc -w && sudo id -un)`, which pastes into a shell as is: `a;b` quoted, `setenv` as a scoped subshell, `sudo` on the `id -un` leaf only. `Steps:` puts one command per line with dim 0-based line numbers and the `&&` / `\|` operators at line ends; `id -un` is bright red. |
+| `escalation-a-ambient.json` | (privileged) | Every step light red, `&&` tinted too. `Command:` has `sudo` on each leaf, never one `sudo sh -c`. |
+| `escalation-b-boundary.json` | `--no-privilege` | Only `whoami` is bright red; `echo hi` / `echo bye` uncoloured. |
+| `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
+| `escalation-d-named-user.json` | `--no-privilege` | `id -un` bright yellow (`run-as` a named non-root user). |
+
+Run once more with `NO_COLOR=1` set in the daemon's environment: the structure
+must stay readable with no escape codes.
+
+### Replaying a real approval log
+
+Toy plans miss what real agent traffic looks like. `tests/manual/log-corpus/` is
+the regression set for that: 24 requests from a real session's approval log,
+which all arrived as opaque `bash -lc '…'` blobs. They're redacted and
+translated into 23 structured plans (one was an exact duplicate). Its
+[README](../tests/manual/log-corpus/README.md) shows each original next to its
+plan, the exact `sudo-request` line to send, and the translation conventions
+(`;`→`seq`, `||`→`alt`, `sudo -u`→`run-as user`, what stays an opaque `shell`
+and why).
+
+For each case, check that the prompt makes the original's intent obvious at a
+glance: which stages run as root and which as a user, which redirects write
+where, and that anything still opaque is flagged as such. **Decline every one.**
+They refer to files and worktrees that don't exist here, and four touch a
+sysctl as root.
+
+To extend the corpus from a new session, run the daemon with `--log-json` so each
+request's plan is logged as JSON, or start from the daemon's approval log as this
+one did. Redact it (see the corpus README), add the plan as the next `NN-*.json`
+file and its original to the README, and run `cargo test --test manual_corpus`.
+
 ## Without a human (CI / headless)
 
 The human gate reads `/dev/tty`, so full execution needs either a person or a
