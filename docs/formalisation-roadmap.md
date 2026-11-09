@@ -324,9 +324,11 @@ Rung 2 only. What each rung would add:
   comparison of the two texts over random plans; a differential run of the
   executor against `sh` on each text over random privilege-free,
   side-effect-free plans; the same parse check over the manual corpus.
-  Gaps to close at this rung: `with-accepted-exit-codes` is not displayed and has
-  no shell spelling, so it falls outside the property (it needs a visible
-  rendering first); the differential run does not cover `run-as` or files.
+  `with-accepted-exit-codes` is spelled `{ cmd || [ $? -eq N ]; }` (a `case`
+  for several codes) and is in both properties; shapes that have no faithful
+  shell spelling (a stream redirected twice, `with-stdin-from` on a later pipe
+  stage, relative paths) are rejected at validation instead. Gap to close at
+  this rung: the differential run does not cover `run-as` or files.
 - **Rung 3.** A Kani harness over bounded plans proving that the layout is
   total and that rendering then re-parsing with an in-crate shell-grammar
   parser (for the subset the renderer emits) returns the plan's structure.

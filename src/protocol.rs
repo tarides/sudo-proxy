@@ -231,26 +231,37 @@ impl Plan {
             Plan::Redirect { target, body, .. } => {
                 if let RedirTarget::File { path, .. } = target {
                     check(path, "redirect path")?;
+                    require_absolute(path, "redirect path")?;
                 }
                 body.validate_tree(depth + 1, nodes)?;
             }
             Plan::WithStdinFrom { path, body } => {
                 check(path, "stdin path")?;
+                require_absolute(path, "stdin path")?;
                 body.validate_tree(depth + 1, nodes)?;
             }
             Plan::Setenv { key, value, body } => {
                 check(key, "env key")?;
+                if !is_valid_env_name(key) {
+                    return Err(format!("setenv key '{key}' is not a valid variable name"));
+                }
                 check(value, "env value")?;
                 body.validate_tree(depth + 1, nodes)?;
             }
             Plan::Chdir { dir, body } => {
                 check(dir, "chdir dir")?;
+                require_absolute(dir, "chdir dir")?;
                 body.validate_tree(depth + 1, nodes)?;
             }
             Plan::RunAs { who, body } => {
                 if let RunAs::User { name } = who {
                     if name.is_empty() {
                         return Err("run-as user must be named".to_string());
+                    }
+                    // sudo reads `#<uid>` as a numeric uid, so `#0` is root
+                    // under a name the prompt would not recognise as root.
+                    if name.starts_with('#') {
+                        return Err("run-as user must be a name, not a #uid".to_string());
                     }
                     check(name, "run-as user")?;
                 }
@@ -264,6 +275,98 @@ impl Plan {
             }
         }
         Ok(())
+    }
+
+    /// Reject stdio shapes whose shell rendering would not mean what the
+    /// executor does. In the shell the *last* redirection of a stream wins, so
+    /// the prompt's `cmd > G > F` writes to F, while the executor lets the
+    /// innermost node win (G). Rather than display a target that is never
+    /// opened, a stream may be redirected at most once along any path. Likewise
+    /// a later pipe stage reads the previous stage, so a `with-stdin-from` on it
+    /// is rejected rather than silently ignored.
+    ///
+    /// `out` / `err` / `inp`: whether an enclosing node already redirects
+    /// stdout / stderr / stdin.
+    pub(crate) fn validate_stdio(&self, out: bool, err: bool, inp: bool) -> Result<(), String> {
+        match self {
+            Plan::Exec { .. } | Plan::Shell { .. } => Ok(()),
+            Plan::Redirect { stream, body, .. } => {
+                let (o, e) = match stream {
+                    Stream::Stdout => (true, false),
+                    Stream::Stderr => (false, true),
+                    Stream::Both => (true, true),
+                };
+                if (o && out) || (e && err) {
+                    return Err("a stream is redirected twice; keep only one redirect per stream"
+                        .to_string());
+                }
+                body.validate_stdio(out || o, err || e, inp)
+            }
+            Plan::WithStdinFrom { body, .. } => {
+                if inp {
+                    return Err("stdin is redirected twice; keep only one with-stdin-from".to_string());
+                }
+                body.validate_stdio(out, err, true)
+            }
+            Plan::Pipe { stages } => {
+                for (i, s) in stages.iter().enumerate() {
+                    if i > 0 && s.contains_stdin_from() {
+                        return Err(
+                            "with-stdin-from is only allowed on the first pipe stage".to_string()
+                        );
+                    }
+                    s.validate_stdio(out, err, inp)?;
+                }
+                Ok(())
+            }
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter().try_for_each(|s| s.validate_stdio(out, err, inp))
+            }
+            Plan::Setenv { body, .. }
+            | Plan::Chdir { body, .. }
+            | Plan::RunAs { body, .. }
+            | Plan::WithAcceptedExitCodes { body, .. } => body.validate_stdio(out, err, inp),
+        }
+    }
+
+    fn contains_stdin_from(&self) -> bool {
+        match self {
+            Plan::Exec { .. } | Plan::Shell { .. } => false,
+            Plan::WithStdinFrom { .. } => true,
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter().any(Plan::contains_stdin_from)
+            }
+            Plan::Pipe { stages } => stages.iter().any(Plan::contains_stdin_from),
+            Plan::Redirect { body, .. }
+            | Plan::Setenv { body, .. }
+            | Plan::Chdir { body, .. }
+            | Plan::RunAs { body, .. }
+            | Plan::WithAcceptedExitCodes { body, .. } => body.contains_stdin_from(),
+        }
+    }
+
+    /// Canonicalise run-as targets: a `user` named `root` is the root
+    /// escalation, so it becomes `RunAs::Root` and gets the root wording and
+    /// colouring at the prompt.
+    pub(crate) fn normalize_runas(&mut self) {
+        match self {
+            Plan::Exec { .. } | Plan::Shell { .. } => {}
+            Plan::RunAs { who, body } => {
+                if matches!(who, RunAs::User { name } if name == "root") {
+                    *who = RunAs::Root;
+                }
+                body.normalize_runas();
+            }
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
+                steps.iter_mut().for_each(Plan::normalize_runas)
+            }
+            Plan::Pipe { stages } => stages.iter_mut().for_each(Plan::normalize_runas),
+            Plan::Redirect { body, .. }
+            | Plan::WithStdinFrom { body, .. }
+            | Plan::Setenv { body, .. }
+            | Plan::Chdir { body, .. }
+            | Plan::WithAcceptedExitCodes { body, .. } => body.normalize_runas(),
+        }
     }
 
     /// True if any subtree imposes a `RunAs` context. Any run-as — root or a
@@ -306,8 +409,28 @@ impl Plan {
     }
 }
 
+/// Plan paths (`chdir`, redirect targets, `with-stdin-from`) must be absolute:
+/// a relative one would resolve against the daemon's own cwd, not the
+/// enclosing `chdir` the prompt shows it under.
+fn require_absolute(path: &str, what: &str) -> Result<(), String> {
+    if path.starts_with('/') {
+        Ok(())
+    } else {
+        Err(format!("{what} must be an absolute path: {path}"))
+    }
+}
+
+/// A POSIX shell variable name: `[A-Za-z_][A-Za-z0-9_]*`. Any env key —
+/// request-level or `setenv` — must be one, so the prompt's `export K=…` and
+/// `sudo K=V …` renderings can never carry shell syntax in the key.
+pub(crate) fn is_valid_env_name(key: &str) -> bool {
+    let mut bytes = key.bytes();
+    matches!(bytes.next(), Some(b) if b.is_ascii_alphabetic() || b == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// Desugar a flat `pipeline` into an equivalent `Plan` tree. A single stage
-/// becomes a bare `Run`; multiple stages become a `Pipe`. Ambient privilege is
+/// becomes a bare `Exec`; multiple stages become a `Pipe`. Ambient privilege is
 /// **not** encoded here — the executor seeds its run-as context from
 /// `Request::privileged`, so a desugared tree and an explicit plan are handled
 /// uniformly. An empty pipeline (control actions only) yields an empty `Run`,
@@ -526,7 +649,7 @@ impl ValidatedRequest {
     /// `id`/`version` from a direct same-UID socket client that bypasses the
     /// client-side `validate_host`; all are held to the same sanitization as
     /// argv and env. See `tui::prompt_tty` for the render this protects.
-    pub fn validate(req: Request) -> Result<Self, String> {
+    pub fn validate(mut req: Request) -> Result<Self, String> {
         // Control actions (Stop/Ping) carry no pipeline by design; only an
         // Exec request must have one. An explicit `plan` is the modern form, so
         // an Exec request is "empty" only when it has neither. Every string-
@@ -557,13 +680,18 @@ impl ValidatedRequest {
         // Structured-plan path: recursively sanitize every string leaf and
         // enforce the depth / node bounds, using the same `has_dangerous_chars`
         // predicate as the flat path above.
-        if let Some(plan) = &req.plan {
+        if let Some(plan) = &mut req.plan {
             let mut nodes = 0usize;
             plan.validate_tree(0, &mut nodes)?;
+            plan.validate_stdio(false, false, false)?;
+            plan.normalize_runas();
         }
         for key in req.env.keys() {
             if has_dangerous_chars(key) {
                 return Err(format!("env key '{key}' contains forbidden characters"));
+            }
+            if !is_valid_env_name(key) {
+                return Err(format!("env key '{key}' is not a valid variable name"));
             }
         }
         for val in req.env.values() {
@@ -970,5 +1098,113 @@ mod tests {
             HashMap::new(), String::new(), false, false,
         );
         assert!(ValidatedRequest::validate(empty_alt).is_err());
+    }
+
+    fn plan_req(plan: Plan) -> Request {
+        Request::new_plan(String::new(), "s".into(), plan, HashMap::new(), String::new(), false, false)
+    }
+
+    fn redirect(stream: Stream, path: &str, body: Plan) -> Plan {
+        Plan::Redirect {
+            stream,
+            target: RedirTarget::File { path: path.into(), mode: WriteMode::Truncate },
+            body: Box::new(body),
+        }
+    }
+
+    fn stdin_from(path: &str, body: Plan) -> Plan {
+        Plan::WithStdinFrom { path: path.into(), body: Box::new(body) }
+    }
+
+    /// The shell lets the last redirection of a stream win, the executor the
+    /// innermost: a stream redirected twice cannot be displayed faithfully, so
+    /// it is rejected.
+    #[test]
+    fn validate_rejects_a_stream_redirected_twice() {
+        let twice = [
+            (Stream::Stdout, Stream::Stdout),
+            (Stream::Stderr, Stream::Stderr),
+            (Stream::Both, Stream::Stdout),
+            (Stream::Both, Stream::Stderr),
+            (Stream::Stdout, Stream::Both),
+        ];
+        for (outer, inner) in twice {
+            let p = redirect(outer, "/tmp/f", redirect(inner, "/tmp/g", exec(&["echo"])));
+            let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
+            assert!(err.contains("redirected twice"), "{outer:?}/{inner:?}: {err}");
+        }
+        // Different streams are fine.
+        let p = redirect(Stream::Stdout, "/tmp/f", redirect(Stream::Stderr, "/tmp/g", exec(&["echo"])));
+        assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
+        // So is the same stream on sibling steps.
+        let p = Plan::Run {
+            steps: vec![
+                redirect(Stream::Stdout, "/tmp/f", exec(&["echo"])),
+                redirect(Stream::Stdout, "/tmp/g", exec(&["echo"])),
+            ],
+        };
+        assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
+        // Stdin twice.
+        let p = stdin_from("/dev/null", stdin_from("/dev/zero", exec(&["cat"])));
+        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("stdin is redirected twice"));
+    }
+
+    #[test]
+    fn validate_rejects_stdin_on_a_later_pipe_stage() {
+        let p = Plan::Pipe { stages: vec![exec(&["echo", "x"]), stdin_from("/etc/hostname", exec(&["cat"]))] };
+        let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
+        assert!(err.contains("first pipe stage"), "{err}");
+        let p = Plan::Pipe { stages: vec![stdin_from("/etc/hostname", exec(&["cat"])), exec(&["wc"])] };
+        assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
+    }
+
+    #[test]
+    fn validate_requires_absolute_plan_paths() {
+        let cases = [
+            Plan::Chdir { dir: "bin".into(), body: Box::new(exec(&["pwd"])) },
+            redirect(Stream::Stdout, "out.txt", exec(&["echo"])),
+            stdin_from("in.txt", exec(&["cat"])),
+        ];
+        for p in cases {
+            let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
+            assert!(err.contains("must be an absolute path"), "{err}");
+        }
+        let p = Plan::Chdir { dir: "/usr".into(), body: Box::new(exec(&["pwd"])) };
+        assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
+    }
+
+    #[test]
+    fn env_keys_must_be_shell_variable_names() {
+        for good in ["LANG", "LC_ALL", "_x", "a1"] {
+            assert!(is_valid_env_name(good), "{good}");
+        }
+        for bad in ["", "1A", "LC_X;echo INJECTED;:", "A-B", "A B", "A=B", "LC_$(id)"] {
+            assert!(!is_valid_env_name(bad), "{bad}");
+        }
+        let p = Plan::Setenv {
+            key: "LC_X;echo INJECTED;:".into(),
+            value: "v".into(),
+            body: Box::new(exec(&["echo", "ok"])),
+        };
+        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("not a valid variable name"));
+        let mut req = exec_request();
+        req.env.insert("LC_X;echo INJECTED;:".into(), "v".into());
+        assert!(ValidatedRequest::validate(req).unwrap_err().contains("not a valid variable name"));
+    }
+
+    /// `root` by name is root; `#uid` (which sudo reads as a uid, so `#0` is
+    /// root) is refused.
+    #[test]
+    fn run_as_root_by_name_is_root_and_uid_form_is_refused() {
+        let p = Plan::RunAs { who: RunAs::User { name: "root".into() }, body: Box::new(exec(&["id"])) };
+        let v = ValidatedRequest::validate(plan_req(p)).unwrap();
+        assert!(v.runs_as_root());
+        assert!(matches!(v.plan, Some(Plan::RunAs { who: RunAs::Root, .. })));
+
+        let p = Plan::RunAs { who: RunAs::User { name: "#0".into() }, body: Box::new(exec(&["id"])) };
+        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("#uid"));
+
+        let p = Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(exec(&["id"])) };
+        assert!(!ValidatedRequest::validate(plan_req(p)).unwrap().runs_as_root());
     }
 }

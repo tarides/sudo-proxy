@@ -10,7 +10,8 @@ this security model — from code review up to mechanized verification — see
 [assurance-case.md](assurance-case.md).
 
 **Environment:** the request `env` is gated by a hard allowlist
-(`LANG`, `LC_*`, `TZ`, `HOME`, `DEBIAN_FRONTEND`, `TERM`). Anything else —
+(`LANG`, `LC_*`, `TZ`, `HOME`, `DEBIAN_FRONTEND`, `TERM`), and every key must
+be a shell variable name (`[A-Za-z_][A-Za-z0-9_]*`). Anything else —
 including `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, etc. — produces an
 error response; nothing is silently stripped. For pkexec and direct
 execution the process environment is cleared before applying the

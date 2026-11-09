@@ -499,8 +499,12 @@ pub fn run(
 /// `Plan` keeps serde's on-wire key order (`op` first, then fields in
 /// declaration order) rather than the alphabetical order a `Value` round-trip
 /// would impose. Falls back to the whole raw line if the body is not valid JSON.
+///
+/// This runs *before* validation and writes to the approval terminal, so every
+/// byte is passed through [`escape_for_terminal`]: a request must not be able
+/// to redraw the prompt with raw escape or bidi sequences.
 fn log_plan_json(line: &[u8]) {
-    let raw = || String::from_utf8_lossy(line).trim_end().to_string();
+    let raw = || escape_for_terminal(String::from_utf8_lossy(line).trim_end());
     let Ok(req) = serde_json::from_slice::<Request>(line) else {
         eprintln!("[json] {}", raw());
         return;
@@ -514,9 +518,28 @@ fn log_plan_json(line: &[u8]) {
         return;
     };
     match pretty {
-        Ok(s) => eprintln!("[json] {label}:\n{s}"),
+        Ok(s) => eprintln!("[json] {label}:\n{}", escape_for_terminal(&s)),
         Err(_) => eprintln!("[json] {}", raw()),
     }
+}
+
+/// Make untrusted text safe to print on the approval terminal: C0 controls
+/// (except newline and tab), DEL, C1 controls, and the zero-width / bidi
+/// characters `has_dangerous_chars` forbids are written as `\u{…}` escapes.
+fn escape_for_terminal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        let u = c as u32;
+        let unsafe_char = (u < 0x20 && c != '\n' && c != '\t')
+            || (0x7F..=0x9F).contains(&u)
+            || matches!(u, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069);
+        if unsafe_char {
+            out.push_str(&format!("\\u{{{u:x}}}"));
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -703,8 +726,16 @@ fn handle_connection(
         eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, cmd_display);
     }
 
+    // --pkexec hands approval to pkexec's own dialog, which shows only one
+    // escalated leaf's argv. That is sound only for a request that is
+    // privileged as a whole (every leaf escalates, so every leaf raises a
+    // dialog). A request that is privileged only through `run-as` nodes may
+    // carry unescalated leaves that pkexec never sees, so it takes the TUI
+    // prompt (and sudo) like any other privileged plan.
+    let use_pkexec = pkexec_only && mode == Mode::Local && req.privileged;
+
     let resp = if effective_privileged {
-        if pkexec_only && mode == Mode::Local {
+        if use_pkexec {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
             exec_pkexec(&req, &env, &tty_lock)
         } else {
@@ -784,8 +815,7 @@ fn handle_connection(
     // unprivileged path uses try_lock so a still-pending privileged prompt
     // never delays an unprivileged command's completion. Skip pkexec
     // because pkexec has its own dialog.
-    let used_pkexec = effective_privileged && pkexec_only && mode == Mode::Local;
-    if !used_pkexec {
+    if !use_pkexec {
         if effective_privileged {
             let _g = lock_recover(&tty_lock);
             let _ = result_sink.display(&resp);
@@ -875,6 +905,16 @@ mod tests {
     use super::*;
     use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
+
+    /// `--log-json` prints request bytes before validation, on the approval
+    /// terminal: escape, C1, DEL and bidi characters must come out inert.
+    #[test]
+    fn escape_for_terminal_neutralises_control_and_bidi() {
+        let s = "a\x1b[2J\u{9b}31m\u{7f}\u{202e}b\rc\n\td";
+        let e = escape_for_terminal(s);
+        assert_eq!(e, "a\\u{1b}[2J\\u{9b}31m\\u{7f}\\u{202e}b\\u{d}c\n\td");
+        assert!(!e.chars().any(|c| crate::protocol::has_dangerous_chars(&c.to_string()) && c != '\n'));
+    }
 
     fn fake_clock() -> (Arc<Mutex<Instant>>, impl Fn() -> Instant + Send + 'static) {
         let cell = Arc::new(Mutex::new(Instant::now()));

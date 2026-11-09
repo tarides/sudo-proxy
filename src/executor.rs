@@ -36,11 +36,12 @@ pub fn exec_timeout() -> Duration {
 }
 
 /// Only these env var names (or prefixes) are allowed through.
+/// The name must also be a valid shell variable name, so an `LC_` prefix cannot
+/// carry shell syntax into the prompt's `export K=…` / `sudo K=V` rendering.
 fn is_env_allowed(key: &str) -> bool {
-    matches!(
-        key,
-        "LANG" | "TZ" | "HOME" | "DEBIAN_FRONTEND" | "TERM"
-    ) || key.starts_with("LC_")
+    crate::protocol::is_valid_env_name(key)
+        && (matches!(key, "LANG" | "TZ" | "HOME" | "DEBIAN_FRONTEND" | "TERM")
+            || key.starts_with("LC_"))
 }
 
 /// Sanitize the environment from a request.
@@ -186,8 +187,9 @@ pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Res
 //   order) plus a `SeqNode` sequencing tree that references leaves by index.
 //
 //   Pass B (`run_seq`): interprets the sequencing tree — a `Pipe` group spawns
-//   its leaves connected by pipes, a `Seq` (the `seq` op) runs children in order and
-//   stops at the first non-accepted exit, a `Leaf` runs one process. Every
+//   its leaves connected by pipes, a `Run` (`&&`) runs children in order and
+//   stops at the first non-accepted exit, a `Seq` (`;`) runs them all, an `Alt`
+//   (`||`) stops at the first success, a `Leaf` runs one process. Every
 //   process shares one plan-wide deadline.
 //
 // No shell is ever assembled on the privileged path: each leaf fork/execs its
@@ -443,6 +445,9 @@ fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result
             compile_leaf(body, ctx, leaves)
         }
         Plan::WithStdinFrom { path, body } => {
+            if !matches!(ctx.stdin, InSpec::Null) {
+                return Err("stdin is redirected twice".to_string());
+            }
             ctx.stdin = InSpec::File(path.clone());
             compile_leaf(body, ctx, leaves)
         }
@@ -471,6 +476,18 @@ fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result
             RedirTarget::DevNull => ErrSpec::DevNull,
         }
     };
+    // Validation (`Plan::validate_stdio`) already rejects this; kept as a
+    // backstop so the executor never silently drops an outer redirect.
+    let out_taken = ctx.stdout != OutSpec::Capture;
+    let err_taken = !matches!(ctx.stderr, ErrSpec::Capture);
+    let clash = match stream {
+        Stream::Stdout => out_taken,
+        Stream::Stderr => err_taken,
+        Stream::Both => out_taken || err_taken,
+    };
+    if clash {
+        return Err("a stream is redirected twice".to_string());
+    }
     match stream {
         Stream::Stdout => ctx.stdout = out(target),
         Stream::Stderr => ctx.stderr = err(target),
@@ -519,6 +536,11 @@ fn compile_pipe(stages: &[Plan], ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result
                 "cannot redirect stdout of a non-final pipe stage; redirect the last stage"
                     .to_string(),
             );
+        }
+        // Likewise every stage but the first reads the previous stage, so its
+        // own stdin redirect would be silently ignored.
+        if pos > 0 && !matches!(leaves[idx].stdin, InSpec::Null) {
+            return Err("with-stdin-from is only allowed on the first pipe stage".to_string());
         }
         indices.push(idx);
     }
@@ -675,6 +697,11 @@ fn run_plan(
         Ok(c) => c,
         Err(e) => return Response::error(&req.id, &format!("invalid plan: {e}")),
     };
+    if mode == EscalationMode::Pkexec {
+        if let Err(e) = check_pkexec_leaves(&compiled.leaves, env_supports_chdir()) {
+            return Response::error(&req.id, &e);
+        }
+    }
     let total = exec_timeout();
     let deadline = Instant::now() + total;
     let mut outcomes = vec![Outcome::default(); compiled.leaves.len()];
@@ -715,6 +742,40 @@ fn run_plan(
         }
     }
     Response::ok_with_truncation(&req.id, stages, &stdout, stdout_truncated)
+}
+
+/// Whether this host's `env` understands `-C DIR` (GNU coreutils ≥ 8.28,
+/// uutils). Probed once.
+fn env_supports_chdir() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        Command::new("env")
+            .args(["-C", "/", "--", "true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// Preconditions for running escalated leaves as `pkexec env -C DIR -- argv`:
+/// `env` must support `-C` (otherwise the approved `chdir` could not be
+/// honoured), and argv[0] must not contain `=`, which `env` would take as an
+/// environment assignment rather than the command.
+fn check_pkexec_leaves(leaves: &[LeafPlan], env_has_chdir: bool) -> Result<(), String> {
+    for leaf in leaves.iter().filter(|l| l.runas.is_escalated()) {
+        if !env_has_chdir {
+            return Err(
+                "pkexec mode needs an `env` that supports -C to keep the working directory"
+                    .to_string(),
+            );
+        }
+        if leaf.argv[0].contains('=') {
+            return Err("under pkexec, a command name must not contain '='".to_string());
+        }
+    }
+    Ok(())
 }
 
 fn run_seq(
@@ -966,6 +1027,17 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Command {
                     c.arg("--user");
                     c.arg(name);
                 }
+                // pkexec runs PROGRAM in the target user's home unless told
+                // otherwise, which would ignore the plan's `chdir`. `env -C`
+                // re-enters the approved directory; `--` keeps an argv[0]
+                // that looks like an option from being parsed by `env`, and
+                // `check_pkexec_leaves` has already refused an argv[0] that
+                // `env` would read as a `NAME=VALUE` assignment.
+                // (`pkexec --keep-cwd` exists only in polkit ≥ 121.)
+                c.arg("env");
+                c.arg("-C");
+                c.arg(&leaf.cwd);
+                c.arg("--");
                 for a in &leaf.argv {
                     c.arg(a);
                 }
@@ -1465,6 +1537,42 @@ mod tests {
 
     fn pid_alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    fn leaf(argv: &[&str], runas: LeafRunAs) -> LeafPlan {
+        LeafPlan {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+            env: HashMap::new(),
+            cwd: "/".into(),
+            runas,
+            stdin: InSpec::Null,
+            stdout: OutSpec::Capture,
+            stderr: ErrSpec::Capture,
+            opaque: false,
+            resolved_bin: None,
+            accepted: vec![],
+            forward_agent: false,
+            stage_id: 0,
+        }
+    }
+
+    /// Under pkexec an escalated leaf runs as `pkexec env -C DIR -- argv`, so
+    /// it keeps the approved cwd; `env` must support `-C`, and an argv[0] that
+    /// `env` would take as `NAME=VALUE` is refused.
+    #[test]
+    fn pkexec_leaves_keep_cwd_through_env() {
+        let mut l = leaf(&["id"], LeafRunAs::Root);
+        l.cwd = "/srv".into();
+        let c = build_command(&l, EscalationMode::Pkexec);
+        let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(c.get_program(), "pkexec");
+        assert_eq!(args, ["env", "-C", "/srv", "--", "id"]);
+
+        let ok = [leaf(&["id"], LeafRunAs::Root), leaf(&["A=B"], LeafRunAs::Direct)];
+        assert!(check_pkexec_leaves(&ok, true).is_ok());
+        assert!(check_pkexec_leaves(&ok, false).unwrap_err().contains("-C"));
+        let bad = [leaf(&["LD_PRELOAD=/x", "id"], LeafRunAs::Root)];
+        assert!(check_pkexec_leaves(&bad, true).unwrap_err().contains("'='"));
     }
 
     #[test]

@@ -60,7 +60,7 @@ pub fn command_summary(req: &ValidatedRequest) -> String {
 pub fn steps_shell_text(req: &ValidatedRequest) -> String {
     steps_lines(&request_layout(req), &style_for(true))
         .iter()
-        .map(|l| format!("{}{}", "  ".repeat(l.depth), l.text))
+        .map(|l| format!("{}{}{}", "  ".repeat(l.depth), l.text, l.comment(&style_for(true))))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -72,6 +72,7 @@ pub fn steps_shell_text(req: &ValidatedRequest) -> String {
 fn ambient_ctx(privileged: bool) -> LayCtx {
     LayCtx {
         sudo: if privileged { "sudo ".into() } else { String::new() },
+        accepted: Vec::new(),
         esc: Esc {
             uid: if privileged { StepUid::Root } else { StepUid::Default },
             boundary: false,
@@ -123,6 +124,10 @@ enum Lay {
         redir: String,
         esc: Esc,
         scope: bool,
+        /// A remark for the `Steps:` block only, printed as a trailing shell
+        /// comment (e.g. which exit codes count as success). Never part of the
+        /// `Command:` line.
+        note: String,
     },
     /// Explicit parentheses, with redirections applied to the whole group.
     Group { inner: Box<Lay>, redir: String },
@@ -130,21 +135,24 @@ enum Lay {
     Chain { op: Op, items: Vec<Lay> },
 }
 
-/// The `sudo` prefix and colouring threaded down from the enclosing `run-as`.
+/// The `sudo` prefix and colouring threaded down from the enclosing `run-as`,
+/// and the exit codes the enclosing `with-accepted-exit-codes` treats as
+/// success (the innermost one wins, as in the executor).
 struct LayCtx {
     sudo: String,
     esc: Esc,
+    accepted: Vec<i32>,
 }
 
 fn layout(plan: &Plan, ctx: &LayCtx) -> Lay {
     match plan {
-        Plan::Exec { argv } => lay_leaf(format!("{}{}", ctx.sudo, shell_join(argv)), ctx.esc),
+        Plan::Exec { argv } => lay_leaf(format!("{}{}", ctx.sudo, shell_join(argv)), ctx),
         Plan::Shell { shell, script } => {
             let bin = match shell {
                 crate::protocol::ShellProc::Sh => "sh",
                 crate::protocol::ShellProc::Bash => "bash",
             };
-            lay_leaf(format!("{}{bin} -c {}", ctx.sudo, shquote(script)), ctx.esc)
+            lay_leaf(format!("{}{bin} -c {}", ctx.sudo, shquote(script)), ctx)
         }
         Plan::Pipe { stages } => lay_group(lay_chain(Op::Pipe, stages, ctx)),
         Plan::Run { steps } => lay_chain(Op::And, steps, ctx),
@@ -165,20 +173,45 @@ fn layout(plan: &Plan, ctx: &LayCtx) -> Lay {
                 RunAs::Root => LayCtx {
                     sudo: "sudo ".into(),
                     esc: Esc { uid: StepUid::Root, boundary: true },
+                    accepted: ctx.accepted.clone(),
                 },
                 RunAs::User { name } => LayCtx {
                     sudo: format!("sudo -u {} ", shquote(name)),
                     esc: Esc { uid: StepUid::User, boundary: true },
+                    accepted: ctx.accepted.clone(),
                 },
             };
             layout(body, &ctx2)
         }
-        Plan::WithAcceptedExitCodes { body, .. } => layout(body, ctx),
+        Plan::WithAcceptedExitCodes { codes, body } => {
+            let ctx2 = LayCtx { sudo: ctx.sudo.clone(), esc: ctx.esc, accepted: codes.clone() };
+            layout(body, &ctx2)
+        }
     }
 }
 
-fn lay_leaf(cmd: String, esc: Esc) -> Lay {
-    Lay::Leaf { cmd, redir: String::new(), esc, scope: false }
+/// A command leaf. Under `with-accepted-exit-codes`, the command is wrapped so
+/// that, as shell, an accepted non-zero exit counts as success exactly as it
+/// does for the executor's `&&` / `||` / pipe status:
+/// `{ cmd || [ $? -eq 1 ]; }`, or with several codes
+/// `{ cmd || case $? in 1|2) ;; *) false ;; esac; }`. The `Steps:` block also
+/// spells the accepted codes out in a trailing comment.
+fn lay_leaf(cmd: String, ctx: &LayCtx) -> Lay {
+    let mut codes: Vec<i32> = ctx.accepted.iter().copied().filter(|&c| c != 0).collect();
+    codes.sort_unstable();
+    codes.dedup();
+    let (cmd, note) = match codes.as_slice() {
+        [] => (cmd, String::new()),
+        [c] => (format!("{{ {cmd} || [ $? -eq {c} ]; }}"), format!("exit {c} accepted")),
+        cs => {
+            let list = cs.iter().map(i32::to_string).collect::<Vec<_>>();
+            (
+                format!("{{ {cmd} || case $? in {}) ;; *) false ;; esac; }}", list.join("|")),
+                format!("exits {} accepted", list.join(", ")),
+            )
+        }
+    };
+    Lay::Leaf { cmd, redir: String::new(), esc: ctx.esc, scope: false, note }
 }
 
 /// Parenthesize, unless the layout already is a bare group.
@@ -209,8 +242,8 @@ fn lay_chain(op: Op, steps: &[Plan], ctx: &LayCtx) -> Lay {
 
 fn lay_redirect(l: Lay, suffix: String) -> Lay {
     match l {
-        Lay::Leaf { cmd, redir, esc, scope } => {
-            Lay::Leaf { cmd, redir: join_suffix(redir, &suffix), esc, scope }
+        Lay::Leaf { cmd, redir, esc, scope, note } => {
+            Lay::Leaf { cmd, redir: join_suffix(redir, &suffix), esc, scope, note }
         }
         Lay::Group { inner, redir } => Lay::Group { inner, redir: join_suffix(redir, &suffix) },
         c @ Lay::Chain { .. } => Lay::Group { inner: Box::new(c), redir: suffix },
@@ -227,6 +260,7 @@ fn lay_scope(header: String, body: Lay) -> Lay {
         redir: String::new(),
         esc: Esc { uid: StepUid::Default, boundary: false },
         scope: true,
+        note: String::new(),
     };
     Lay::Group {
         inner: Box::new(Lay::Chain { op: Op::And, items: vec![head, lay_group(body)] }),
@@ -684,6 +718,19 @@ struct StepLine {
     depth: usize,
     text: String,
     numbered: bool,
+    /// Trailing remark, written after everything else on the line as a shell
+    /// comment, so operators and parentheses appended to `text` stay before it.
+    note: String,
+}
+
+impl StepLine {
+    fn comment(&self, style: &Style) -> String {
+        if self.note.is_empty() {
+            String::new()
+        } else {
+            format!("  {}# {}{}", style.dim, self.note, style.reset)
+        }
+    }
 }
 
 /// The `Steps:` block — one command per line, indented by parenthesis depth,
@@ -703,10 +750,10 @@ fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> 
     for ln in &lines[..shown] {
         let indent = "  ".repeat(ln.depth + 1);
         if ln.numbered {
-            writeln!(w, "{dim}{n:<width$}{reset}{indent}{}", ln.text)?;
+            writeln!(w, "{dim}{n:<width$}{reset}{indent}{}{}", ln.text, ln.comment(style))?;
             n += 1;
         } else {
-            writeln!(w, "{:width$}{indent}{}", "", ln.text)?;
+            writeln!(w, "{:width$}{indent}{}{}", "", ln.text, ln.comment(style))?;
         }
     }
     if lines.len() > shown {
@@ -726,9 +773,9 @@ fn steps_lines(lay: &Lay, style: &Style) -> Vec<StepLine> {
 /// after this subtree, which decides where a group's `)` goes.
 fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut Vec<StepLine>) {
     match lay {
-        Lay::Leaf { cmd, redir, esc, scope } => {
+        Lay::Leaf { cmd, redir, esc, scope, note } => {
             let text = if *scope { cmd.clone() } else { colorize(*esc, cmd, style) };
-            out.push(StepLine { depth, text: join_suffix(text, redir), numbered: true });
+            out.push(StepLine { depth, text: join_suffix(text, redir), numbered: true, note: note.clone() });
         }
         Lay::Chain { op, items } => {
             let plain = format!(" {}", op.sym());
@@ -756,7 +803,7 @@ fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut 
                     prev.depth
                 }
                 None => {
-                    out.push(StepLine { depth, text: "(".into(), numbered: false });
+                    out.push(StepLine { depth, text: "(".into(), numbered: false, note: String::new() });
                     depth
                 }
             };
@@ -769,7 +816,7 @@ fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut 
                 last.text.push(' ');
                 last.text.push_str(&close);
             } else {
-                out.push(StepLine { depth: opener_depth, text: close, numbered: false });
+                out.push(StepLine { depth: opener_depth, text: close, numbered: false, note: String::new() });
             }
         }
     }
@@ -1745,6 +1792,33 @@ mod tests {
         );
     }
 
+    /// An accepted non-zero exit lets the chain go on, in the executor and in
+    /// the displayed shell alike; the Steps block also names the codes.
+    #[test]
+    fn accepted_exit_codes_are_shown_and_mean_what_runs() {
+        let req = mk_req(
+            Plan::Run {
+                steps: vec![
+                    Plan::WithAcceptedExitCodes { codes: vec![1], body: Box::new(ex(&["false"])) },
+                    ex(&["echo", "ran"]),
+                ],
+            },
+            false,
+        );
+        let cmd = command_summary(&req);
+        assert_eq!(cmd, "{ false || [ $? -eq 1 ]; } && echo ran");
+        assert_eq!(steps_block(&req), "0  { false || [ $? -eq 1 ]; } &&  # exit 1 accepted\n1  echo ran\n");
+        assert_eq!(run_sh(&cmd), "ran\n");
+        assert_eq!(run_sh(&steps_shell_text(&req)), "ran\n");
+
+        let req = mk_req(
+            Plan::WithAcceptedExitCodes { codes: vec![2, 1, 0], body: Box::new(ex(&["false"])) },
+            false,
+        );
+        assert_eq!(command_summary(&req), "{ false || case $? in 1|2) ;; *) false ;; esac; }");
+        assert_eq!(steps_block(&req), "0  { false || case $? in 1|2) ;; *) false ;; esac; }  # exits 1, 2 accepted\n");
+    }
+
     /// Adjacent openers are written `( (`: bash reads `((` as arithmetic.
     #[test]
     fn command_never_opens_with_double_paren() {
@@ -1848,7 +1922,10 @@ mod tests {
                 body: Box::new(leaf(rng)),
             },
             9 => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(leaf(rng)) },
-            _ => Plan::WithAcceptedExitCodes { codes: vec![1], body: Box::new(random_any(rng, depth - 1)) },
+            _ => Plan::WithAcceptedExitCodes {
+                codes: [vec![1], vec![1, 2]][rng.below(2)].clone(),
+                body: Box::new(random_any(rng, depth - 1)),
+            },
         }
     }
 
@@ -1876,6 +1953,7 @@ mod tests {
             2 => ex(&["pwd"]),
             3 => ex(&["printenv", "TZ"]),
             4 => Plan::Shell { shell: ShellProc::Sh, script: "echo s; exit 1".into() },
+            5 => Plan::Shell { shell: ShellProc::Sh, script: "echo t; exit 2".into() },
             _ => ex(&["echo", pick(rng, &["1", "2", "3", "4", "5"])]),
         };
         if depth == 0 || rng.below(4) == 0 {
@@ -1884,12 +1962,19 @@ mod tests {
         let kids = |rng: &mut crate::prop::Rng| -> Vec<Plan> {
             (0..1 + rng.below(3)).map(|_| random_runnable(rng, depth - 1)).collect()
         };
-        match rng.below(8) {
+        match rng.below(10) {
             0 => Plan::Run { steps: kids(rng) },
             1 => Plan::Alt { steps: kids(rng) },
             2 => Plan::Seq { steps: kids(rng) },
             3 => Plan::Pipe { stages: vec![leaf(rng), ex(&["cat"])] },
-            4 => Plan::Chdir { dir: "/tmp".into(), body: Box::new(random_runnable(rng, depth - 1)) },
+            4 => Plan::Chdir {
+                dir: pick(rng, &["/tmp", "/usr", "/usr/bin"]).into(),
+                body: Box::new(random_runnable(rng, depth - 1)),
+            },
+            8 | 9 => Plan::WithAcceptedExitCodes {
+                codes: [vec![1], vec![1, 2], vec![0, 7]][rng.below(3)].clone(),
+                body: Box::new(random_runnable(rng, depth - 1)),
+            },
             5 => Plan::Setenv { key: "TZ".into(), value: "UTC".into(), body: Box::new(random_runnable(rng, depth - 1)) },
             6 => Plan::Redirect { stream: Stream::Stdout, target: RedirTarget::DevNull, body: Box::new(leaf(rng)) },
             _ => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(ex(&["cat"])) },
