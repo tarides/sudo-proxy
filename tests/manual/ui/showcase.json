@@ -1,0 +1,11 @@
+{
+  "op": "setenv", "key": "LANG", "value": "C",
+  "do": {"op": "run", "steps": [
+    {"op": "exec", "argv": ["echo", "a;b"]},
+    {"op": "pipe", "stages": [
+      {"op": "exec", "argv": ["echo", "hello world"]},
+      {"op": "exec", "argv": ["wc", "-w"]}
+    ]},
+    {"op": "run-as", "as": "root", "do": {"op": "exec", "argv": ["id", "-un"]}}
+  ]}
+}

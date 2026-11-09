@@ -1,0 +1,54 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "ls",
+        "-la",
+        "/tmp/tsan_pipeline.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "---tail---"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "tail",
+        "-8",
+        "/tmp/tsan_pipeline.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "---procs---"
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "exec",
+          "argv": [
+            "pgrep",
+            "-af",
+            "ocaml.*tsan|opam install|dune build|switch create"
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "head"
+          ]
+        }
+      ]
+    }
+  ]
+}

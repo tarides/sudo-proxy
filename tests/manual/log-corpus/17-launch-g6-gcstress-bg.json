@@ -1,0 +1,5 @@
+{
+  "op": "shell",
+  "shell": "bash",
+  "script": "cd ~; nohup bash -c 'cd ~/proj-ocaml && git worktree add -f ~/wt-130g6 _stage_130g6 && cd ~/wt-130g6 && make -C abi clean >/dev/null 2>&1; make abi >/tmp/g6_build.log 2>&1 && opam exec -- make lib >>/tmp/g6_build.log 2>&1 && PROJ_CONF=/mnt/data/proj.conf OCAMLRUNPARAM=\"s=131072,o=20\" MALLOC_PERTURB_=170 opam exec -- dune exec lib/proj/test/concurrency.exe -- test \"Multi-domain stress\" 1 >/tmp/g6_gcstress.log 2>&1; echo G6_GCSTRESS_DONE exit=$? >> /tmp/g6_gcstress.log' >/dev/null 2>&1 & echo launched-g6-gcstress-pid $!"
+}
