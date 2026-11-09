@@ -301,6 +301,43 @@ itself, the kernel, SSH — and proves that the daemon's own logic refines the
 abstract approval spec. This is a research-grade goal; even unrealised, its
 value is forcing a complete enumeration of the trust assumptions.
 
+## Display fidelity across the rungs
+
+Structured plans moved the security-relevant question from "is this shell
+string safe?" to "does the prompt show what will run?". The approval prompt
+shows a plan twice: the `Steps:` block, which the operator reviews line by
+line, and the `Command:` line, which they may paste into a shell. The
+invariant (assurance case **G4.5**):
+
+> The `Steps:` text and the `Command:` line parse, as shell, to the same tree,
+> and that tree has the semantics the executor gives the plan.
+
+The grouping rules that make this hold are in
+[testing.md](testing.md#how-the-prompt-shows-grouping). Current evidence is
+Rung 2 only. What each rung would add:
+
+- **Rung 1.** A review checklist item: any change to `src/tui.rs` rendering, to
+  the plan ops, or to the executor's composition semantics must keep the
+  properties below green; a lint or Semgrep rule against rendering a `Plan`
+  anywhere but through the shared layout.
+- **Rung 2 (in place, [partial]).** Golden layouts; a `bash` parse-tree
+  comparison of the two texts over random plans; a differential run of the
+  executor against `sh` on each text over random privilege-free,
+  side-effect-free plans; the same parse check over the manual corpus.
+  Gaps to close at this rung: `with-accepted-exit-codes` is not displayed and has
+  no shell spelling, so it falls outside the property (it needs a visible
+  rendering first); the differential run does not cover `run-as` or files.
+- **Rung 3.** A Kani harness over bounded plans proving that the layout is
+  total and that rendering then re-parsing with an in-crate shell-grammar
+  parser (for the subset the renderer emits) returns the plan's structure.
+  This removes `bash` as the oracle for the syntactic half.
+- **Rung 5.** A deductive proof (Creusot / Verus) that the renderer refines a
+  shell-semantics model of the emitted subset, and that the executor refines
+  the same model: then display and execution agree by proof, not by sampling.
+- **Rung 6.** The trust assumption stated: the operator's terminal and their
+  reading of POSIX shell grouping are outside the proof; the rules keep that
+  reading unambiguous (one operator per group, every group bracketed).
+
 ## The MCP / LLM-specific layer
 
 A1 is a prompt-injected caller, so the requirements must be anchored to current
@@ -341,7 +378,7 @@ prefix-matching escapes documented in the
 |------|-----------|-------|-------------------|-------------|
 | 0 ✓ | Threat modelling | STRIDE, attack trees ([threat-model.md](threat-model.md)) | A1/A2/A3 per boundary B1–B6 | ST threats |
 | 1 | Review + static analysis | clippy, cargo-audit, cargo-deny, cargo-geiger, Semgrep/MIRAI | display sanitization, `unsafe` surface | EAL1–3 |
-| 2 | Property-based testing | proptest, quickcheck | `shell_escape`, `parse_age`, display fields, policy flag | EAL3–4 |
+| 2 | Property-based testing | proptest, quickcheck | `shell_escape`, `parse_age`, display fields, policy flag, prompt grouping ≡ execution (G4.5) | EAL3–4 |
 | 3 | Automated formal | Kani, Flux | parsers (no panic/overflow), validation boundary | EAL4–5 |
 | 4 ✓ | Protocol verification | TLA+/PlusCal (TLC), ProVerif ([`proofs/`](../proofs/)) | approval state machine, replay, SSH path | EAL5–6 |
 | 5 | Deductive verification | Creusot, Verus, Prusti | `validate_request`, dispatch, env allowlist | EAL6–7 |

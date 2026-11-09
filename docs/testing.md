@@ -89,8 +89,9 @@ fallback-ran
 The plan files under `tests/manual/` exist to check what a human sees at the
 prompt: the copy-pasteable `Command:` line, the deduplicated `Resolves:` block,
 the numbered `Steps:` outline, and the escalation colours. You check these by
-eye, so this is a manual step. `tests/manual_corpus.rs` only guarantees that
-every file still parses and renders.
+eye, so this is a manual step. `tests/manual_corpus.rs` guarantees that every
+file still parses and renders, and that its `Steps:` text and `Command:` line
+group the same way under `bash`.
 
 For most of these the prompt is the result, so decline them (`n`). Approve only
 the ones you want to see run.
@@ -101,14 +102,57 @@ Send each one and compare the prompt with the expected column:
 
 | File | Flags | Expect |
 |---|---|---|
-| `showcase.json` | `--no-privilege` | `Command:` reads `(export LANG=C; echo 'a;b' && echo 'hello world' \| wc -w && sudo id -un)`, which pastes into a shell as is: `a;b` quoted, `setenv` as a scoped subshell, `sudo` on the `id -un` leaf only. `Steps:` puts one command per line with dim 0-based line numbers and the `&&` / `\|` operators at line ends; `id -un` is bright red. |
+| `showcase.json` | `--no-privilege` | `Command:` reads `(export LANG=C; (echo 'a;b' && (echo 'hello world' \| wc -w) && sudo id -un))`, which pastes into a shell as is. `Steps:` shows the same groups, one command per line (see [How the prompt shows grouping](#how-the-prompt-shows-grouping)); `sudo id -un` is bright red. |
 | `escalation-a-ambient.json` | (privileged) | Every step light red, `&&` tinted too. `Command:` has `sudo` on each leaf, never one `sudo sh -c`. |
 | `escalation-b-boundary.json` | `--no-privilege` | Only `whoami` is bright red; `echo hi` / `echo bye` uncoloured. |
 | `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
 | `escalation-d-named-user.json` | `--no-privilege` | `id -un` bright yellow (`run-as` a named non-root user). |
 
 Run once more with `NO_COLOR=1` set in the daemon's environment: the structure
-must stay readable with no escape codes.
+must stay readable with no escape codes, and every escalated step still shows
+its `sudo` / `sudo -u NAME` prefix.
+
+### How the prompt shows grouping
+
+The `Steps:` block and the `Command:` line are printed from one layout, so they
+always have the same parentheses. With its line numbers removed, the `Steps:`
+block is valid shell that `bash` parses to the same tree as the `Command:` line.
+The layout rules:
+
+1. One line number per command; each pipe stage counts. A line holding only
+   `(` or `)` is not numbered.
+2. Every operator is written out, with a space before it: ` ;`, ` &&`, ` ||`,
+   ` |`.
+3. `(` goes at the end of the line leading into the group, or on a line of its
+   own when nothing precedes it.
+4. `)` goes at the end of the group's last line when an operator or a
+   redirection follows the group; otherwise on its own line, under the line
+   holding its `(`.
+5. Indentation is the parenthesis depth, nothing else.
+6. A `cd` / `export` scope is `( cd DIR ; ( body ) )`. The parentheses keep it
+   from leaking, including when the whole plan is the scope: the `Command:`
+   line may be pasted into a stateful shell.
+7. A pipe is always parenthesized.
+8. The `Command:` line has exactly the `Steps:` parentheses. Adjacent openers
+   are written `( (`, never `((`, which bash reads as arithmetic.
+9. Every line of a group ends with the same operator. A nested chain of the
+   same operator is flattened into its parent; one of another operator gets its
+   own group, so an operator never reaches further than its group.
+10. `run-as` shows as a `sudo` / `sudo -u NAME` prefix on each command it
+    covers, in the `Steps:` block as well as on the `Command:` line.
+
+For example, `a && (b || c)`:
+
+```
+0  false && (
+1    true ||
+2    echo RAN
+   )
+```
+
+These properties are checked in `src/tui.rs`: golden layouts, a `bash` parse
+comparison of the two over random plans, and a differential run (executor vs
+`sh` running each text) over random side-effect-free plans.
 
 ### Replaying a real approval log
 

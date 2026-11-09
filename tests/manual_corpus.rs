@@ -1,14 +1,16 @@
 //! Keep the manual-test plans (`tests/manual/{log-corpus,ui}/*.json`) honest: every
 //! plan must parse, validate, and compile for display exactly as the daemon does
-//! before prompting. Nothing runs — this only catches drift when the plan
-//! schema changes (an op rename would otherwise silently rot the corpus).
+//! before prompting, and its `Steps:` text and `Command:` line must parse, under
+//! bash, to the same tree. Nothing runs — this catches drift when the plan schema
+//! or the prompt layout changes (an op rename would otherwise silently rot the
+//! corpus).
 
 use std::collections::HashMap;
 use std::path::Path;
 
 use sudo_proxy::executor::plan_display;
 use sudo_proxy::protocol::{Plan, Request, ValidatedRequest};
-use sudo_proxy::tui::command_summary;
+use sudo_proxy::tui::{command_summary, steps_shell_text};
 
 #[test]
 fn log_corpus_plans_parse_validate_and_render() {
@@ -52,5 +54,24 @@ fn check_dir(rel: &str) {
         assert!(!leaves.is_empty(), "{name}: no stages");
         let line = command_summary(&req);
         assert!(!line.contains("bash -lc"), "{name}: Command line still wraps bash -lc: {line}");
+        let steps = steps_shell_text(&req);
+        assert_eq!(
+            bash_tree(&steps),
+            bash_tree(&line),
+            "{name}: Steps and Command group differently\nSteps:\n{steps}\nCommand: {line}"
+        );
     }
+}
+
+/// `bash`'s canonical form of a script (`declare -f` of a wrapper function),
+/// whitespace-squeezed: equal forms mean the same shell tree. Parsing only —
+/// the function is never called.
+fn bash_tree(text: &str) -> String {
+    let out = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(format!("f() {{\n{text}\n}}\ndeclare -f f"))
+        .output()
+        .expect("run bash");
+    assert!(out.status.success(), "bash rejected:\n{text}");
+    String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ")
 }

@@ -116,6 +116,8 @@ a sanitized environment.*
 | **Sn4.3** | After **F3** fix: displayed command length is bounded with an explicit hidden-bytes marker. | 1 | [discharged] |
 | **G4.4** | Residual: printable-range Unicode look-alikes / NBSP in `reason` (passive, cannot hide the real command). | — | |
 | **Sn4.4** | Documented residual in [security-audit.md](security-audit.md) (F1). | 0 | [accepted-risk] |
+| **G4.5** | The grouping shown at the gate is the grouping that runs: the `Steps:` block (what the operator reviews) and the `Command:` line (what they may paste) parse, as shell, to the same tree, and that tree means what the executor runs. | — | |
+| **Sn4.5** | `src/tui.rs`: both are printed from one layout tree (the rules in [testing.md](testing.md#how-the-prompt-shows-grouping)); golden layouts; `prop_steps_and_command_parse_to_the_same_tree` (bash parse trees equal, 300 random plans incl. `run-as`, redirections, quoting); `prop_displayed_text_runs_like_the_executor` (executor stdout = `sh` on each text, 150 random side-effect-free plans); `tests/manual_corpus.rs` (bash parse check on every manual plan). Residuals: `with-accepted-exit-codes` has no shell spelling and is not shown; the differential run covers only privilege-free, side-effect-free plans; `bash` is the oracle, not a specification; a pasted line runs under the operator's environment, not the executor's sanitized one. | 2 | [partial] → see [formalisation-roadmap.md](formalisation-roadmap.md#display-fidelity-across-the-rungs) |
 
 ### G5 — Approval is necessary and binding
 
