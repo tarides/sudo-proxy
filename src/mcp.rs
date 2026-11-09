@@ -145,6 +145,10 @@ pub struct ExecuteParams {
     /// {"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{...}};
     /// {"op":"setenv","key":"LANG","value":"C","do":{...}}; {"op":"chdir","dir":"/srv","do":{...}};
     /// {"op":"shell","shell":"bash","script":"..."} (explicit opaque escape hatch).
+    /// Rules: paths in chdir / redirect / with-stdin-from must be absolute; a
+    /// stream may be redirected at most once along any path; with-stdin-from is
+    /// allowed only on the first stage of a pipe; env keys must be shell
+    /// variable names; run-as names a user, never a `#uid`.
     /// Semantics to plan around: a `run` (`&&`) runs its steps in order and STOPS
     /// at the first failing step — the earlier steps have already run and their
     /// effects are committed, so make early steps idempotent (or put the

@@ -335,3 +335,48 @@ fn plan_request_end_to_end_through_daemon() {
         "daemon should have prompted"
     );
 }
+
+/// `--pkexec` hands approval to pkexec's per-leaf dialog, which only ever sees
+/// escalated leaves. A plan that escalates only through `run-as` must still go
+/// through the TUI prompt: otherwise its unescalated steps run unapproved.
+#[test]
+fn pkexec_mode_still_prompts_for_run_as_plans() {
+    let server = common::start_test_server(common::TestServerOpts {
+        pkexec_only: true,
+        ..Default::default()
+    });
+    server
+        .prompter
+        .set_response(|_| (std::time::Duration::ZERO, sudo_proxy::tui::PromptResult::Denied));
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let marker = dir.path().join("ran");
+    let plan = Plan::Run {
+        steps: vec![
+            Plan::Redirect {
+                stream: Stream::Stdout,
+                target: RedirTarget::File {
+                    path: marker.to_string_lossy().into_owned(),
+                    mode: WriteMode::Truncate,
+                },
+                body: Box::new(exec(&["echo", "unapproved"])),
+            },
+            Plan::RunAs {
+                who: sudo_proxy::protocol::RunAs::Root,
+                body: Box::new(exec(&["true"])),
+            },
+        ],
+    };
+    let req = Request::new_plan(
+        String::new(),
+        "test".into(),
+        plan,
+        HashMap::new(),
+        String::new(),
+        false,
+        false,
+    );
+    let resp = server.send(&req);
+    assert_eq!(server.prompter.call_count(), 1, "the TUI prompt was skipped");
+    assert_eq!(resp.status, Status::Denied, "got {resp:?}");
+    assert!(!marker.exists(), "an unescalated step ran without approval");
+}

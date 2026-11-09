@@ -24,6 +24,18 @@ There is no middle ground in polkit. The TUI mode solves this by always
 prompting for approval (one keypress, no password) while letting the OS
 handle password authentication separately.
 
+Only requests sent with `privileged: true` go to pkexec. In those, every step
+escalates, so each one raises its own dialog. A structured plan that escalates
+only some steps (through `run-as` nodes) still gets the TUI prompt and runs
+through sudo, even in `--pkexec` mode. A pkexec dialog shows a single step, so
+the unescalated steps of such a plan would otherwise run with no approval at
+all.
+
+Each escalated step runs as `pkexec env -C <dir> -- <argv>`, so it starts in
+the plan's working directory rather than the target user's home, which is
+where pkexec runs programs by default. The polkit dialog therefore names
+`/usr/bin/env` as the program.
+
 ## pkexec authentication caching
 
 If you do use `--pkexec` mode, you can optionally configure polkit to cache
