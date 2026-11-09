@@ -40,114 +40,223 @@ pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
         .join(" | ")
 }
 
-/// A one-line, copy-paste-executable shell rendering of a request's command.
-/// Precedence-correct (parenthesizes nested composites), `setenv`/`chdir` become
-/// scoped subshells, and `run-as` is threaded onto each leaf as `sudo`/`sudo -u`
-/// (matching the executor's per-leaf escalation) — so a privilege-free plan
-/// pastes and runs as you, and a privileged one pastes and runs with auth. Used
-/// for the `Command:` line, logs, and the compact banner.
+/// A one-line, copy-paste-executable shell rendering of a request's command:
+/// the `Steps:` block flattened onto one line. Both are printed from the same
+/// [`Lay`] tree, so they carry exactly the same parentheses and must parse, as
+/// shell, to the same tree (see [`steps_shell_text`]). `setenv`/`chdir` become
+/// scoped subshells, pipes and mixed-operator chains are parenthesized, and
+/// `run-as` is threaded onto each leaf as `sudo`/`sudo -u` (matching the
+/// executor's per-leaf escalation) — so a privilege-free plan pastes and runs as
+/// you, and a privileged one pastes and runs with auth. Used for the `Command:`
+/// line, logs, and the compact banner.
 pub fn command_summary(req: &ValidatedRequest) -> String {
-    // Seed the escalation prefix from the ambient privilege flag, mirroring the
-    // executor (a `privileged` request runs every leaf as root). A `run-as` node
-    // overrides it per-subtree. So each leaf is `sudo`'d individually — never a
-    // single `sudo sh -c '…'`, which would put a shell back on the root path.
-    let ambient_sudo = if req.privileged { "sudo " } else { "" };
-    cmd_render(&req.exec_plan(), ambient_sudo).0
+    lay_command(&request_layout(req))
 }
 
-/// Shell operator precedence, loosest to tightest. Drives parenthesization: a
-/// child whose binding is looser than its slot needs `( … )`.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Prec {
-    Seq,   // ;
-    AndOr, // && ||
-    Pipe,  // |
-    Atom,  // a single (possibly redirected / grouped) command
+/// The `Steps:` block as plain shell text — uncoloured, unnumbered, one step per
+/// line, indented by parenthesis depth. This is what bash reads if the block is
+/// pasted, and it must parse to the same tree as [`command_summary`]: the
+/// operator reviews one and may paste the other, so they can never disagree.
+pub fn steps_shell_text(req: &ValidatedRequest) -> String {
+    steps_lines(&request_layout(req), &style_for(true))
+        .iter()
+        .map(|l| format!("{}{}", "  ".repeat(l.depth), l.text))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
-/// Parenthesize `s` iff its precedence `p` is looser than the slot needs.
-fn paren_if(s: String, p: Prec, need: Prec) -> String {
-    if p < need {
-        format!("({s})")
-    } else {
-        s
+/// Ambient escalation context: a `privileged` request runs every leaf as root,
+/// mirroring the executor, so each leaf gets its own `sudo` (never a single
+/// `sudo sh -c '…'`, which would put a shell back on the root path) and reads
+/// light red. A `run-as` node overrides it per subtree.
+fn ambient_ctx(privileged: bool) -> LayCtx {
+    LayCtx {
+        sudo: if privileged { "sudo ".into() } else { String::new() },
+        esc: Esc {
+            uid: if privileged { StepUid::Root } else { StepUid::Default },
+            boundary: false,
+        },
     }
 }
 
-/// Render a plan as `(shell string, its precedence)`. `sudo` is the escalation
-/// prefix threaded down from any enclosing `run-as` (""/"sudo "/"sudo -u NAME ").
-fn cmd_render(plan: &Plan, sudo: &str) -> (String, Prec) {
+fn request_layout(req: &ValidatedRequest) -> Lay {
+    layout(&req.exec_plan(), &ambient_ctx(req.privileged))
+}
+
+/// The shell operators of the display.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Seq,
+    And,
+    Or,
+    Pipe,
+}
+
+impl Op {
+    fn sym(self) -> &'static str {
+        match self {
+            Op::Seq => ";",
+            Op::And => "&&",
+            Op::Or => "||",
+            Op::Pipe => "|",
+        }
+    }
+}
+
+/// The display layout of a plan, shared by the `Command:` line and the `Steps:`
+/// block so both show the same grouping by construction. The grouping rules
+/// (see `docs/testing.md`, "How the prompt shows grouping"):
+///
+/// - a chain holds one operator; a nested chain of the same operator is flattened
+///   into it, one of another operator is parenthesized — so every line of a
+///   `Steps:` group ends with the same operator;
+/// - a pipe is always parenthesized;
+/// - a `cd`/`export` scope is `( cd D ; ( body ) )`, so nothing leaks out of it,
+///   even when the whole plan is the scope (the `Command:` line is pasted into a
+///   stateful shell).
+enum Lay {
+    /// One command line: `cmd` (with any `sudo` prefix) plus its redirections.
+    /// A `scope` leaf is the `cd`/`export` header of a scope, never escalated.
+    Leaf {
+        cmd: String,
+        redir: String,
+        esc: Esc,
+        scope: bool,
+    },
+    /// Explicit parentheses, with redirections applied to the whole group.
+    Group { inner: Box<Lay>, redir: String },
+    /// Two or more items joined by one operator.
+    Chain { op: Op, items: Vec<Lay> },
+}
+
+/// The `sudo` prefix and colouring threaded down from the enclosing `run-as`.
+struct LayCtx {
+    sudo: String,
+    esc: Esc,
+}
+
+fn layout(plan: &Plan, ctx: &LayCtx) -> Lay {
     match plan {
-        Plan::Exec { argv } => (format!("{sudo}{}", shell_join(argv)), Prec::Atom),
+        Plan::Exec { argv } => lay_leaf(format!("{}{}", ctx.sudo, shell_join(argv)), ctx.esc),
         Plan::Shell { shell, script } => {
             let bin = match shell {
                 crate::protocol::ShellProc::Sh => "sh",
                 crate::protocol::ShellProc::Bash => "bash",
             };
-            (format!("{sudo}{bin} -c {}", shquote(script)), Prec::Atom)
+            lay_leaf(format!("{}{bin} -c {}", ctx.sudo, shquote(script)), ctx.esc)
         }
-        Plan::Pipe { stages } => {
-            let parts: Vec<String> = stages
-                .iter()
-                .map(|s| {
-                    let (t, p) = cmd_render(s, sudo);
-                    paren_if(t, p, Prec::Pipe)
-                })
-                .collect();
-            (parts.join(" | "), Prec::Pipe)
-        }
-        Plan::Run { steps } => (join_andor(steps, sudo, " && "), Prec::AndOr),
-        Plan::Alt { steps } => (join_andor(steps, sudo, " || "), Prec::AndOr),
-        Plan::Seq { steps } => {
-            // `;` is loosest: no operand ever needs parens.
-            let parts: Vec<String> = steps.iter().map(|s| cmd_render(s, sudo).0).collect();
-            (parts.join("; "), Prec::Seq)
-        }
+        Plan::Pipe { stages } => lay_group(lay_chain(Op::Pipe, stages, ctx)),
+        Plan::Run { steps } => lay_chain(Op::And, steps, ctx),
+        Plan::Alt { steps } => lay_chain(Op::Or, steps, ctx),
+        Plan::Seq { steps } => lay_chain(Op::Seq, steps, ctx),
         Plan::Redirect { stream, target, body } => {
-            let (t, p) = cmd_render(body, sudo);
-            (
-                format!("{} {}", paren_if(t, p, Prec::Atom), redir_suffix(*stream, target)),
-                Prec::Atom,
-            )
+            lay_redirect(layout(body, ctx), redir_suffix(*stream, target))
         }
         Plan::WithStdinFrom { path, body } => {
-            let (t, p) = cmd_render(body, sudo);
-            (format!("{} < {}", paren_if(t, p, Prec::Atom), shquote(path)), Prec::Atom)
+            lay_redirect(layout(body, ctx), format!("< {}", shquote(path)))
         }
         Plan::Setenv { key, value, body } => {
-            let (t, _) = cmd_render(body, sudo);
-            (format!("(export {key}={}; {t})", shquote(value)), Prec::Atom)
+            lay_scope(format!("export {key}={}", shquote(value)), layout(body, ctx))
         }
-        Plan::Chdir { dir, body } => {
-            let (t, _) = cmd_render(body, sudo);
-            (format!("(cd {}; {t})", shquote(dir)), Prec::Atom)
-        }
+        Plan::Chdir { dir, body } => lay_scope(format!("cd {}", shquote(dir)), layout(body, ctx)),
         Plan::RunAs { who, body } => {
-            let sudo2 = match who {
-                RunAs::Root => "sudo ".to_string(),
-                RunAs::User { name } => format!("sudo -u {} ", shquote(name)),
+            let ctx2 = match who {
+                RunAs::Root => LayCtx {
+                    sudo: "sudo ".into(),
+                    esc: Esc { uid: StepUid::Root, boundary: true },
+                },
+                RunAs::User { name } => LayCtx {
+                    sudo: format!("sudo -u {} ", shquote(name)),
+                    esc: Esc { uid: StepUid::User, boundary: true },
+                },
             };
-            cmd_render(body, &sudo2)
+            layout(body, &ctx2)
         }
-        Plan::WithAcceptedExitCodes { body, .. } => cmd_render(body, sudo),
+        Plan::WithAcceptedExitCodes { body, .. } => layout(body, ctx),
     }
 }
 
-/// Join `&&`/`||` operands, parenthesizing any operand that binds at `&&`/`||`
-/// or looser (so mixed `&&`/`||` and nested `;` stay correctly grouped).
-fn join_andor(steps: &[Plan], sudo: &str, op: &str) -> String {
-    steps
-        .iter()
-        .map(|s| {
-            let (t, p) = cmd_render(s, sudo);
-            if p <= Prec::AndOr {
-                format!("({t})")
-            } else {
-                t
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(op)
+fn lay_leaf(cmd: String, esc: Esc) -> Lay {
+    Lay::Leaf { cmd, redir: String::new(), esc, scope: false }
+}
+
+/// Parenthesize, unless the layout already is a bare group.
+fn lay_group(l: Lay) -> Lay {
+    match l {
+        g @ Lay::Group { .. } if matches!(&g, Lay::Group { redir, .. } if redir.is_empty()) => g,
+        other => Lay::Group { inner: Box::new(other), redir: String::new() },
+    }
+}
+
+fn lay_chain(op: Op, steps: &[Plan], ctx: &LayCtx) -> Lay {
+    let mut items = Vec::new();
+    for s in steps {
+        match layout(s, ctx) {
+            // Same operator: associative, so flatten into this chain.
+            Lay::Chain { op: o, items: sub } if o == op => items.extend(sub),
+            // Another operator: its own group, so a line's operator never
+            // reaches further than its group.
+            c @ Lay::Chain { .. } => items.push(lay_group(c)),
+            other => items.push(other),
+        }
+    }
+    if items.len() == 1 {
+        return items.pop().expect("one item");
+    }
+    Lay::Chain { op, items }
+}
+
+fn lay_redirect(l: Lay, suffix: String) -> Lay {
+    match l {
+        Lay::Leaf { cmd, redir, esc, scope } => {
+            Lay::Leaf { cmd, redir: join_suffix(redir, &suffix), esc, scope }
+        }
+        Lay::Group { inner, redir } => Lay::Group { inner, redir: join_suffix(redir, &suffix) },
+        c @ Lay::Chain { .. } => Lay::Group { inner: Box::new(c), redir: suffix },
+    }
+}
+
+/// `( header ; ( body ) )` — the scope's own parentheses keep `cd`/`export` from
+/// leaking past it.
+fn lay_scope(header: String, body: Lay) -> Lay {
+    let head = Lay::Leaf {
+        cmd: header,
+        redir: String::new(),
+        esc: Esc { uid: StepUid::Default, boundary: false },
+        scope: true,
+    };
+    Lay::Group {
+        inner: Box::new(Lay::Chain { op: Op::Seq, items: vec![head, lay_group(body)] }),
+        redir: String::new(),
+    }
+}
+
+fn join_suffix(s: String, suffix: &str) -> String {
+    match (s.is_empty(), suffix.is_empty()) {
+        (_, true) => s,
+        (true, false) => suffix.to_string(),
+        (false, false) => format!("{s} {suffix}"),
+    }
+}
+
+/// The `Command:` one-liner: the layout with every group on one line.
+fn lay_command(l: &Lay) -> String {
+    match l {
+        Lay::Leaf { cmd, redir, .. } => join_suffix(cmd.clone(), redir),
+        Lay::Group { inner, redir } => {
+            let s = lay_command(inner);
+            // `((` would open an arithmetic command in bash: keep openers apart.
+            let open = if s.starts_with('(') { "( " } else { "(" };
+            join_suffix(format!("{open}{s})"), redir)
+        }
+        Lay::Chain { op, items } => {
+            let sep = match op {
+                Op::Seq => "; ".to_string(),
+                _ => format!(" {} ", op.sym()),
+            };
+            items.iter().map(lay_command).collect::<Vec<_>>().join(&sep)
+        }
+    }
 }
 
 /// The redirection suffix for a stream/target pair, paths safely quoted.
@@ -503,14 +612,7 @@ fn write_plan_stages<W: Write>(
     }
 
     write_resolve_block(w, views, style)?;
-    // Ambient escalation: a `privileged` request runs every leaf as root (so the
-    // whole plan reads red), mirroring the executor; a `run-as` node overrides it
-    // per-subtree (and marks that leaf bold).
-    let ambient = Esc {
-        uid: if privileged { StepUid::Root } else { StepUid::Default },
-        boundary: false,
-    };
-    write_steps(w, plan, ambient, style)?;
+    write_steps(w, &layout(plan, &ambient_ctx(privileged)), style)?;
     Ok(())
 }
 
@@ -547,35 +649,36 @@ fn colorize(esc: Esc, text: &str, style: &Style) -> String {
     }
 }
 
-/// One rendered step line: nesting depth + already-colored content. The trailing
-/// operator (if any) is appended by the enclosing composite.
+/// One line of the `Steps:` block, at a parenthesis depth. A `numbered` line
+/// holds a command; a line holding only parentheses is not numbered.
 struct StepLine {
     depth: usize,
     text: String,
+    numbered: bool,
 }
 
-fn push_line(out: &mut Vec<StepLine>, depth: usize, text: String) -> (usize, usize) {
-    out.push(StepLine { depth, text });
-    let i = out.len() - 1;
-    (i, i)
-}
-
-/// The `Steps:` block — an indented, line-numbered (0-based, dim, flush-left),
-/// uid-colored outline using `&&`/`||`/`|`/`;` and nesting. Informative, not
-/// executable (that is the copy-pasteable `Command:` line).
-fn write_steps<W: Write>(w: &mut W, plan: &Plan, ambient: Esc, style: &Style) -> io::Result<()> {
-    let mut lines = Vec::new();
-    steps_emit(plan, 0, ambient, style, &mut lines);
+/// The `Steps:` block — one command per line, indented by parenthesis depth,
+/// numbered (0-based, dim, flush-left) so the human can reference a line,
+/// coloured by uid. It is valid shell grouping exactly like the `Command:` line.
+fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> {
+    let lines = steps_lines(lay, style);
     if lines.is_empty() {
         return Ok(());
     }
     let Style { dim, reset, bold, .. } = *style;
     writeln!(w, "Steps:")?;
     let shown = lines.len().min(MAX_DISPLAY_STAGES);
-    let width = shown.saturating_sub(1).to_string().len();
-    for (i, ln) in lines[..shown].iter().enumerate() {
+    let numbered = lines[..shown].iter().filter(|l| l.numbered).count();
+    let width = numbered.saturating_sub(1).to_string().len();
+    let mut n = 0usize;
+    for ln in &lines[..shown] {
         let indent = "  ".repeat(ln.depth + 1);
-        writeln!(w, "{dim}{i:<width$}{reset}{indent}{}", ln.text)?;
+        if ln.numbered {
+            writeln!(w, "{dim}{n:<width$}{reset}{indent}{}", ln.text)?;
+            n += 1;
+        } else {
+            writeln!(w, "{:width$}{indent}{}", "", ln.text)?;
+        }
     }
     if lines.len() > shown {
         let hidden = lines.len() - shown;
@@ -584,163 +687,80 @@ fn write_steps<W: Write>(w: &mut W, plan: &Plan, ambient: Esc, style: &Style) ->
     Ok(())
 }
 
-/// Emit step lines for a plan subtree. Returns the inclusive index range of the
-/// lines produced, so an enclosing composite can append its operator to the last
-/// line of each non-final child.
-fn steps_emit(
-    plan: &Plan,
-    depth: usize,
-    esc: Esc,
-    style: &Style,
-    out: &mut Vec<StepLine>,
-) -> (usize, usize) {
-    match plan {
-        Plan::Exec { argv } => push_line(out, depth, colorize(esc, &shell_join(argv), style)),
-        Plan::Shell { .. } | Plan::Pipe { .. } => {
-            push_line(out, depth, inline_leaf(plan, esc, style))
+fn steps_lines(lay: &Lay, style: &Style) -> Vec<StepLine> {
+    let mut out = Vec::new();
+    steps_emit(lay, 0, false, style, &mut out);
+    out
+}
+
+/// Emit the lines of a layout subtree. `followed` says an operator comes right
+/// after this subtree, which decides where a group's `)` goes.
+fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut Vec<StepLine>) {
+    match lay {
+        Lay::Leaf { cmd, redir, esc, scope } => {
+            let text = if *scope { cmd.clone() } else { colorize(*esc, cmd, style) };
+            out.push(StepLine { depth, text: join_suffix(text, redir), numbered: true });
         }
-        Plan::Run { steps } => emit_joined(steps, depth, esc, style, out, " &&"),
-        Plan::Alt { steps } => emit_joined(steps, depth, esc, style, out, " ||"),
-        Plan::Seq { steps } => emit_joined(steps, depth, esc, style, out, " ;"),
-        Plan::Setenv { key, value, body } => {
-            let (first, _) = push_line(out, depth, format!("export {key}={}", shquote(value)));
-            let (_, last) = steps_emit(body, depth + 1, esc, style, out);
-            (first, last)
-        }
-        Plan::Chdir { dir, body } => {
-            let (first, _) = push_line(out, depth, format!("cd {}", shquote(dir)));
-            let (_, last) = steps_emit(body, depth + 1, esc, style, out);
-            (first, last)
-        }
-        Plan::RunAs { who, body } => {
-            // Override the uid for this subtree and mark it bold — the explicit
-            // escalation boundary.
-            let esc2 = Esc {
-                uid: match who {
-                    RunAs::Root => StepUid::Root,
-                    RunAs::User { .. } => StepUid::User,
-                },
-                boundary: true,
+        Lay::Chain { op, items } => {
+            let plain = format!(" {}", op.sym());
+            // Tint the operator when every command in the chain runs escalated,
+            // so a contiguous privileged region reads as one coloured block.
+            let op_str = if lay_all_escalated(lay) && !style.root.is_empty() {
+                format!("{}{plain}{}", style.root, style.reset)
+            } else {
+                plain
             };
-            steps_emit(body, depth, esc2, style, out)
+            for (i, item) in items.iter().enumerate() {
+                let last = i + 1 == items.len();
+                steps_emit(item, depth, !last, style, out);
+                if !last {
+                    out.last_mut().expect("an item emits a line").text.push_str(&op_str);
+                }
+            }
         }
-        Plan::WithAcceptedExitCodes { body, .. } => steps_emit(body, depth, esc, style, out),
-        Plan::Redirect { stream, target, body } => {
-            let (first, last) = steps_emit(body, depth, esc, style, out);
-            out[last].text.push_str(&format!(" {}", redir_suffix(*stream, target)));
-            (first, last)
-        }
-        Plan::WithStdinFrom { path, body } => {
-            let (first, last) = steps_emit(body, depth, esc, style, out);
-            out[last].text.push_str(&format!(" < {}", shquote(path)));
-            (first, last)
+        Lay::Group { inner, redir } => {
+            // Egyptian brackets: `(` ends the line leading into the group, or
+            // sits on a line of its own when nothing precedes it.
+            let opener_depth = match out.last_mut() {
+                Some(prev) => {
+                    prev.text.push_str(" (");
+                    prev.depth
+                }
+                None => {
+                    out.push(StepLine { depth, text: "(".into(), numbered: false });
+                    depth
+                }
+            };
+            steps_emit(inner, depth + 1, false, style, out);
+            // `)` ends the group's last line when an operator or a redirection
+            // follows; otherwise it closes on its own line, under its opener.
+            let close = join_suffix(")".into(), redir);
+            if followed || !redir.is_empty() {
+                let last = out.last_mut().expect("a group emits a line");
+                last.text.push(' ');
+                last.text.push_str(&close);
+            } else {
+                out.push(StepLine { depth: opener_depth, text: close, numbered: false });
+            }
         }
     }
 }
 
-/// Emit each child of a `&&`/`||`/`;` composite on its own line(s), then append
-/// `op` to the last line of every non-final child.
-fn emit_joined(
-    steps: &[Plan],
-    depth: usize,
-    esc: Esc,
-    style: &Style,
-    out: &mut Vec<StepLine>,
-    op: &str,
-) -> (usize, usize) {
-    let start = out.len();
-    let ranges: Vec<(usize, usize)> = steps
-        .iter()
-        .map(|s| steps_emit(s, depth, esc, style, out))
-        .collect();
-    // Tint the operator when every leaf in this group runs escalated, so a
-    // contiguous privileged region reads as one colored block.
-    let all_esc = steps.iter().all(|s| subtree_all_escalated(s, esc.uid));
-    let op_str = if all_esc && !style.root.is_empty() {
-        format!("{}{op}{}", style.root, style.reset)
-    } else {
-        op.to_string()
-    };
-    if ranges.len() > 1 {
-        for r in &ranges[..ranges.len() - 1] {
-            out[r.1].text.push_str(&op_str);
+/// Whether every command (scope headers aside) in this layout runs escalated.
+fn lay_all_escalated(lay: &Lay) -> bool {
+    fn walk(l: &Lay, seen: &mut bool) -> bool {
+        match l {
+            Lay::Leaf { scope: true, .. } => true,
+            Lay::Leaf { esc, .. } => {
+                *seen = true;
+                esc.uid != StepUid::Default
+            }
+            Lay::Group { inner, .. } => walk(inner, seen),
+            Lay::Chain { items, .. } => items.iter().all(|i| walk(i, seen)),
         }
     }
-    let first = ranges.first().map(|r| r.0).unwrap_or(start);
-    let last = ranges.last().map(|r| r.1).unwrap_or(start);
-    (first, last)
-}
-
-/// Whether every `exec`/`shell` leaf in this subtree runs escalated (root or a
-/// named user) under the given ambient uid — a `run-as` node escalates its
-/// subtree regardless of ambient. Drives operator tinting.
-fn subtree_all_escalated(plan: &Plan, uid: StepUid) -> bool {
-    match plan {
-        Plan::Exec { .. } | Plan::Shell { .. } => uid != StepUid::Default,
-        Plan::RunAs { who, body } => {
-            let uid2 = match who {
-                RunAs::Root => StepUid::Root,
-                RunAs::User { .. } => StepUid::User,
-            };
-            subtree_all_escalated(body, uid2)
-        }
-        Plan::Pipe { stages } => stages.iter().all(|s| subtree_all_escalated(s, uid)),
-        Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
-            steps.iter().all(|s| subtree_all_escalated(s, uid))
-        }
-        Plan::Redirect { body, .. }
-        | Plan::WithStdinFrom { body, .. }
-        | Plan::Setenv { body, .. }
-        | Plan::Chdir { body, .. }
-        | Plan::WithAcceptedExitCodes { body, .. } => subtree_all_escalated(body, uid),
-    }
-}
-
-/// Render a single-process subtree (a pipe stage, or a `shell` leaf) to a
-/// colored one-line string. Peels transparent modifiers; composites (which the
-/// compiler forbids as pipe stages) fall back to the command renderer.
-fn inline_leaf(plan: &Plan, esc: Esc, style: &Style) -> String {
-    match plan {
-        Plan::Exec { argv } => colorize(esc, &shell_join(argv), style),
-        Plan::Shell { shell, script } => {
-            let bin = match shell {
-                crate::protocol::ShellProc::Sh => "sh",
-                crate::protocol::ShellProc::Bash => "bash",
-            };
-            colorize(esc, &format!("{bin} -c {}", shquote(script)), style)
-        }
-        Plan::Pipe { stages } => stages
-            .iter()
-            .map(|s| inline_leaf(s, esc, style))
-            .collect::<Vec<_>>()
-            .join(" | "),
-        Plan::RunAs { who, body } => {
-            let esc2 = Esc {
-                uid: match who {
-                    RunAs::Root => StepUid::Root,
-                    RunAs::User { .. } => StepUid::User,
-                },
-                boundary: true,
-            };
-            inline_leaf(body, esc2, style)
-        }
-        Plan::Redirect { stream, target, body } => {
-            format!("{} {}", inline_leaf(body, esc, style), redir_suffix(*stream, target))
-        }
-        Plan::WithStdinFrom { path, body } => {
-            format!("{} < {}", inline_leaf(body, esc, style), shquote(path))
-        }
-        Plan::Setenv { key, value, body } => {
-            format!("{key}={} {}", shquote(value), inline_leaf(body, esc, style))
-        }
-        Plan::Chdir { dir, body } => {
-            format!("(cd {}; {})", shquote(dir), inline_leaf(body, esc, style))
-        }
-        Plan::WithAcceptedExitCodes { body, .. } => inline_leaf(body, esc, style),
-        Plan::Run { .. } | Plan::Seq { .. } | Plan::Alt { .. } => {
-            colorize(esc, &cmd_render(plan, "").0, style)
-        }
-    }
+    let mut seen = false;
+    walk(lay, &mut seen) && seen
 }
 
 /// The deduplicated `Resolves:` block: one line per distinct binary the plan
@@ -1259,7 +1279,7 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("BRIGHTwhoamiR"), "run-as leaf must be bright red: {out}");
+        assert!(out.contains("BRIGHTsudo whoamiR"), "run-as leaf must be bright red: {out}");
         assert!(
             out.contains("echo hi") && !out.contains("LIGHTecho") && !out.contains("BRIGHTecho"),
             "the default leaf must stay uncolored: {out}"
@@ -1294,8 +1314,8 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("LIGHTecho aR"), "leaf a must be light red: {out}");
-        assert!(out.contains("LIGHTecho bR"), "leaf b must be light red: {out}");
+        assert!(out.contains("LIGHTsudo echo aR"), "leaf a must be light red: {out}");
+        assert!(out.contains("LIGHTsudo echo bR"), "leaf b must be light red: {out}");
         assert!(out.contains("LIGHT &&R"), "operator must be tinted in an all-root group: {out}");
         assert!(!out.contains("BRIGHT"), "no bright red without an explicit run-as: {out}");
     }
@@ -1329,13 +1349,13 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("LIGHTid -unR"), "ambient leaf must be light red: {out}");
+        assert!(out.contains("LIGHTsudo id -unR"), "ambient leaf must be light red: {out}");
         assert_eq!(
             out.matches("BRIGHT").count(),
             1,
             "exactly the run-as leaf is bright red: {out}"
         );
-        assert!(out.contains("BRIGHTwhoamiR"), "run-as leaf must be bright red: {out}");
+        assert!(out.contains("BRIGHTsudo whoamiR"), "run-as leaf must be bright red: {out}");
         assert!(out.contains("LIGHT &&R"), "operator tinted in an all-root group: {out}");
     }
 
@@ -1579,6 +1599,266 @@ mod tests {
         // slave_file's Drop closes slave.
         unsafe {
             libc::close(master);
+        }
+    }
+
+    // === Display grouping: Steps ≡ Command ≡ executed plan ================
+    //
+    // Security-relevant display property: the `Steps:` block the operator
+    // reviews, the `Command:` line they may paste, and the plan the executor
+    // runs must all mean the same thing. Checked three ways below: golden
+    // layouts for the agreed examples, a `bash` parse-tree comparison over
+    // random plans, and a differential run (executor vs `sh`) over random
+    // side-effect-free plans.
+
+    use crate::protocol::{Plan, Request, RunAs, ShellProc, ValidatedRequest};
+
+    fn ex(argv: &[&str]) -> Plan {
+        Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+    }
+
+    fn mk_req(plan: Plan, privileged: bool) -> ValidatedRequest {
+        ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            privileged,
+            false,
+        ))
+        .expect("valid")
+    }
+
+    /// The uncoloured `Steps:` block body, as the operator sees it.
+    fn steps_block(req: &ValidatedRequest) -> String {
+        let mut buf = Vec::new();
+        let lay = layout(&req.exec_plan(), &ambient_ctx(req.privileged));
+        write_steps(&mut buf, &lay, &style_for(true)).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+        out.strip_prefix("Steps:\n").expect("Steps header").to_string()
+    }
+
+    /// The agreed layouts (examples 1–4 of the design discussion; 5–6 are the
+    /// corpus cases 23 and 22, covered in `tests/manual_corpus.rs`).
+    #[test]
+    fn steps_layout_matches_agreed_examples() {
+        // 1. a && (b || c) — the case the old layout showed as (a && b) || c.
+        let req = mk_req(
+            Plan::Run { steps: vec![ex(&["false"]), Plan::Alt { steps: vec![ex(&["true"]), ex(&["echo", "RAN"])] }] },
+            false,
+        );
+        assert_eq!(command_summary(&req), "false && (true || echo RAN)");
+        assert_eq!(steps_block(&req), "0  false && (\n1    true ||\n2    echo RAN\n   )\n");
+
+        // 2. (a; b) && c — a group with no line before its `(`.
+        let req = mk_req(
+            Plan::Run { steps: vec![Plan::Seq { steps: vec![ex(&["false"]), ex(&["true"])] }, ex(&["echo", "C"])] },
+            false,
+        );
+        assert_eq!(command_summary(&req), "(false; true) && echo C");
+        assert_eq!(steps_block(&req), "   (\n0    false ;\n1    true ) &&\n2  echo C\n");
+
+        // 3. (a || b) && c — mixed operators always get their own group.
+        let req = mk_req(
+            Plan::Run { steps: vec![Plan::Alt { steps: vec![ex(&["false"]), ex(&["true"])] }, ex(&["echo", "C"])] },
+            false,
+        );
+        assert_eq!(command_summary(&req), "(false || true) && echo C");
+        assert_eq!(steps_block(&req), "   (\n0    false ||\n1    true ) &&\n2  echo C\n");
+
+        // 4. Showcase — export scope, parenthesized pipe, `sudo` on the run-as leaf.
+        let req = mk_req(
+            Plan::Setenv {
+                key: "LANG".into(),
+                value: "C".into(),
+                body: Box::new(Plan::Run {
+                    steps: vec![
+                        ex(&["echo", "a;b"]),
+                        Plan::Pipe { stages: vec![ex(&["echo", "hello world"]), ex(&["wc", "-w"])] },
+                        Plan::RunAs { who: RunAs::Root, body: Box::new(ex(&["id", "-un"])) },
+                    ],
+                }),
+            },
+            false,
+        );
+        assert_eq!(
+            command_summary(&req),
+            "(export LANG=C; (echo 'a;b' && (echo 'hello world' | wc -w) && sudo id -un))"
+        );
+        assert_eq!(
+            steps_block(&req),
+            "   (\n\
+             0    export LANG=C ; (\n\
+             1      echo 'a;b' && (\n\
+             2        echo 'hello world' |\n\
+             3        wc -w ) &&\n\
+             4      sudo id -un\n\
+             \x20    )\n\
+             \x20  )\n"
+        );
+    }
+
+    /// Adjacent openers are written `( (`: bash reads `((` as arithmetic.
+    #[test]
+    fn command_never_opens_with_double_paren() {
+        let req = mk_req(
+            Plan::Seq {
+                steps: vec![
+                    ex(&["echo", "x"]),
+                    Plan::Run {
+                        steps: vec![
+                            Plan::Pipe { stages: vec![ex(&["echo", "a"]), ex(&["cat"])] },
+                            ex(&["echo", "kept"]),
+                        ],
+                    },
+                ],
+            },
+            false,
+        );
+        let cmd = command_summary(&req);
+        assert_eq!(cmd, "echo x; ( (echo a | cat) && echo kept)");
+        assert!(!cmd.contains("(("), "{cmd}");
+    }
+
+    /// Without colour, the Steps block still says which steps escalate.
+    #[test]
+    fn steps_show_escalation_as_text() {
+        let req = mk_req(
+            Plan::Seq {
+                steps: vec![
+                    Plan::RunAs { who: RunAs::Root, body: Box::new(ex(&["id"])) },
+                    Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(ex(&["id"])) },
+                ],
+            },
+            false,
+        );
+        assert_eq!(steps_block(&req), "0  sudo id ;\n1  sudo -u nobody id\n");
+    }
+
+    /// `bash`'s canonical form of a script (`declare -f` of a wrapper
+    /// function), whitespace-squeezed. Two texts with equal canonical forms
+    /// parse to the same shell tree.
+    fn bash_tree(text: &str) -> String {
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(format!("f() {{\n{text}\n}}\ndeclare -f f"))
+            .output()
+            .expect("run bash");
+        assert!(out.status.success(), "bash rejected:\n{text}\n{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    fn pick<'a>(rng: &mut crate::prop::Rng, xs: &[&'a str]) -> &'a str {
+        xs[rng.below(xs.len())]
+    }
+
+    /// Any plan, including run-as, opaque shells, redirections and argv that
+    /// needs quoting. Only parsed, never run.
+    fn random_any(rng: &mut crate::prop::Rng, depth: usize) -> Plan {
+        const WORDS: &[&str] = &["a", "x y", "a;b", "$v", "(", ")", "it's", "&&", "-n", "*"];
+        let leaf = |rng: &mut crate::prop::Rng| match rng.below(8) {
+            0 => Plan::Shell { shell: ShellProc::Sh, script: "echo s; exit 1".into() },
+            _ => Plan::Exec {
+                argv: (0..1 + rng.below(3)).map(|_| pick(rng, WORDS).to_string()).collect(),
+            },
+        };
+        if depth == 0 || rng.below(4) == 0 {
+            return leaf(rng);
+        }
+        let kids = |rng: &mut crate::prop::Rng, min: usize| -> Vec<Plan> {
+            (0..min + rng.below(3)).map(|_| random_any(rng, depth - 1)).collect()
+        };
+        match rng.below(11) {
+            0 => Plan::Run { steps: kids(rng, 1) },
+            1 => Plan::Alt { steps: kids(rng, 1) },
+            2 => Plan::Seq { steps: kids(rng, 1) },
+            3 => Plan::Pipe { stages: (0..2 + rng.below(2)).map(|_| leaf(rng)).collect() },
+            4 => Plan::Chdir { dir: "/tmp/a b".into(), body: Box::new(random_any(rng, depth - 1)) },
+            5 => Plan::Setenv { key: "TZ".into(), value: "x y".into(), body: Box::new(random_any(rng, depth - 1)) },
+            6 => Plan::RunAs { who: RunAs::Root, body: Box::new(random_any(rng, depth - 1)) },
+            7 => Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(random_any(rng, depth - 1)) },
+            8 => Plan::Redirect {
+                stream: [Stream::Stdout, Stream::Stderr, Stream::Both][rng.below(3)],
+                target: RedirTarget::File { path: "/tmp/o u t".into(), mode: crate::protocol::WriteMode::Append },
+                body: Box::new(leaf(rng)),
+            },
+            9 => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(leaf(rng)) },
+            _ => Plan::WithAcceptedExitCodes { codes: vec![1], body: Box::new(random_any(rng, depth - 1)) },
+        }
+    }
+
+    // Spec clause (Rung 2): for every plan, the `Steps:` text and the
+    // `Command:` line parse, under bash, to the same tree.
+    #[test]
+    fn prop_steps_and_command_parse_to_the_same_tree() {
+        let mut rng = crate::prop::Rng::new(0x5EED_57E9_u64);
+        for _ in 0..300 {
+            let plan = random_any(&mut rng, 4);
+            let req = mk_req(plan, rng.below(2) == 0);
+            let steps = steps_shell_text(&req);
+            let cmd = command_summary(&req);
+            assert!(!cmd.contains("(("), "{cmd}");
+            assert_eq!(bash_tree(&steps), bash_tree(&cmd), "Steps:\n{steps}\nCommand: {cmd}");
+        }
+    }
+
+    /// Side-effect-free, privilege-free plans whose stdout reveals which leaves
+    /// ran, and in which directory / environment.
+    fn random_runnable(rng: &mut crate::prop::Rng, depth: usize) -> Plan {
+        let leaf = |rng: &mut crate::prop::Rng| match rng.below(8) {
+            0 => ex(&["false"]),
+            1 => ex(&["true"]),
+            2 => ex(&["pwd"]),
+            3 => ex(&["printenv", "TZ"]),
+            4 => Plan::Shell { shell: ShellProc::Sh, script: "echo s; exit 1".into() },
+            _ => ex(&["echo", pick(rng, &["1", "2", "3", "4", "5"])]),
+        };
+        if depth == 0 || rng.below(4) == 0 {
+            return leaf(rng);
+        }
+        let kids = |rng: &mut crate::prop::Rng| -> Vec<Plan> {
+            (0..1 + rng.below(3)).map(|_| random_runnable(rng, depth - 1)).collect()
+        };
+        match rng.below(8) {
+            0 => Plan::Run { steps: kids(rng) },
+            1 => Plan::Alt { steps: kids(rng) },
+            2 => Plan::Seq { steps: kids(rng) },
+            3 => Plan::Pipe { stages: vec![leaf(rng), ex(&["cat"])] },
+            4 => Plan::Chdir { dir: "/tmp".into(), body: Box::new(random_runnable(rng, depth - 1)) },
+            5 => Plan::Setenv { key: "TZ".into(), value: "UTC".into(), body: Box::new(random_runnable(rng, depth - 1)) },
+            6 => Plan::Redirect { stream: Stream::Stdout, target: RedirTarget::DevNull, body: Box::new(leaf(rng)) },
+            _ => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(ex(&["cat"])) },
+        }
+    }
+
+    fn run_sh(text: &str) -> String {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(text)
+            .env_clear()
+            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .current_dir("/")
+            .output()
+            .expect("run sh");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
+    // Spec clause (Rung 2): the displayed text means what runs. For random
+    // side-effect-free plans, the executor's output equals `sh` running the
+    // `Command:` line and `sh` running the `Steps:` text.
+    #[test]
+    fn prop_displayed_text_runs_like_the_executor() {
+        let mut rng = crate::prop::Rng::new(0xD15B_1A7E_u64);
+        for _ in 0..150 {
+            let req = mk_req(random_runnable(&mut rng, 4), false);
+            let resp = crate::executor::exec_direct(&req, &std::collections::HashMap::new());
+            let via_plan =
+                String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
+            let cmd = command_summary(&req);
+            let steps = steps_shell_text(&req);
+            assert_eq!(run_sh(&cmd), via_plan, "Command: {cmd}");
+            assert_eq!(run_sh(&steps), via_plan, "Steps:\n{steps}");
         }
     }
 }
