@@ -540,7 +540,8 @@ pub fn prompt_tty(
     } else {
         ("Execute?", "[y/N]")
     };
-    write_question_line(&mut tty_w, &alert(), question, choices, timeout.as_secs())?;
+    let cues = alert();
+    write_question_line(&mut tty_w, &cues, question, choices, timeout.as_secs())?;
     tty_w.flush()?;
 
     // Read single keypress with timeout (no Enter needed), then classify it
@@ -558,6 +559,8 @@ pub fn prompt_tty(
         PromptResult::ApprovedAlways => "Approved",
         PromptResult::Denied => "Denied",
     };
+    // Answered or timed out: the question no longer needs attention.
+    write_settled_question_line(&mut tty_w, &cues, question, choices, timeout.as_secs())?;
     writeln!(tty_w, "\n→ {label}")?;
     writeln!(tty_w, "{bold}━━━━━━━━━━━━━━━━━━━━━━━━━{reset}")?;
 
@@ -577,10 +580,33 @@ fn write_question_line<W: Write>(
     timeout_secs: u64,
 ) -> io::Result<()> {
     let Alert { bell, blink_on, blink_off } = *alert;
-    write!(
-        w,
-        "{bell}{blink_on}{question} {choices} ({timeout_secs}s timeout, default=N){blink_off} "
-    )
+    let text = question_text(question, choices, timeout_secs);
+    write!(w, "{bell}{blink_on}{text}{blink_off} ")
+}
+
+fn question_text(question: &str, choices: &str, timeout_secs: u64) -> String {
+    format!("{question} {choices} ({timeout_secs}s timeout, default=N)")
+}
+
+/// Once the prompt is answered or has timed out, redraw the question line
+/// without blink: a terminal keeps blinking cells that were drawn blinking, so
+/// stopping it means rewriting them. Echo is off while the key is read, so the
+/// cursor is still on the question line: return to its start (`\r`), clear it
+/// (`ESC [2K`), and print the same text plain. Emits nothing when blink is
+/// suppressed. A question wrapped over several lines by a very narrow terminal
+/// only has its last line redrawn.
+fn write_settled_question_line<W: Write>(
+    w: &mut W,
+    alert: &Alert,
+    question: &str,
+    choices: &str,
+    timeout_secs: u64,
+) -> io::Result<()> {
+    if alert.blink_on.is_empty() {
+        return Ok(());
+    }
+    let text = question_text(question, choices, timeout_secs);
+    write!(w, "\r\x1b[2K{text} ")
 }
 
 /// Render a plan below the `Command:` line, in two bands: a deduplicated
@@ -1444,6 +1470,23 @@ mod tests {
         assert!(!off.contains("\x1b[25m"), "blink-off leaked: {off:?}");
         assert!(off.contains("Execute as root? [y/N]"), "question text missing: {off:?}");
         assert_eq!(off, "Execute as root? [y/N] (60s timeout, default=N) ");
+    }
+
+    /// After the answer (or timeout) the blinking question is redrawn plain, in
+    /// place; with blink suppressed there is nothing to redraw.
+    #[test]
+    fn settled_question_line_stops_the_blink() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_settled_question_line(&mut buf, &alert_for(false, false), "Execute?", "[y/N]", 60)
+            .expect("write");
+        let s = String::from_utf8(buf).expect("utf8");
+        assert_eq!(s, "\r\x1b[2KExecute? [y/N] (60s timeout, default=N) ");
+        assert!(!s.contains("\x1b[5m") && !s.contains('\x07'), "no blink, no bell: {s:?}");
+
+        let mut buf: Vec<u8> = Vec::new();
+        write_settled_question_line(&mut buf, &alert_for(false, true), "Execute?", "[y/N]", 60)
+            .expect("write");
+        assert!(buf.is_empty(), "blink suppressed: nothing to redraw");
     }
 
     #[test]
