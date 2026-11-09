@@ -111,9 +111,10 @@ impl Op {
 ///   into it, one of another operator is parenthesized — so every line of a
 ///   `Steps:` group ends with the same operator;
 /// - a pipe is always parenthesized;
-/// - a `cd`/`export` scope is `( cd D ; ( body ) )`, so nothing leaks out of it,
+/// - a `cd`/`export` scope is `( cd D && ( body ) )`: nothing leaks out of it,
 ///   even when the whole plan is the scope (the `Command:` line is pasted into a
-///   stateful shell).
+///   stateful shell), and a failed `cd` skips the body instead of running it in
+///   the previous directory.
 enum Lay {
     /// One command line: `cmd` (with any `sudo` prefix) plus its redirections.
     /// A `scope` leaf is the `cd`/`export` header of a scope, never escalated.
@@ -216,8 +217,10 @@ fn lay_redirect(l: Lay, suffix: String) -> Lay {
     }
 }
 
-/// `( header ; ( body ) )` — the scope's own parentheses keep `cd`/`export` from
-/// leaking past it.
+/// `( header && ( body ) )` — the scope's own parentheses keep `cd`/`export` from
+/// leaking past it, and `&&` skips the body when the header fails (a failed
+/// `cd` must not run the body in the previous directory; the executor refuses
+/// it too).
 fn lay_scope(header: String, body: Lay) -> Lay {
     let head = Lay::Leaf {
         cmd: header,
@@ -226,7 +229,7 @@ fn lay_scope(header: String, body: Lay) -> Lay {
         scope: true,
     };
     Lay::Group {
-        inner: Box::new(Lay::Chain { op: Op::Seq, items: vec![head, lay_group(body)] }),
+        inner: Box::new(Lay::Chain { op: Op::And, items: vec![head, lay_group(body)] }),
         redir: String::new(),
     }
 }
@@ -1727,12 +1730,12 @@ mod tests {
         );
         assert_eq!(
             command_summary(&req),
-            "(export LANG=C; (echo 'a;b' && (echo 'hello world' | wc -w) && sudo id -un))"
+            "(export LANG=C && (echo 'a;b' && (echo 'hello world' | wc -w) && sudo id -un))"
         );
         assert_eq!(
             steps_block(&req),
             "   (\n\
-             0    export LANG=C ; (\n\
+             0    export LANG=C && (\n\
              1      echo 'a;b' && (\n\
              2        echo 'hello world' |\n\
              3        wc -w ) &&\n\
@@ -1777,6 +1780,24 @@ mod tests {
             false,
         );
         assert_eq!(steps_block(&req), "0  sudo id ;\n1  sudo -u nobody id\n");
+    }
+
+    /// A failed `cd` must not run the scope's body: the executor refuses it, and
+    /// the displayed `( cd D && ( body ) )` skips it too.
+    #[test]
+    fn failed_cd_skips_the_scope_body_in_display_and_executor() {
+        let req = mk_req(
+            Plan::Chdir { dir: "/nonexistent-sudo-proxy-dir".into(), body: Box::new(ex(&["echo", "body-ran"])) },
+            false,
+        );
+        let cmd = command_summary(&req);
+        assert_eq!(cmd, "(cd /nonexistent-sudo-proxy-dir && (echo body-ran))");
+        let resp = crate::executor::exec_direct(&req, &std::collections::HashMap::new());
+        let via_plan =
+            String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
+        assert!(!via_plan.contains("body-ran"), "executor ran the body: {via_plan:?}");
+        assert!(!run_sh(&cmd).contains("body-ran"), "Command line ran the body");
+        assert!(!run_sh(&steps_shell_text(&req)).contains("body-ran"), "Steps ran the body");
     }
 
     /// `bash`'s canonical form of a script (`declare -f` of a wrapper

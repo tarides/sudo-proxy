@@ -102,7 +102,7 @@ Send each one and compare the prompt with the expected column:
 
 | File | Flags | Expect |
 |---|---|---|
-| `showcase.json` | `--no-privilege` | `Command:` reads `(export LANG=C; (echo 'a;b' && (echo 'hello world' \| wc -w) && sudo id -un))`, which pastes into a shell as is. `Steps:` shows the same groups, one command per line (see [How the prompt shows grouping](#how-the-prompt-shows-grouping)); `sudo id -un` is bright red. |
+| `showcase.json` | `--no-privilege` | `Command:` reads `(export LANG=C && (echo 'a;b' && (echo 'hello world' \| wc -w) && sudo id -un))`, which pastes into a shell as is. `Steps:` shows the same groups, one command per line (see [How the prompt shows grouping](#how-the-prompt-shows-grouping)); `sudo id -un` is bright red. |
 | `escalation-a-ambient.json` | (privileged) | Every step light red, `&&` tinted too. `Command:` has `sudo` on each leaf, never one `sudo sh -c`. |
 | `escalation-b-boundary.json` | `--no-privilege` | Only `whoami` is bright red; `echo hi` / `echo bye` uncoloured. |
 | `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
@@ -129,9 +129,11 @@ The layout rules:
    redirection follows the group; otherwise on its own line, under the line
    holding its `(`.
 5. Indentation is the parenthesis depth, nothing else.
-6. A `cd` / `export` scope is `( cd DIR ; ( body ) )`. The parentheses keep it
+6. A `cd` / `export` scope is `( cd DIR && ( body ) )`. The parentheses keep it
    from leaking, including when the whole plan is the scope: the `Command:`
-   line may be pasted into a stateful shell.
+   line may be pasted into a stateful shell. The `&&` skips the body when `cd`
+   fails, as the executor does, instead of running it in the previous
+   directory.
 7. A pipe is always parenthesized.
 8. The `Command:` line has exactly the `Steps:` parentheses. Adjacent openers
    are written `( (`, never `((`, which bash reads as arithmetic.
