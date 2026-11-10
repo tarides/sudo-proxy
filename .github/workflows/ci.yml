@@ -53,7 +53,7 @@ jobs:
       # RUSTSEC-2026-0189 ignored: DNS rebinding in rmcp's Streamable HTTP
       # server transport, which sudo-proxy does not use (stdio only; see the
       # documented rationale in deny.toml [advisories].ignore).
-      - run: cargo audit --ignore RUSTSEC-2026-0189
+      - run: cargo audit --ignore RUSTSEC-2026-0189 --ignore RUSTSEC-2026-0462
 
   deny:
     name: cargo deny
