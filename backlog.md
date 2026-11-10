@@ -6,6 +6,63 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
+## Priority #1 — plan-model follow-ups (consolidated)
+
+The next work, pulled to the front. These surfaced while building and
+live-testing the structured-plan prompt rework this session; detailed write-ups
+remain in the sections further down, linked here. Tackle in roughly this order:
+
+1. **Close the `exec sh -c` loophole** (highest payoff). `validate_tree` should
+   treat an `Exec`/pipe-stage whose `argv[0]` resolves to a shell
+   (`sh`/`bash`/`dash`/`zsh`/…) with `-c` exactly like a `Shell` node — same
+   opaque flag at the prompt, same strict-mode fate. Today a plain `exec sh -c
+   '…'` smuggles a shell onto the path *without* the opaque marker, quietly
+   defeating the "make `Shell` avoidable" goal. See
+   *"Make the shell escape hatch avoidable"* below.
+2. **Strict policy mode that rejects the shell hatch.** `protocol.rs` already
+   promises "a strict policy mode rejects it," but none exists. Add a per-daemon
+   `policy.no_shell` / `--no-shell` that rejects any `Shell` node (and, with #1,
+   any `exec sh -c`) before prompting. Same section.
+3. **Shell-tail ops: `detach` and read-file.** A `detach` op (backgrounding +
+   structured pid, replacing `nohup … & echo $!` — campaign observation **O1**;
+   the only gap that still forced the `system` hatch live) and a read-file op
+   (replacing `$(cat /proc/…)`). See the Dune-gaps list in *"Structured
+   composite-execution plan"* and lever 3 of the shell-hatch section.
+4. **`sudo-request --print` exit code (O2).** With `--print` the client exits `0`
+   even on an error `Response` (it prints the result); without `--print` an error
+   exits `1`. Make `--print` propagate a non-zero exit on `Status::Error` /
+   `Denied` / `Timeout` (or document the discrepancy). Found during the test
+   campaign; had no backlog home until now.
+5. **Treat whole-command `privileged` as sugar for an ambient `run-as root`.**
+   It already *is* semantically (`compile_plan` seeds ambient root from the flag,
+   ≡ a `run-as root` wrapping the whole plan). Steer callers toward per-stage
+   `run-as` so pipes stay unprivileged and dodge the sudo-credential-in-pipe
+   caveat (the blunt flag escalates *every* leaf, including pipe stages → the
+   caveat bites). Consider deprecating the flag once the plan path is primary;
+   keep it meanwhile for flat-`pipeline` wire-compat. (Raised in discussion this
+   session; not previously recorded.)
+6. **Soften the sudo-credential-in-pipe caveat + partial-`run` retry hazard.**
+   See *"Partial-`run` retry hazard and the sudo-credential-in-pipe caveat"* for
+   the mitigation menu (auth-probe before stateful stages, surface the partial
+   boundary so callers resume rather than replay, advisory non-idempotency flag).
+7. **`env` hides the real program from `Resolves:`.** A step written as
+   `env VAR=… opam exec … dune …` resolves only `env`; `opam`/`dune`, the
+   programs that actually run, never appear in the resolve block. It arises
+   because `setenv` only accepts allowlisted names (`TSAN_OPTIONS`,
+   `OCAMLRUNPARAM`, … are rejected), so callers fall back to `env` (corpus cases
+   06, 22). Fix options: resolve the program after `env`'s `VAR=…` / option
+   arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
+   allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
+   wrapper is unnecessary. Found live-testing case 22.
+8. **`--pkexec` with a multi-step `privileged: true` plan.** Each escalated
+   step raises its own pkexec dialog, which shows only that step (and, since
+   steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
+   program). With the `pkexec-cache` polkit rule, steps after the first run with
+   no dialog at all. Options: reject multi-leaf plans in `--pkexec` mode, or
+   show the whole plan in the TUI and use pkexec only to authenticate. Plans
+   that escalate only via `run-as` already take the TUI prompt (PR #59 review
+   fix). Found in the PR #59 review.
+
 ## Cap far-future request timestamps, then re-climb the ladder to Rung 4
 
 The replay-protection residual surfaced **during PR #35** by the Extended Rung 4
@@ -164,7 +221,7 @@ on top:**
   requests `3a7cb1f9`, `e6aeb649`, `942cd83f`, `b1f6294a`). Dune actions are
   synchronous; `concurrent` still joins. We need launch-and-detach returning the
   pid as a structured field (not a shell `$!`).
-- ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `seq`) runs steps until
+- ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `run`) runs steps until
   one succeeds, covering `pgrep … || echo none`. A first-class op, not a fold
   into `with-accepted-exit-codes`.
 - ~~**Append redirection (`>>`).**~~ *Landed:* `redirect` takes `mode:"append"`

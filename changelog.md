@@ -3,6 +3,28 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-09 — PR #59 review: the displayed plan now means what runs
+
+A review of the structured-plan PR found plans whose prompt text meant
+something other than what the executor ran, and a `--pkexec` approval gap.
+Fixed in `dcd8723`:
+
+- **`--pkexec` gate.** Only `privileged: true` requests go to pkexec. A plan
+  that escalates only through `run-as` takes the TUI prompt and sudo, so its
+  unescalated steps can no longer run unapproved.
+- **`with-accepted-exit-codes` is shown** (was backlog Priority #1 item 8). It
+  renders as `{ cmd || [ $? -eq N ]; }` (a `case` for several codes) in both
+  `Steps:` and `Command:`, with an `# exit N accepted` comment in Steps, and
+  both G4.5 property tests now generate it.
+- **Validation rejects shapes with no faithful shell spelling:** a stream
+  redirected twice along one path, `with-stdin-from` on a later pipe stage,
+  relative `chdir`/redirect/stdin paths, and env keys that are not shell
+  variable names.
+- **`run-as` user `root`** is normalised to root; the sudo `#uid` form is refused.
+- **`--log-json`** escapes control and bidi characters before printing.
+- **pkexec cwd.** Escalated leaves run as `pkexec env -C <dir> -- argv`, since
+  pkexec otherwise starts in the target user's home.
+
 ## 2026-10-16 — Alert the human when an approval prompt appears (bell + blink)
 
 Usability/safety work, not an assurance-ladder rung — the change is purely
