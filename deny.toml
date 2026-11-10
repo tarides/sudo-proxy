@@ -24,6 +24,13 @@ ignore = [
     # server transport is not compiled in. Mirrored in the `cargo audit` step
     # (.github/workflows/ci.yml). Revisit if an HTTP transport is ever added.
     "RUSTSEC-2026-0189",
+    # RUSTSEC-2026-0462: unbounded response-body buffering in rmcp's
+    # Streamable HTTP *clients* (`transport-streamable-http-client-reqwest`,
+    # `transport-streamable-http-client-unix-socket`). sudo-proxy is an MCP
+    # server over stdio and enables only `transport-io`, so neither client is
+    # compiled in. The fix is rmcp >= 3.9.0, a major-version jump tracked
+    # separately. Mirrored in the `cargo audit` step (.github/workflows/ci.yml).
+    "RUSTSEC-2026-0462",
 ]
 
 [bans]
