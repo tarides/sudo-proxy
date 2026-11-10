@@ -1,0 +1,69 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "sleep",
+        "8"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "---log size---"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "ls",
+        "-la",
+        "/tmp/tsan_pipeline.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "---tail---"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "tail",
+        "-4",
+        "/tmp/tsan_pipeline.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "---switch-create proc---"
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "exec",
+          "argv": [
+            "pgrep",
+            "-af",
+            "switch create|opam"
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "head",
+            "-3"
+          ]
+        }
+      ]
+    }
+  ]
+}

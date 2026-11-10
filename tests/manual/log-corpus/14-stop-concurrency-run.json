@@ -1,0 +1,129 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "pkill",
+          "-f",
+          "concurrency.exe"
+        ]
+      }
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "pkill",
+          "-f",
+          "dune exec lib/proj/test/concurrency"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "sleep",
+        "2"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== killed; procs now ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "pipe",
+          "stages": [
+            {
+              "op": "exec",
+              "argv": [
+                "pgrep",
+                "-af",
+                "concurrency.exe"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "grep",
+                "-v",
+                "pgrep"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "none"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== how far did TSan concurrency get (tests OK + any warnings) ==="
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "grep",
+        "-cE",
+        "WARNING: ThreadSanitizer",
+        "/tmp/tsan_conc.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "OK tests:"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "grep",
+        "-c",
+        "\\[OK\\]",
+        "/tmp/tsan_conc.log"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== tail ==="
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "tail",
+        "-8",
+        "/tmp/tsan_conc.log"
+      ]
+    }
+  ]
+}

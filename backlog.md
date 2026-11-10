@@ -6,6 +6,63 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
+## Priority #1 — plan-model follow-ups (consolidated)
+
+The next work, pulled to the front. These surfaced while building and
+live-testing the structured-plan prompt rework this session; detailed write-ups
+remain in the sections further down, linked here. Tackle in roughly this order:
+
+1. **Close the `exec sh -c` loophole** (highest payoff). `validate_tree` should
+   treat an `Exec`/pipe-stage whose `argv[0]` resolves to a shell
+   (`sh`/`bash`/`dash`/`zsh`/…) with `-c` exactly like a `Shell` node — same
+   opaque flag at the prompt, same strict-mode fate. Today a plain `exec sh -c
+   '…'` smuggles a shell onto the path *without* the opaque marker, quietly
+   defeating the "make `Shell` avoidable" goal. See
+   *"Make the shell escape hatch avoidable"* below.
+2. **Strict policy mode that rejects the shell hatch.** `protocol.rs` already
+   promises "a strict policy mode rejects it," but none exists. Add a per-daemon
+   `policy.no_shell` / `--no-shell` that rejects any `Shell` node (and, with #1,
+   any `exec sh -c`) before prompting. Same section.
+3. **Shell-tail ops: `detach` and read-file.** A `detach` op (backgrounding +
+   structured pid, replacing `nohup … & echo $!` — campaign observation **O1**;
+   the only gap that still forced the `system` hatch live) and a read-file op
+   (replacing `$(cat /proc/…)`). See the Dune-gaps list in *"Structured
+   composite-execution plan"* and lever 3 of the shell-hatch section.
+4. **`sudo-request --print` exit code (O2).** With `--print` the client exits `0`
+   even on an error `Response` (it prints the result); without `--print` an error
+   exits `1`. Make `--print` propagate a non-zero exit on `Status::Error` /
+   `Denied` / `Timeout` (or document the discrepancy). Found during the test
+   campaign; had no backlog home until now.
+5. **Treat whole-command `privileged` as sugar for an ambient `run-as root`.**
+   It already *is* semantically (`compile_plan` seeds ambient root from the flag,
+   ≡ a `run-as root` wrapping the whole plan). Steer callers toward per-stage
+   `run-as` so pipes stay unprivileged and dodge the sudo-credential-in-pipe
+   caveat (the blunt flag escalates *every* leaf, including pipe stages → the
+   caveat bites). Consider deprecating the flag once the plan path is primary;
+   keep it meanwhile for flat-`pipeline` wire-compat. (Raised in discussion this
+   session; not previously recorded.)
+6. **Soften the sudo-credential-in-pipe caveat + partial-`run` retry hazard.**
+   See *"Partial-`run` retry hazard and the sudo-credential-in-pipe caveat"* for
+   the mitigation menu (auth-probe before stateful stages, surface the partial
+   boundary so callers resume rather than replay, advisory non-idempotency flag).
+7. **`env` hides the real program from `Resolves:`.** A step written as
+   `env VAR=… opam exec … dune …` resolves only `env`; `opam`/`dune`, the
+   programs that actually run, never appear in the resolve block. It arises
+   because `setenv` only accepts allowlisted names (`TSAN_OPTIONS`,
+   `OCAMLRUNPARAM`, … are rejected), so callers fall back to `env` (corpus cases
+   06, 22). Fix options: resolve the program after `env`'s `VAR=…` / option
+   arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
+   allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
+   wrapper is unnecessary. Found live-testing case 22.
+8. **`--pkexec` with a multi-step `privileged: true` plan.** Each escalated
+   step raises its own pkexec dialog, which shows only that step (and, since
+   steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
+   program). With the `pkexec-cache` polkit rule, steps after the first run with
+   no dialog at all. Options: reject multi-leaf plans in `--pkexec` mode, or
+   show the whole plan in the TUI and use pkexec only to authenticate. Plans
+   that escalate only via `run-as` already take the TUI prompt (PR #59 review
+   fix). Found in the PR #59 review.
+
 ## Cap far-future request timestamps, then re-climb the ladder to Rung 4
 
 The replay-protection residual surfaced **during PR #35** by the Extended Rung 4
@@ -164,10 +221,11 @@ on top:**
   requests `3a7cb1f9`, `e6aeb649`, `942cd83f`, `b1f6294a`). Dune actions are
   synchronous; `concurrent` still joins. We need launch-and-detach returning the
   pid as a structured field (not a shell `$!`).
-- **`||` fallback.** `progn` ≈ `;`/`&&` (stops on failure); there is no
-  run-on-failure branch for the log's `pgrep … || echo none`. Add it, or fold it
+- ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `run`) runs steps until
+  one succeeds, covering `pgrep … || echo none`. A first-class op, not a fold
   into `with-accepted-exit-codes`.
-- **Append redirection (`>>`).** `with-stdout-to` truncates; no append mode.
+- ~~**Append redirection (`>>`).**~~ *Landed:* `redirect` takes `mode:"append"`
+  alongside `"truncate"` (and `stream:"both"` for `2>&1`).
 - **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Dune resolves
   `%{…}` at rule-eval, not runtime — so it has no runtime `$(…)` either, which
   *confirms* our plan: promote the common cases to first-class ops (a read-file op
@@ -186,6 +244,49 @@ resolve." The plan executor flags any such stage (`opaque — resolves only the
 shell`) and a policy mode rejects it — making `no-opaque-blob` a special case of
 daemon-side *reject-unresolvable-stages*, enforced structurally and for every
 client rather than by regex in one user's hook.
+
+## Make the shell escape hatch avoidable (plan-model design goal + remaining levers)
+
+**The design goal.** The `Plan` type's *raison d'être* is to make its `Shell`
+constructor (the opaque escape hatch, formerly `System`) unnecessary: every
+structured op exists so a given shell feature need not be expressed by shelling
+out. The real invariant is **no shell on the privileged path**; `Shell` is the
+one node that breaks displayed-equals-executed — it resolves only the shell
+binary, so its inner commands are invisible at the prompt. The goal is therefore
+not to *delete* `Shell` (the shell tail — runtime `$(…)`, `$!`, globbing,
+word-splitting, profile functions — is open-ended) but to **shrink-and-flag**:
+drive real usage into structured ops, and keep every remaining shell use loud,
+countable, and policy-rejectable. Read each `Shell` node as measurable debt — a
+prompt to ask "what op would have avoided this?" That loop already produced `alt`
+(for `||`) and `seq` (for `;`). See
+[docs/architecture.md](docs/architecture.md) ("Security model vs. agent
+harnesses") for the framing.
+
+**Remaining levers** (rough payoff order):
+
+1. **Close the `exec sh -c` loophole** (highest payoff). The goal is quietly
+   defeated today not by `Shell` but by its dishonest sibling: a plain `Exec`
+   leaf (or pipe stage) `["sh","-c","<script>"]` puts a full shell on the path
+   **without** the opaque flag — it renders as a tame `exec` stage with
+   `/usr/bin/sh` resolved while a whole script hides in one argv element. (Seen
+   in the live campaign: C1/C2 used `sh -c "…;…"` leaves to sequence what the
+   type couldn't yet express.) Fix: have `validate_tree` recognize an
+   `Exec`/pipe-stage whose `argv[0]` is a shell (`sh`/`bash`/`dash`/`zsh`/…) with
+   a `-c` and treat it exactly like a `Shell` node — same opaque flag at the
+   prompt, same strict-mode fate. Without this, every other lever is bypassable.
+2. **Implement the documented strict policy mode.** `protocol.rs` already promises
+   "a strict policy mode rejects it," but no such mode exists. Add a per-daemon
+   policy (`hosts.json` `policy.no_shell` and/or a `--no-shell` flag) that
+   **rejects** any `Shell` node — and, with lever 1, any `exec sh -c` — before
+   prompting: "structured or nothing" for operators who want it. Folds into the
+   *reject-unresolvable-stages* idea in the structured-plan section above.
+3. **Catalogue the shell tail as first-class op proposals.** The two most common
+   forces in the log.1 trail that still require the hatch: a `detach` op
+   (backgrounding + a structured pid return, replacing `nohup … & echo $!`) and a
+   read-file op (replacing `$(cat /proc/…)`). See the "Gaps Dune does NOT cover"
+   list above. Each retired force converts an opaque stage into reviewable ones.
+
+Captured follow-up, not active work.
 
 ## Move the `no-opaque-blob` floor into the daemon (interim, ahead of the plan model)
 
@@ -214,6 +315,48 @@ plan model above, which this item should be folded into once that lands. The
 daemon failing open must never be the difference between safe and unsafe; the
 hook failing open (misconfig, different client) likewise must not — the daemon is
 the backstop. Captured follow-up, not active work.
+
+## Partial-`run` retry hazard and the sudo-credential-in-pipe caveat
+
+Surfaced while reviewing the structured-plan executor (the plan model above,
+first increment landed). Two interacting behaviours deserve a safer story than
+"the caller must know."
+
+**The retry hazard.** A `run` (≈ `&&`) runs its steps in order and stops at the
+first non-accepted failure (`executor.rs`, `run_seq` → `SeqNode::Run`). When a later
+step fails, the earlier steps' side effects are **already committed**. The
+response marks which stages ran (per-stage exit codes; a skipped stage carries
+the `-1` not-run sentinel), but nothing stops a caller from resubmitting the
+*same* plan — which replays the already-committed early steps. For
+non-idempotent effects (`mkdir`, append-redirects, counters, `git commit`) that
+double-applies or errors on the second pass. This is the classic
+partial-failure/retry footgun of any `set -e` script; the plan model makes the
+partial state *visible* but does not prevent the replay.
+
+**The sudo-credential compounding.** The most likely "later step fails" cause is
+a privileged stage with no cached sudo credential. A **single** privileged stage
+runs with `setpgid` + the foreground-tty guard and *can* prompt; a privileged
+stage **inside a pipe** runs with `setsid` (detached, no controlling tty) and
+**cannot** prompt — it relies on a cached credential. Whether a leading
+`sudo true`-style prime carries into a `setsid` pipe child depends on the host's
+sudoers `timestamp_type` (`global` → yes; the common `tty` default → likely
+not). So a pipe whose privileged stage is neither NOPASSWD nor already-cached
+fails fast with "no tty present," and credential-priming is not a reliable fix
+*inside a pipe*.
+
+**Mitigations available today** (caller-side): order privileged stages first;
+make early stages idempotent (`mkdir -p`, truncate not append); rely on
+NOPASSWD / cached creds; prefer a single privileged stage over `sudo`-inside-a-
+pipe; and use the per-stage exit-code array to resubmit only the not-run stages
+rather than replaying the whole plan.
+
+**Potential improvements to weigh** (none a full fix — idempotency stays the
+caller's responsibility): (1) surface the partial-execution boundary
+prominently in the response/prompt so a caller resumes rather than replays;
+(2) an optional executor-inserted auth-probe for privileged plans that fails
+fast *before* any stateful stage, documenting the `timestamp_type` caveat;
+(3) advisory flagging of obviously-non-idempotent leading stages. Captured
+follow-up, not active work.
 
 ---
 

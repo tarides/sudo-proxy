@@ -63,6 +63,16 @@ relaxed if you deliberately mark a host eligible in `hosts.json` *and* confirm
 once per session (a grant that is never persisted). See
 [REVIEWING.md](REVIEWING.md) invariant **G7**.
 
+**Escalate vs. confine.** sudo-proxy's security model is the inverse of an agent
+harness's. A harness (Claude Code, Codex CLI, …) gates with *software* —
+permission rules plus an optional classifier — and runs the agent at *your own*
+privilege, narrowing it to a safe subset. sudo-proxy inverts both: a *human*
+approves every command (no classifier, no auto-approve) and execution is
+*escalated* beyond what the agent has. The two are complementary — the harness
+bounds the agent to your privileges; sudo-proxy is how it reaches past them, with
+a human as the escalation authority. See
+[docs/architecture.md](docs/architecture.md#security-model-vs-agent-harnesses).
+
 For how this relates to mcp-firewall, sandboxing, polkit, doas, and other
 neighboring tools, see [docs/comparison.md](docs/comparison.md).
 

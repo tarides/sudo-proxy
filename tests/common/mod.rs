@@ -155,6 +155,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             mode: opts.mode,
             pkexec_only: opts.pkexec_only,
             verbose: false,
+            log_json: false,
             unattended_eligible: opts.unattended_eligible,
             max_in_flight: opts.max_in_flight,
         };
@@ -274,6 +275,7 @@ pub fn make_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
             .into_iter()
             .map(|v| v.into_iter().map(String::from).collect())
             .collect(),
+        plan: None,
         action: sudo_proxy::protocol::Action::Exec,
         env: Default::default(),
         reason: String::new(),

@@ -1,0 +1,5 @@
+{
+  "op": "shell",
+  "shell": "bash",
+  "script": "cd ~; nohup bash -c 'opam switch create ocaml+tsan --packages=ocaml-variants.5.4.0+options,ocaml-option-tsan --no-switch -y && git -C ~/proj-ocaml worktree remove --force ~/wt-130tsan 2>/dev/null; git -C ~/proj-ocaml worktree add -f ~/wt-130tsan _stage_130review && opam install --switch=ocaml+tsan -y ctypes ctypes-foreign domainslib alcotest qcheck qcheck-alcotest && cd ~/wt-130tsan && make -C abi clean && make abi && opam exec --switch=ocaml+tsan -- dune build && echo PIPELINE_DONE' >/tmp/tsan_pipeline.log 2>&1 & echo launched pid $!"
+}
