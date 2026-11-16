@@ -104,6 +104,38 @@ Creusot / Verus / Prusti contracts on `validate_request`, the dispatch path, and
 the env-allowlist enforcement, proved against the Rung 2 properties. Scope to the
 smallest trusted core, not the whole tree.
 
+## Display fidelity (G4.5): climb past Rung 2
+
+Invariant G4.5: the prompt's `Steps:` block and `Command:` line parse, as shell,
+to the same tree, and that tree means what the executor runs. Today the evidence
+is Rung 2 only (golden layouts, a bash parse-tree comparison, a differential run
+against `sh`). The rung-by-rung plan is in
+[docs/formalisation-roadmap.md](docs/formalisation-roadmap.md#display-fidelity-across-the-rungs);
+none of it was tracked here until now:
+
+- **Rung 2 gap.** The differential run covers only privilege-free, side-effect-free
+  plans. Extend it to `run-as` (for example, `run-as` the current user so no
+  escalation is needed) and to file redirections and `with-stdin-from` (inside a
+  temp dir).
+- **Failed-`cd` divergence (G4.5 residual, `docs/assurance-case.md`).** When a
+  `chdir` fails, the executor aborts the whole plan. A shell running the pasted
+  `Command:` line skips only that scope's body and goes on with any
+  `;`-sequenced steps after it. Either make the two agree (render so that a
+  failed `cd` stops everything, or make the executor fail only the scope) or
+  accept it and say why in the assurance case.
+- **Rung 1.** A review-checklist item: changes to `src/tui.rs` rendering, the plan
+  ops, or the executor's composition semantics must keep the G4.5 properties
+  green. Add a lint or Semgrep rule against rendering a `Plan` anywhere but
+  through the shared layout.
+- **Rung 3.** A Kani harness over bounded plans proving the layout is total and
+  that rendering then re-parsing (with an in-crate parser for the shell subset
+  the renderer emits) gives back the plan's structure. This removes `bash` as
+  the oracle for the syntax half.
+- **Rung 5.** A deductive proof (Creusot / Verus) that the renderer and the
+  executor both refine one shell-semantics model of that subset. Extends the
+  Rung 5 item above, which covers only validation, dispatch and the env
+  allowlist.
+
 ## Write the CC-structured Security Target document
 
 The remaining Rung 0 / paper step: a Common Criteria Security Target (TOE,
@@ -357,6 +389,27 @@ prominently in the response/prompt so a caller resumes rather than replays;
 fast *before* any stateful stage, documenting the `timestamp_type` caveat;
 (3) advisory flagging of obviously-non-idempotent leading stages. Captured
 follow-up, not active work.
+
+## (Optional) Root daemon with direct `setuid` instead of per-step `sudo`
+
+An option to weigh, not a commitment. The first plan increment (PR #59) keeps the
+daemon running as the user and escalates each step through `sudo [-u user] --
+argv` (or `pkexec`). The other design runs the daemon as root and switches
+user for each step itself (`setuid`/`setgid`/`initgroups` before `exec`), with no
+`sudo` binary involved.
+
+- **Gains:** no sudo-credential-in-pipe caveat (pipe stages need no cached
+  credential); no `sudo`/`pkexec` argv or env handling in the trusted path; the
+  run-as user for each step is set directly by the executor.
+- **Costs:** the daemon becomes a root process, so the socket and client
+  authentication and the whole daemon join the privileged TCB. The deployment
+  changes (system service instead of a user process) and so does the threat
+  model (`threat-model.md`, boundaries B1–B6). The step-by-step approval prompt
+  becomes the only gate, with no `sudo` password behind it.
+
+This needs its own gate: an updated threat model and assurance case before any
+code. Note that the *"Structured composite-execution plan"* section above still
+says "`setuid` to a run-as user". That describes this option, not what shipped.
 
 ---
 
