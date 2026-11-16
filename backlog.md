@@ -26,8 +26,8 @@ remain in the sections further down, linked here. Tackle in roughly this order:
 3. **Shell-tail ops: `detach` and read-file.** A `detach` op (backgrounding +
    structured pid, replacing `nohup … & echo $!` — campaign observation **O1**;
    the only gap that still forced the `system` hatch live) and a read-file op
-   (replacing `$(cat /proc/…)`). See the Dune-gaps list in *"Structured
-   composite-execution plan"* and lever 3 of the shell-hatch section.
+   (replacing `$(cat /proc/…)`). See *"Structured plan: remaining
+   shell-tail gaps"* and lever 3 of the shell-hatch section.
 4. **`sudo-request --print` exit code (O2).** With `--print` the client exits `0`
    even on an error `Response` (it prints the result); without `--print` an error
    exits `1`. Make `--print` propagate a non-zero exit on `Status::Error` /
@@ -198,84 +198,24 @@ for live visibility. Decide the default (log-to-syslog on by default vs opt-in
 via a flag) and document the privacy/retention implications in the README.
 Captured follow-up, not active work.
 
-## Structured composite-execution plan (retire the `bash -lc` opaque wrapper)
+## Structured plan: remaining shell-tail gaps
 
-**The gap.** A captured approval trail from a registered host (24 consecutive
-requests, all from one `sudo-proxy-mcp` client, 2026-10-16) showed **every**
-command wrapped as
-`argv = ["bash", "-lc", "<script>"]`. Two consequences hollow out the approval
-gate: (1) the path-resolution guarantee is vacuous — every `Resolves:` line is
-`/usr/bin/bash`, and the real binaries (`opam`, `dune`, `sysctl`, `git`, `pkill`)
-are chosen *inside* the script by `$PATH` lookup in a login shell the proxy never
-inspected; (2) a single root approval authorizes many effects — e.g. requests
-`8ab05131` (13:58) and `4ce9cd4c` (12:14) each bundled `sysctl -w
-vm.mmap_rnd_bits=28`, a nested `sudo -H -u <user> bash -lc '…'`, and a sysctl
-restore under one "Execute as root? y". This is the softer sibling of what the
-`no-opaque-blob` hook already blocks: an un-reviewable payload defeats the gate.
+The plan model shipped in PR #59 (see the changelog). These shell features still
+have no structured op, so they still need the `system` escape hatch:
 
-**The fix.** Generalize `execute`'s existing `pipeline`/`env` into a **structured
-plan** that the daemon executes *directly* (fork/exec per stage: pipes,
-redirections, env, `setuid` to a run-as user, sequencing) with **no shell in the
-privileged path**. The load-bearing invariant: *the structure the human approves
-is literally the structure that runs.* This rules out the tempting-but-unsound
-alternative of parsing the `bash -lc` string for display while still executing it
-via bash — parser/bash divergence (quoting, globbing, `$(…)`, and `-l` profile
-functions/aliases) would let the approved interpretation differ from the executed
-one. Executing a literal-argv plan also *shrinks* the TCB: no word-splitting, glob
-expansion, command substitution, or profile functions on the privileged path. The
-prompt then renders each stage with its resolved real binary, its run-as context
-(`[ROOT]` / `[as user]`), and its redirections — so the two sysctl toggles above
-appear as two explicit, isolated root effects instead of hiding in a wall of text.
+- **Backgrounding / detach with pid return** (`nohup … & echo $!`, campaign
+  observation **O1**). Plan steps run synchronously. Add launch-and-detach that
+  returns the pid as a structured field, not a shell `$!`.
+- **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Promote the common
+  cases to first-class ops (a read-file op for `$(cat …)`; the launcher already
+  knows the background pid) and leave the rest to the explicit `system` hatch.
 
-**Prior art — Dune's action DSL** (checked
-`dune.readthedocs.io/en/stable/reference/actions/`). Dune already defines a
-proven, shell-free, S-expression command grammar for the same reason (reproducible,
-no-shell builds). It covers ~80% of the log's composition vocabulary directly:
-`run` (literal prog+args), `setenv`, `chdir`, `with-stdout-to` / `with-stderr-to`
-/ `with-outputs-to` (redirection; `with-outputs-to` = `2>&1`), `with-stdin-from`,
-`ignore-stdout`/`-stderr`/`-outputs` (= `>/dev/null`), `pipe-stdout`/`pipe-outputs`
-(= `|`), `progn` (sequence; fails on first error ≈ `&&`), `concurrent`,
-`write-file` (= `printf > file`), `echo`, `cat`, `copy`, and
-`with-accepted-exit-codes` (bound allowed exit codes). Critically, its `system` /
-`bash` forms are exactly the "explicitly opaque shell escape hatch" we want:
-adopt Dune's grammar as the plan schema, and render `system`/`bash` stages at the
-prompt as *opaque — resolves only the shell* (the `no-opaque-blob` philosophy),
-not hidden.
-
-**Gaps Dune does NOT cover — the security- and lifecycle-critical axes we must add
-on top:**
-
-- **Per-stage run-as / privilege** (`[ROOT]` vs `[as <user>]`). Dune runs
-  everything as the invoking user; it has no privilege notion. This is the single
-  most important field for us — it replaces the nested `sudo -H -u` and makes each
-  root effect explicit and isolated. (No equivalent in Dune.)
-- **Backgrounding / detach with pid return** (`nohup … & echo $!`, used in
-  requests `3a7cb1f9`, `e6aeb649`, `942cd83f`, `b1f6294a`). Dune actions are
-  synchronous; `concurrent` still joins. We need launch-and-detach returning the
-  pid as a structured field (not a shell `$!`).
-- ~~**`||` fallback.**~~ *Landed:* the `alt` op (dual of `run`) runs steps until
-  one succeeds, covering `pgrep … || echo none`. A first-class op, not a fold
-  into `with-accepted-exit-codes`.
-- ~~**Append redirection (`>>`).**~~ *Landed:* `redirect` takes `mode:"append"`
-  alongside `"truncate"` (and `stream:"both"` for `2>&1`).
-- **Runtime substitution** (`$(cat /proc/…)`, `$!`, `$?`). Dune resolves
-  `%{…}` at rule-eval, not runtime — so it has no runtime `$(…)` either, which
-  *confirms* our plan: promote the common cases to first-class ops (a read-file op
-  for `$(cat …)`; the launcher already knows the background pid), and route the
-  rest to the explicit `raw_shell`/`system` escape hatch.
-
-This subsumes rather than sits beside the `bash -lc` concern. Cost: a small
-in-daemon plan executor (fork/exec + pipes + redir + setuid + sequencing),
-bounded, and it removes the shell from the privileged path. Captured follow-up,
-not active work.
-
-It also subsumes the `no-opaque-blob` guard (see the interim item below):
-once the daemon resolves and renders every stage, "opaque blob" stops being a
-denylisted string pattern and becomes the general case "a stage I cannot
-resolve." The plan executor flags any such stage (`opaque — resolves only the
-shell`) and a policy mode rejects it — making `no-opaque-blob` a special case of
-daemon-side *reject-unresolvable-stages*, enforced structurally and for every
-client rather than by regex in one user's hook.
+**Reject unresolvable steps.** With every step resolved and rendered, an "opaque
+blob" is no longer a string pattern to deny: it is any step the daemon cannot
+resolve. Such steps are already flagged at the prompt; a policy mode should
+reject them, making `no-opaque-blob` a special case enforced in the daemon for
+every client rather than by a regex in one user's hook. See the strict-mode lever
+in the next section.
 
 ## Make the shell escape hatch avoidable (plan-model design goal + remaining levers)
 
@@ -311,12 +251,12 @@ harnesses") for the framing.
    policy (`hosts.json` `policy.no_shell` and/or a `--no-shell` flag) that
    **rejects** any `Shell` node — and, with lever 1, any `exec sh -c` — before
    prompting: "structured or nothing" for operators who want it. Folds into the
-   *reject-unresolvable-stages* idea in the structured-plan section above.
+   *reject-unresolvable-stages* idea in the remaining-gaps section above.
 3. **Catalogue the shell tail as first-class op proposals.** The two most common
    forces in the log.1 trail that still require the hatch: a `detach` op
    (backgrounding + a structured pid return, replacing `nohup … & echo $!`) and a
-   read-file op (replacing `$(cat /proc/…)`). See the "Gaps Dune does NOT cover"
-   list above. Each retired force converts an opaque stage into reviewable ones.
+   read-file op (replacing `$(cat /proc/…)`). See *"Structured plan: remaining
+   shell-tail gaps"* above. Each retired force converts an opaque stage into reviewable ones.
 
 Captured follow-up, not active work.
 
@@ -343,7 +283,8 @@ natural home for stricter-than-baseline, site-specific policy.
 **Residual / handoff.** This interim check is still a denylist — a hostile client
 can obfuscate around any pattern. It is a stopgap, not the answer: the sound,
 allowlist-shaped enforcement is *reject-unresolvable-stages* in the structured
-plan model above, which this item should be folded into once that lands. The
+plan model (now landed; see *"Structured plan: remaining shell-tail gaps"*), which
+this item should be folded into. The
 daemon failing open must never be the difference between safe and unsafe; the
 hook failing open (misconfig, different client) likewise must not — the daemon is
 the backstop. Captured follow-up, not active work.
@@ -408,8 +349,8 @@ user for each step itself (`setuid`/`setgid`/`initgroups` before `exec`), with n
   becomes the only gate, with no `sudo` password behind it.
 
 This needs its own gate: an updated threat model and assurance case before any
-code. Note that the *"Structured composite-execution plan"* section above still
-says "`setuid` to a run-as user". That describes this option, not what shipped.
+code. (The original structured-plan design, now in the changelog, said "`setuid`
+to a run-as user". That describes this option, not what shipped.)
 
 ---
 

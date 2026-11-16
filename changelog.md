@@ -3,6 +3,44 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-16 — Structured composite-execution plans (PR #59): no shell on the privileged path
+
+**The gap.** A captured approval trail (24 consecutive requests from one
+`sudo-proxy-mcp` client, 2026-10-16) showed every command arriving as
+`argv = ["bash", "-lc", "<script>"]`. Every `Resolves:` line was `/usr/bin/bash`,
+because the real binaries were chosen inside the script by `$PATH`. And one root
+approval covered several effects: one request bundled two `sysctl` writes and a
+nested `sudo -u … bash -lc` under a single "y".
+
+**The fix.** A request's flat `pipeline` is generalised into a `Plan` tree that
+the daemon runs itself, with no shell on the privileged path. The structure the
+human approves is the structure that runs.
+
+- **Schema** (`src/protocol.rs`). JSON ops modelled on Dune's shell-free action
+  language: `run` (`&&`), `seq` (`;`), `alt` (`||`), `pipe`, `redirect`
+  (truncate/append, `2>&1`), `with-stdin-from`, `setenv` (env allowlist),
+  `chdir`, `run-as` (`[ROOT]` / `[as user]`), `with-accepted-exit-codes`, and an
+  explicit opaque `system` escape hatch. Validation is recursive and bounded, and
+  a flat `pipeline` turns into a plan, so existing clients keep working. A plan
+  containing `run-as` counts as privileged.
+- **Executor** (`src/executor.rs`). Fork/exec for each step, with pipes and
+  redirections. An escalated step runs as `sudo [-u user] -- argv` (or
+  `pkexec env -C dir -- argv`), never `sudo sh -c`. `pipeline_to_shell` is gone.
+- **Prompt** (`src/tui.rs`). A `Steps:` block and a paste-able `Command:` line,
+  printed from one layout that groups like the executor runs. Each step shows
+  its run-as tag and its own resolved binary; `system` steps are flagged opaque.
+- **Clients.** The MCP `execute` tool takes a `plan`; `sudo-request` gained
+  `--plan` / `--plan-file`; the daemon gained `--log-json`.
+- **Evidence.** Rung 2 properties: the prompt texts and the executor agree (bash
+  parse trees, a differential run against `sh`), and no shell appears on the
+  privileged path. Also a Kani harness, `tests/plan_exec.rs`, and a manual corpus
+  of real logged requests (`tests/manual/log-corpus/`).
+
+Escalation stays per step through `sudo`, with the daemon running as the user; a
+root daemon calling `setuid` itself is recorded in the backlog as an option. The
+follow-ups (the `exec sh -c` loophole, strict no-shell mode, `detach` and
+read-file ops, display-fidelity rungs) are in the backlog.
+
 ## 2026-11-09 — PR #59 review: the displayed plan now means what runs
 
 A review of the structured-plan PR found plans whose prompt text meant
