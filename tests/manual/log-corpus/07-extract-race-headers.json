@@ -1,0 +1,67 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== distinct race header lines ==="
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "exec",
+          "argv": [
+            "grep",
+            "-nE",
+            "WARNING: ThreadSanitizer|SUMMARY: ThreadSanitizer",
+            "/tmp/tsan_mock.log"
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "head",
+            "-40"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== any frame mentioning our code (proj.ml / Chain_ / Dproj / stubs)? ==="
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "exec",
+          "argv": [
+            "grep",
+            "-nE",
+            "proj|Chain_|abi_mock|requested_workers|shared_pool|iterators_active|reloading",
+            "/tmp/tsan_mock.log"
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "head",
+            "-40"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "sleep",
+        "200"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== build tail ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "tail",
+          "-3",
+          "/tmp/g6_build.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== GCSTRESS result ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "grep",
+          "-c",
+          "G6_GCSTRESS_DONE",
+          "/tmp/g6_gcstress.log"
+        ]
+      }
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "redirect",
+          "stream": "stderr",
+          "target": {
+            "to": "dev-null"
+          },
+          "do": {
+            "op": "exec",
+            "argv": [
+              "cat",
+              "/tmp/g6_gcstress.log"
+            ]
+          }
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "tail",
+            "-20"
+          ]
+        }
+      ]
+    }
+  ]
+}

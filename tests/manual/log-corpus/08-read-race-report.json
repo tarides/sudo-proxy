@@ -1,0 +1,9 @@
+{
+  "op": "exec",
+  "argv": [
+    "sed",
+    "-n",
+    "1,90p",
+    "/tmp/tsan_mock.log"
+  ]
+}

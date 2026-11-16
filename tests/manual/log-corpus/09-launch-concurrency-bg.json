@@ -1,0 +1,80 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "redirect",
+      "stream": "stdout",
+      "target": {
+        "to": "file",
+        "path": "/tmp/tsan.supp",
+        "mode": "truncate"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "printf",
+          "called_from_lib:libproj\\ncalled_from_lib:librocksdb\\ncalled_from_lib:libboost\\nrace:Saturn\\nrace:Domainslib\\n"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "chmod",
+        "644",
+        "/tmp/tsan.supp"
+      ]
+    },
+    {
+      "op": "run-as",
+      "as": "root",
+      "do": {
+        "op": "redirect",
+        "stream": "stdout",
+        "target": {
+          "to": "dev-null"
+        },
+        "do": {
+          "op": "exec",
+          "argv": [
+            "sysctl",
+            "-w",
+            "vm.mmap_rnd_bits=28"
+          ]
+        }
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "mmap_rnd_bits:"
+      ]
+    },
+    {
+      "op": "run-as",
+      "as": "root",
+      "do": {
+        "op": "exec",
+        "argv": [
+          "cat",
+          "/proc/sys/vm/mmap_rnd_bits"
+        ]
+      }
+    },
+    {
+      "op": "run-as",
+      "as": "user",
+      "name": "user",
+      "do": {
+        "op": "chdir",
+        "dir": "/home/user/wt-130tsan",
+        "do": {
+          "op": "shell",
+          "shell": "bash",
+          "script": "export PROJ_CONF=/mnt/data/proj.conf; nohup bash -c \"TSAN_OPTIONS=\\\"suppressions=/tmp/tsan.supp halt_on_error=0 exitcode=0 history_size=4\\\" opam exec --switch=ocaml+tsan -- dune exec lib/proj/test/concurrency.exe > /tmp/tsan_conc.log 2>&1; echo CONC_DONE >> /tmp/tsan_conc.log\" >/dev/null 2>&1 & echo launched-conc-pid $!"
+        }
+      }
+    }
+  ]
+}

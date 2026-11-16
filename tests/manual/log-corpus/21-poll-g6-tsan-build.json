@@ -1,0 +1,95 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "sleep",
+        "180"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== tsan build done? ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "redirect",
+          "stream": "stderr",
+          "target": {
+            "to": "dev-null"
+          },
+          "do": {
+            "op": "exec",
+            "argv": [
+              "grep",
+              "G6TSAN_BUILD_DONE",
+              "/tmp/g6tsan_build.log"
+            ]
+          }
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "not yet"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== build tail ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "tail",
+          "-4",
+          "/tmp/g6tsan_build.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== exe present? ==="
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "exec",
+          "argv": [
+            "ls",
+            "-la",
+            "/home/user/wt-130g6-tsan/_build/default/lib/proj/test/concurrency.exe"
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "tail",
+            "-1"
+          ]
+        }
+      ]
+    }
+  ]
+}

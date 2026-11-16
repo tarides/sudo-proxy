@@ -1,0 +1,177 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== CONC_DONE? ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "grep",
+          "-c",
+          "CONC_DONE",
+          "/tmp/tsan_conc.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== total TSan warnings ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "grep",
+          "-c",
+          "WARNING: ThreadSanitizer",
+          "/tmp/tsan_conc.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== SUMMARY lines (race signatures) ==="
+      ]
+    },
+    {
+      "op": "pipe",
+      "stages": [
+        {
+          "op": "redirect",
+          "stream": "stderr",
+          "target": {
+            "to": "dev-null"
+          },
+          "do": {
+            "op": "exec",
+            "argv": [
+              "grep",
+              "-E",
+              "SUMMARY: ThreadSanitizer|reported .* warnings|Test (Success|Fail)|tests run",
+              "/tmp/tsan_conc.log"
+            ]
+          }
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "tail",
+            "-8"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== proc still alive? ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "pipe",
+          "stages": [
+            {
+              "op": "exec",
+              "argv": [
+                "pgrep",
+                "-af",
+                "concurrency.exe"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "grep",
+                "-v",
+                "pgrep"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "head",
+                "-1"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "not running"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== RESTORE sysctl ==="
+      ]
+    },
+    {
+      "op": "run-as",
+      "as": "root",
+      "do": {
+        "op": "redirect",
+        "stream": "stdout",
+        "target": {
+          "to": "dev-null"
+        },
+        "do": {
+          "op": "exec",
+          "argv": [
+            "sysctl",
+            "-w",
+            "vm.mmap_rnd_bits=32"
+          ]
+        }
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "mmap_rnd_bits now ="
+      ]
+    },
+    {
+      "op": "run-as",
+      "as": "root",
+      "do": {
+        "op": "exec",
+        "argv": [
+          "cat",
+          "/proc/sys/vm/mmap_rnd_bits"
+        ]
+      }
+    }
+  ]
+}

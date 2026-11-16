@@ -1,0 +1,126 @@
+{
+  "op": "chdir",
+  "dir": "/home/user/proj-ocaml",
+  "do": {
+    "op": "seq",
+    "steps": [
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "worktree",
+          "remove",
+          "--force",
+          "/home/user/wt-130g6"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "worktree",
+          "remove",
+          "--force",
+          "/home/user/wt-130g6-tsan"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "branch",
+          "-D",
+          "_stage_130g6"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "echo",
+          "=== worktrees ==="
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "git",
+          "worktree",
+          "list"
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "echo",
+          "=== tsan switch ==="
+        ]
+      },
+      {
+        "op": "run",
+        "steps": [
+          {
+            "op": "pipe",
+            "stages": [
+              {
+                "op": "redirect",
+                "stream": "stderr",
+                "target": {
+                  "to": "dev-null"
+                },
+                "do": {
+                  "op": "exec",
+                  "argv": [
+                    "opam",
+                    "switch",
+                    "list",
+                    "-s"
+                  ]
+                }
+              },
+              {
+                "op": "exec",
+                "argv": [
+                  "grep",
+                  "tsan"
+                ]
+              }
+            ]
+          },
+          {
+            "op": "exec",
+            "argv": [
+              "echo",
+              "(kept)"
+            ]
+          }
+        ]
+      },
+      {
+        "op": "exec",
+        "argv": [
+          "echo",
+          "=== mmap_rnd_bits (should be root-only / restored) ==="
+        ]
+      },
+      {
+        "op": "alt",
+        "steps": [
+          {
+            "op": "exec",
+            "argv": [
+              "cat",
+              "/proc/sys/vm/mmap_rnd_bits"
+            ]
+          },
+          {
+            "op": "exec",
+            "argv": [
+              "echo",
+              "root-only read = restored"
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

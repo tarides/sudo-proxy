@@ -1,0 +1,120 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== build log ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "redirect",
+          "stream": "stderr",
+          "target": {
+            "to": "dev-null"
+          },
+          "do": {
+            "op": "exec",
+            "argv": [
+              "tail",
+              "-3",
+              "/tmp/g6_build.log"
+            ]
+          }
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "no build log yet"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== gcstress log ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "redirect",
+          "stream": "stderr",
+          "target": {
+            "to": "dev-null"
+          },
+          "do": {
+            "op": "exec",
+            "argv": [
+              "tail",
+              "-5",
+              "/tmp/g6_gcstress.log"
+            ]
+          }
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "no gcstress log yet"
+          ]
+        }
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== procs ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "pipe",
+          "stages": [
+            {
+              "op": "exec",
+              "argv": [
+                "pgrep",
+                "-af",
+                "make abi|dune|concurrency.exe|ocamlopt"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "grep",
+                "-v",
+                "pgrep"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "head",
+                "-3"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "no build/run procs"
+          ]
+        }
+      ]
+    }
+  ]
+}

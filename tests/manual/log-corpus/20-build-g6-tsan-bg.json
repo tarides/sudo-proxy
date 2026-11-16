@@ -1,0 +1,5 @@
+{
+  "op": "shell",
+  "shell": "bash",
+  "script": "cd ~; nohup bash -c 'cd ~/proj-ocaml && git worktree add -f ~/wt-130g6-tsan _stage_130g6 && cd ~/wt-130g6-tsan && make -C abi clean >/dev/null 2>&1; make abi >/tmp/g6tsan_build.log 2>&1 && opam exec --switch=ocaml+tsan -- dune build lib/proj/test/concurrency.exe >>/tmp/g6tsan_build.log 2>&1; echo G6TSAN_BUILD_DONE exit=$? >> /tmp/g6tsan_build.log' >/dev/null 2>&1 & echo launched-g6tsan-build-pid $!"
+}

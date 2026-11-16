@@ -1,0 +1,4 @@
+{"op": "run", "steps": [
+  {"op": "exec", "argv": ["id", "-un"]},
+  {"op": "exec", "argv": ["id", "-u"]}
+]}

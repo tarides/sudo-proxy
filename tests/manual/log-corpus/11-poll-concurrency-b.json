@@ -1,0 +1,127 @@
+{
+  "op": "seq",
+  "steps": [
+    {
+      "op": "exec",
+      "argv": [
+        "sleep",
+        "250"
+      ]
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== done? ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "grep",
+          "-c",
+          "CONC_DONE",
+          "/tmp/tsan_conc.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== tsan warnings ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "grep",
+          "-c",
+          "WARNING: ThreadSanitizer",
+          "/tmp/tsan_conc.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== tail ==="
+      ]
+    },
+    {
+      "op": "redirect",
+      "stream": "stderr",
+      "target": {
+        "to": "dev-null"
+      },
+      "do": {
+        "op": "exec",
+        "argv": [
+          "tail",
+          "-10",
+          "/tmp/tsan_conc.log"
+        ]
+      }
+    },
+    {
+      "op": "exec",
+      "argv": [
+        "echo",
+        "=== proc alive? ==="
+      ]
+    },
+    {
+      "op": "alt",
+      "steps": [
+        {
+          "op": "pipe",
+          "stages": [
+            {
+              "op": "exec",
+              "argv": [
+                "pgrep",
+                "-af",
+                "concurrency.exe"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "grep",
+                "-v",
+                "pgrep"
+              ]
+            },
+            {
+              "op": "exec",
+              "argv": [
+                "head",
+                "-1"
+              ]
+            }
+          ]
+        },
+        {
+          "op": "exec",
+          "argv": [
+            "echo",
+            "not running"
+          ]
+        }
+      ]
+    }
+  ]
+}
