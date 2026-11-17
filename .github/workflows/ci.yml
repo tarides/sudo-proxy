@@ -50,10 +50,11 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit
-      # RUSTSEC-2026-0189 ignored: DNS rebinding in rmcp's Streamable HTTP
-      # server transport, which sudo-proxy does not use (stdio only; see the
-      # documented rationale in deny.toml [advisories].ignore).
-      - run: cargo audit --ignore RUSTSEC-2026-0189 --ignore RUSTSEC-2026-0462
+      # Ignores mirror deny.toml [advisories].ignore, which documents the
+      # rationale for each: 0189 and 0462 are rmcp HTTP-transport issues
+      # (sudo-proxy serves over stdio only); 0543 is chrono's unmaintained
+      # notice (pulled in by rmcp, no patched version).
+      - run: cargo audit --ignore RUSTSEC-2026-0189 --ignore RUSTSEC-2026-0462 --ignore RUSTSEC-2026-0543
 
   deny:
     name: cargo deny
