@@ -174,8 +174,11 @@ pub enum Plan {
         body: Box<Plan>,
     },
     /// EXPLICIT opaque escape hatch (Dune `system`/`bash`). Rendered at the
-    /// prompt as "opaque — resolves only the shell"; a strict policy mode
-    /// rejects it. The sole surviving shell path, and always named.
+    /// prompt as "opaque — resolves only the shell"; the strict `no_shell`
+    /// policy (`policy.no_shell` in hosts.json, or `--no-shell`) rejects it
+    /// before prompting. An `Exec` whose program is a shell (`sh -c '…'`,
+    /// `bash script.sh`) is treated identically, so the hatch cannot be taken
+    /// unflagged.
     Shell { shell: ShellProc, script: String },
 }
 

@@ -156,6 +156,32 @@ fn search_path(name: &str, path_var: &str) -> Option<PathBuf> {
     None
 }
 
+/// Shell interpreters. A leaf whose program is one of these runs a script the
+/// prompt cannot show stage by stage (`sh -c '…'`, `bash script.sh`, a shell
+/// reading stdin), so it is flagged opaque exactly like an explicit `Shell`
+/// node — and rejected by the `no_shell` policy.
+const SHELLS: &[&str] = &[
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "yash", "posh",
+];
+
+/// True if the basename of `p` names a shell interpreter.
+fn is_shell_name(p: &Path) -> bool {
+    p.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| SHELLS.contains(&n))
+}
+
+/// True if a leaf with program `argv0` (resolved to `resolved`, if found) runs
+/// a shell: either the name as written is a shell, or the canonical resolved
+/// binary is one (catches `/bin/sh -> dash` and a renamed symlink to bash).
+/// Wrappers such as `env`/`nice`/`timeout` are not looked through.
+fn runs_shell(argv0: &str, resolved: Option<&Path>) -> bool {
+    is_shell_name(Path::new(argv0))
+        || resolved
+            .and_then(|p| std::fs::canonicalize(p).ok())
+            .is_some_and(|c| is_shell_name(&c))
+}
+
 /// Top-level escalation mechanism chosen by the dispatcher. It governs how an
 /// *escalated* leaf (one running as root or a named user) is spawned; a leaf
 /// running as the daemon's own user is always spawned directly, regardless of
@@ -213,8 +239,10 @@ pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Res
 //
 // No shell is ever assembled on the privileged path: each leaf fork/execs its
 // literal argv, and an escalated leaf is `sudo [-u user] -- argv` / `pkexec
-// [--user user] argv`, never `sudo sh -c`. The one exception is an explicit
-// `System` leaf — the named, prompt-flagged opaque escape hatch.
+// [--user user] argv`, never `sudo sh -c`. The daemon never *adds* a shell;
+// a leaf whose own program is a shell (an explicit `Shell` node, or an `Exec`
+// of `sh`/`bash`/…) is flagged opaque at the prompt and rejected outright under
+// the `no_shell` policy.
 // ---------------------------------------------------------------------------
 
 /// Per-leaf run-as context, resolved from the ambient `privileged` flag and any
@@ -265,8 +293,9 @@ struct LeafPlan {
     stdin: InSpec,
     stdout: OutSpec,
     stderr: ErrSpec,
-    /// True for a `System` (shell escape-hatch) leaf. The prompt flags it as
-    /// opaque; `resolved_bin` resolves only the shell.
+    /// True for a leaf that runs a shell — an explicit `Shell` node or an
+    /// `Exec` whose program is a shell (see `runs_shell`). The prompt flags it
+    /// as opaque; `resolved_bin` resolves only the shell.
     opaque: bool,
     /// `argv[0]` resolved by [`resolve_command`]. The prompt displays it and
     /// [`build_command`] spawns it, so the two can never disagree; `None` means
@@ -525,6 +554,13 @@ fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result
 /// Append a resolved leaf to the list and return its index (= stage id).
 fn push_leaf(argv: Vec<String>, opaque: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
     let resolved_bin = argv.first().and_then(|name| resolve_command(name, &ctx.cwd));
+    // An `Exec` of a shell is as opaque as an explicit `Shell` node: decide it
+    // here, the one place every leaf is created, so the prompt, the resolve
+    // block and the `no_shell` policy all read the same bit.
+    let opaque = opaque
+        || argv
+            .first()
+            .is_some_and(|a| runs_shell(a, resolved_bin.as_deref()));
     let stage_id = leaves.len();
     leaves.push(LeafPlan {
         argv,
@@ -590,9 +626,10 @@ pub struct LeafView {
     pub stage_id: usize,
     pub argv: Vec<String>,
     pub privilege: LeafPrivilege,
-    /// `argv[0]` resolved through PATH (for `System`, the shell).
+    /// `argv[0]` resolved through PATH (for an opaque leaf, the shell).
     pub resolved_bin: Option<PathBuf>,
-    /// True for a `System` escape-hatch leaf — rendered "opaque".
+    /// True for a leaf that runs a shell (`Shell` node or `Exec` of a shell) —
+    /// rendered "opaque", and rejected under the `no_shell` policy.
     pub opaque: bool,
     /// Human-readable redirection summary, e.g. `> /tmp/out`, `< in`, `2>&1`.
     pub redirects: String,
@@ -1964,5 +2001,69 @@ mod tests {
         assert_eq!(resolve_command("./bin/only-here-62", "/"), None);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Spec clause: an `Exec` whose program is a shell is opaque, exactly like
+    // an explicit `Shell` node — by name or path, with or without `-c`, in a
+    // plan or a legacy flat pipeline. Non-shell programs (even with "sh" as
+    // an argument or a name prefix) are not.
+    #[test]
+    fn exec_of_a_shell_is_opaque() {
+        let ex = |argv: &[&str]| Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        };
+        let opaque = |plan: Plan| -> Vec<bool> {
+            plan_display(&mk_plan_req(plan, false))
+                .expect("compiles")
+                .iter()
+                .map(|v| v.opaque)
+                .collect()
+        };
+        assert_eq!(opaque(ex(&["sh", "-c", "x"])), [true]);
+        assert_eq!(opaque(ex(&["/bin/bash", "s.sh"])), [true]);
+        assert_eq!(opaque(ex(&["zsh"])), [true]);
+        assert_eq!(opaque(ex(&["echo", "sh"])), [false]);
+        assert_eq!(opaque(ex(&["shellcheck", "x"])), [false]);
+        assert_eq!(opaque(ex(&["true"])), [false]);
+        assert_eq!(
+            opaque(Plan::Pipe { stages: vec![ex(&["echo", "x"]), ex(&["dash", "-c", "cat"])] }),
+            [false, true]
+        );
+
+        // Legacy flat pipeline desugars through the same compile path.
+        let mut req = Request::new_plan(
+            String::new(),
+            "test".into(),
+            ex(&["true"]),
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
+        );
+        req.plan = None;
+        req.pipeline = vec![
+            vec!["echo".into(), "x".into()],
+            vec!["bash".into(), "-lc".into(), "cat".into()],
+        ];
+        let req = ValidatedRequest::validate(req).expect("valid");
+        let flags: Vec<bool> = plan_display(&req).unwrap().iter().map(|v| v.opaque).collect();
+        assert_eq!(flags, [false, true]);
+    }
+
+    /// A symlink with an innocuous name pointing at a shell is still a shell:
+    /// the canonical resolved binary is checked, not just the name.
+    #[test]
+    fn renamed_symlink_to_a_shell_is_opaque() {
+        let Some(sh) = which("sh") else { return };
+        // On a multi-call system (`/bin/sh -> busybox`) the target's own name
+        // is not a shell, so there is nothing to detect through a rename.
+        if !is_shell_name(&std::fs::canonicalize(&sh).unwrap()) {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("innocuous");
+        std::os::unix::fs::symlink(&sh, &link).expect("symlink");
+        assert!(runs_shell(link.to_str().unwrap(), Some(&link)));
+        assert!(!runs_shell("true", which("true").as_deref()));
     }
 }

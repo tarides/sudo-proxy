@@ -847,7 +847,8 @@ fn lay_all_escalated(lay: &Lay) -> bool {
 /// runs, in first-seen order, so a binary used by several stages appears once.
 /// Entries with the same name *and* resolution collapse; distinct names stay
 /// apart even when they share a multi-call binary (`echo` vs `cat` on uutils).
-/// `System`/`Shell` stages render as the opaque-shell marker.
+/// Opaque stages (a `Shell` node, or an `Exec` of a shell) render as the
+/// opaque-shell marker.
 fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
     let Style { bold, reset, .. } = *style;
     let mut seen = std::collections::HashSet::new();
@@ -1260,6 +1261,35 @@ mod tests {
         assert!(resolves_at < steps_at, "resolve block must precede the steps: {out}");
         // The three leaves appear in the Steps block.
         assert!(out.contains("sh -c 'echo hi'"), "shell leaf in steps: {out}");
+    }
+
+    /// A lone `exec sh -c` stage is opaque: it must not take the simple
+    /// single-`Resolves:` path that would show it as a tame binary.
+    #[test]
+    fn exec_of_shell_renders_opaque() {
+        use crate::protocol::{Plan, Request, ValidatedRequest};
+        let plan = Plan::Exec {
+            argv: vec!["sh".into(), "-c".into(), "echo hi; rm -f x".into()],
+        };
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            false,
+            false,
+        ))
+        .expect("valid");
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
+        let out = String::from_utf8(buf).expect("utf8");
+        assert!(
+            out.contains("opaque — resolves only the shell") || out.contains("opaque — shell not found"),
+            "exec of a shell must be flagged opaque: {out}"
+        );
     }
 
     /// The resolve block de-duplicates: a binary run by several stages appears
