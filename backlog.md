@@ -48,28 +48,20 @@ The next work, pulled to the front. These surfaced while building and
 live-testing the structured-plan prompt rework this session; detailed write-ups
 remain in the sections further down, linked here. Tackle in roughly this order:
 
-1. **Close the `exec sh -c` loophole** (highest payoff). `validate_tree` should
-   treat an `Exec`/pipe-stage whose `argv[0]` resolves to a shell
-   (`sh`/`bash`/`dash`/`zsh`/…) with `-c` exactly like a `Shell` node — same
-   opaque flag at the prompt, same strict-mode fate. Today a plain `exec sh -c
-   '…'` smuggles a shell onto the path *without* the opaque marker, quietly
-   defeating the "make `Shell` avoidable" goal. See
-   *"Make the shell escape hatch avoidable"* below.
-2. **Strict policy mode that rejects the shell hatch.** `protocol.rs` already
-   promises "a strict policy mode rejects it," but none exists. Add a per-daemon
-   `policy.no_shell` / `--no-shell` that rejects any `Shell` node (and, with #1,
-   any `exec sh -c`) before prompting. Same section.
-3. **Shell-tail ops: `detach` and read-file.** A `detach` op (backgrounding +
+Sub-items "close the `exec sh -c` loophole" and "strict `no_shell` policy mode"
+shipped in PR #67 (see changelog).
+
+1. **Shell-tail ops: `detach` and read-file.** A `detach` op (backgrounding +
    structured pid, replacing `nohup … & echo $!` — campaign observation **O1**;
    the only gap that still forced the `system` hatch live) and a read-file op
    (replacing `$(cat /proc/…)`). See *"Structured plan: remaining
-   shell-tail gaps"* and lever 3 of the shell-hatch section.
-4. **`sudo-request --print` exit code (O2).** With `--print` the client exits `0`
+   shell-tail gaps"* and the remaining lever of the shell-hatch section.
+2. **`sudo-request --print` exit code (O2).** With `--print` the client exits `0`
    even on an error `Response` (it prints the result); without `--print` an error
    exits `1`. Make `--print` propagate a non-zero exit on `Status::Error` /
    `Denied` / `Timeout` (or document the discrepancy). Found during the test
    campaign; had no backlog home until now.
-5. **Treat whole-command `privileged` as sugar for an ambient `run-as root`.**
+3. **Treat whole-command `privileged` as sugar for an ambient `run-as root`.**
    It already *is* semantically (`compile_plan` seeds ambient root from the flag,
    ≡ a `run-as root` wrapping the whole plan). Steer callers toward per-stage
    `run-as` so pipes stay unprivileged and dodge the sudo-credential-in-pipe
@@ -77,20 +69,23 @@ remain in the sections further down, linked here. Tackle in roughly this order:
    caveat bites). Consider deprecating the flag once the plan path is primary;
    keep it meanwhile for flat-`pipeline` wire-compat. (Raised in discussion this
    session; not previously recorded.)
-6. **Soften the sudo-credential-in-pipe caveat + partial-`run` retry hazard.**
+4. **Soften the sudo-credential-in-pipe caveat + partial-`run` retry hazard.**
    See *"Partial-`run` retry hazard and the sudo-credential-in-pipe caveat"* for
    the mitigation menu (auth-probe before stateful stages, surface the partial
    boundary so callers resume rather than replay, advisory non-idempotency flag).
-7. **`env` hides the real program from `Resolves:`.** A step written as
+5. **`env` hides the real program from `Resolves:`.** A step written as
    `env VAR=… opam exec … dune …` resolves only `env`; `opam`/`dune`, the
    programs that actually run, never appear in the resolve block. It arises
    because `setenv` only accepts allowlisted names (`TSAN_OPTIONS`,
    `OCAMLRUNPARAM`, … are rejected), so callers fall back to `env` (corpus cases
-   06, 22). Fix options: resolve the program after `env`'s `VAR=…` / option
+   06, 22). The same blind spot lets `env sh -c …` / `nice bash …` /
+   `timeout 5 sh -c …` (and other interpreters: `python -c`, `perl -e`) escape
+   the PR #67 opaque flag and the `no_shell` policy, which only inspect the
+   program itself. Fix options: resolve the program after `env`'s `VAR=…` / option
    arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
    allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
    wrapper is unnecessary. Found live-testing case 22.
-8. **`--pkexec` with a multi-step `privileged: true` plan.** Each escalated
+6. **`--pkexec` with a multi-step `privileged: true` plan.** Each escalated
    step raises its own pkexec dialog, which shows only that step (and, since
    steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
    program). With the `pkexec-cache` polkit rule, steps after the first run with
@@ -290,23 +285,11 @@ harnesses") for the framing.
 
 **Remaining levers** (rough payoff order):
 
-1. **Close the `exec sh -c` loophole** (highest payoff). The goal is quietly
-   defeated today not by `Shell` but by its dishonest sibling: a plain `Exec`
-   leaf (or pipe stage) `["sh","-c","<script>"]` puts a full shell on the path
-   **without** the opaque flag — it renders as a tame `exec` stage with
-   `/usr/bin/sh` resolved while a whole script hides in one argv element. (Seen
-   in the live campaign: C1/C2 used `sh -c "…;…"` leaves to sequence what the
-   type couldn't yet express.) Fix: have `validate_tree` recognize an
-   `Exec`/pipe-stage whose `argv[0]` is a shell (`sh`/`bash`/`dash`/`zsh`/…) with
-   a `-c` and treat it exactly like a `Shell` node — same opaque flag at the
-   prompt, same strict-mode fate. Without this, every other lever is bypassable.
-2. **Implement the documented strict policy mode.** `protocol.rs` already promises
-   "a strict policy mode rejects it," but no such mode exists. Add a per-daemon
-   policy (`hosts.json` `policy.no_shell` and/or a `--no-shell` flag) that
-   **rejects** any `Shell` node — and, with lever 1, any `exec sh -c` — before
-   prompting: "structured or nothing" for operators who want it. Folds into the
-   *reject-unresolvable-stages* idea in the remaining-gaps section above.
-3. **Catalogue the shell tail as first-class op proposals.** The two most common
+Levers 1 (flag `exec` of a shell as opaque) and 2 (the strict `no_shell`
+policy) shipped in PR #67; wrapper-hidden shells remain (see item 5 of the
+plan-model follow-ups).
+
+- **Catalogue the shell tail as first-class op proposals.** The two most common
    forces in the log.1 trail that still require the hatch: a `detach` op
    (backgrounding + a structured pid return, replacing `nohup … & echo $!`) and a
    read-file op (replacing `$(cat /proc/…)`). See *"Structured plan: remaining
