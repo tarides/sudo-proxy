@@ -6,6 +6,53 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
+## Automate the manual end-to-end tests through a pty
+
+Issue [#68](https://github.com/tarides/sudo-proxy/issues/68). The checks in
+[docs/testing.md](docs/testing.md) (real daemon, real TUI prompt, keypress by
+hand) and the `tests/manual/ui/*.json` display checks are verified only by eye;
+the integration suite stops at `ScriptedPrompter`. A proof of concept drove the
+real daemon under `script(1)` with keys fed through a FIFO, and a fake `sudo` on
+`PATH` covered the privileged path. Plan:
+
+Plan, revised after a code review (full notes in the
+[issue comment](https://github.com/tarides/sudo-proxy/issues/68#issuecomment-6952577695)):
+
+1. **PR 1 — harness + 3 scenarios.** `tests/common/pty.rs`, hand-rolled on
+   `libc` (no new dependency): `openpty`, then `setsid` + `TIOCSCTTY` in
+   `pre_exec` around `CARGO_BIN_EXE_sudo-proxy`. The pty is the controlling
+   terminal only; stdin is null and stdout/stderr are piped. Helpers: `expect`,
+   `send`, `wait_raw_mode`.
+   - **Key race:** before sending a key, poll `tcgetattr(master)` until `ICANON`
+     is cleared. Seeing `Execute?` is not enough: `TCSAFLUSH` at
+     `src/tui.rs:1106` runs after the question is flushed and discards early
+     input.
+   - **Environment:** `env_clear()` + allowlist. No `DISPLAY`/`WAYLAND_DISPLAY`;
+     a temp `XDG_CONFIG_HOME`/`HOME`; `NO_COLOR`/bell/blink set per scenario.
+   - **Fake `sudo`:** a committed script in `tests/shims/`, first on `PATH`.
+     Assert on the argv after `--` and on the `-u` prefix.
+   - **Scenarios:** approve, deny, privileged approve.
+   - **Cleanup:** `Drop` sends SIGTERM and waits.
+   - **Gating:** `#![cfg(target_os = "linux")]`.
+   - **Docs:** rewrite the last paragraph of `docs/testing.md`.
+2. **PR 2 — goldens** for `tests/manual/ui/*.json` (`NO_COLOR` and colour,
+   bell/blink off, escapes visible, `\r\n` normalised, `Time:`/`Resolves:`
+   masked, `UPDATE_GOLDEN=1`), plus a check that `run-as root` is bright red.
+3. **PR 3 — remaining scenarios:**
+   - `a`, with and without `--unattended-eligible`;
+   - `--no-shell`, asserted by ordering rather than "no prompt seen";
+   - timeout: `#[ignore]` it, or add a shorten-only, capped prompt-timeout env.
+     The env would be a knob on the human gate, so decide it explicitly.
+4. **Extras:** stray input before the prompt is flushed; termios is restored;
+   two prompts on one tty are shown one at a time; the foreground handoff
+   doesn't hang; SIGTERM removes the socket; control/bidi characters never
+   reach the tty.
+
+Dropped: the `pkexec` shim. The pkexec path clears the env and sets a fixed
+`PATH`, so a shim is never found, and that path has no TUI. Separate: a CI job
+with real `sudo -n`. Stays manual: how colours, bell and blink look in a real
+terminal, real sudo passwords, the pkexec dialog, the remote SSH tunnel.
+
 ## Priority #1 — plan-model follow-ups (consolidated)
 
 The next work, pulled to the front. These surfaced while building and
