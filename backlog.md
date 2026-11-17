@@ -163,6 +163,24 @@ rmcp's `transport-io` feature and serves over stdio, so the vulnerable code is
 not compiled in. If an HTTP/streamable-http transport is ever added, drop the
 ignore and require a patched rmcp instead. Captured follow-up, not active work.
 
+## Drop the RUSTSEC-2026-0543 ignore once rmcp no longer needs `chrono`
+
+`deny.toml` and the `cargo audit` step ignore RUSTSEC-2026-0543 (`chrono`
+unmaintained). `rmcp` depends on `chrono` unconditionally, using it for model
+timestamps and for timeout-error formatting, and it enables `schemars`'
+`chrono04` feature. Upstream tracks the fix in
+[modelcontextprotocol/rust-sdk#1469](https://github.com/modelcontextprotocol/rust-sdk/issues/1469):
+either a move to `jiff`/`time` or an optional `chrono` feature. When an `rmcp`
+release lands either change:
+- upgrade `rmcp`, and turn off its `chrono` feature if it is made optional;
+- check that `cargo tree -i chrono --all-features` comes back empty;
+- remove the ignore from both `deny.toml` and `.github/workflows/ci.yml`.
+
+Patching `rmcp` locally, or writing the MCP layer ourselves, costs more than it
+gains while the advisory is only an unmaintained notice. Reconsider if a
+`chrono` vulnerability advisory is published. Rung: supply chain. Captured
+follow-up, not active work.
+
 ## Submit the plugin to the claude-plugins-community directory
 
 Optional discoverability step, added after the plugin packaging landed (PR #53).
