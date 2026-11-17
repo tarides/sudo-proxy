@@ -3,6 +3,17 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-17 — `cargo deny` unblocked: ignore RUSTSEC-2026-0543 (chrono unmaintained)
+
+A new informational advisory marks every `chrono` version unmaintained, and
+`deny.toml` denies unmaintained crates, so the `cargo deny` job failed on every
+PR (#67, #69). `chrono` comes in only through the `mcp` feature: `rmcp`
+depends on it unconditionally (and enables `schemars`' `chrono04`). Upgrading
+does not help, because `rmcp` 3.11 still requires it. The advisory ID is now
+ignored in `deny.toml`, with a rationale, and the `cargo audit` CI step mirrors
+it. A future `chrono` vulnerability advisory has its own ID and still fails the
+check. Revisit when `rmcp` moves to `jiff`/`time`. Rung: supply chain.
+
 ## 2026-11-16 — Structured composite-execution plans (PR #59): no shell on the privileged path
 
 **The gap.** A captured approval trail (24 consecutive requests from one
