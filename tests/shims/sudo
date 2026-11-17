@@ -1,0 +1,29 @@
+#!/bin/sh
+# Test stand-in for sudo (tests/pty_e2e.rs). The daemon spawns
+# `sudo [-u USER] K=V... -- argv`, finding `sudo` on its PATH, where the pty
+# harness puts this directory first. Log the argv exactly as received (one
+# record per line, arguments NUL-terminated) so the test can check the
+# literal-argv invariant, then run the command as the invoking user. Nothing
+# is ever escalated.
+set -eu
+{ printf '%s\000' "$@"; printf '\n'; } >>"${SUDO_SHIM_LOG:?}"
+
+if [ "${1-}" = "-u" ]; then
+    shift 2
+fi
+
+# Drop the first `--` (sudo's end of options), keeping the K=V assignments
+# before it and the argv after it, then let env(1) apply the assignments.
+n=$#
+seen=
+while [ "$n" -gt 0 ]; do
+    a=$1
+    shift
+    if [ -z "$seen" ] && [ "$a" = "--" ]; then
+        seen=1
+    else
+        set -- "$@" "$a"
+    fi
+    n=$((n - 1))
+done
+exec env -- "$@"

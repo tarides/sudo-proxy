@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[cfg(target_os = "linux")]
+pub mod pty;
+
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
