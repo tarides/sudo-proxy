@@ -31,6 +31,17 @@ ignore = [
     # compiled in. The fix is rmcp >= 3.9.0, a major-version jump tracked
     # separately. Mirrored in the `cargo audit` step (.github/workflows/ci.yml).
     "RUSTSEC-2026-0462",
+    # RUSTSEC-2026-0543: chrono is unmaintained (informational; no
+    # vulnerability, no patched version). chrono comes in only through the
+    # `mcp` feature: rmcp depends on it unconditionally and enables schemars'
+    # `chrono04` feature. sudo-proxy never calls chrono itself, but rmcp does
+    # (the `DateTime<Utc>` `last_modified` annotation, timeout-error
+    # formatting), so it cannot be dropped without forking rmcp — and rmcp
+    # 3.11 still requires it, so upgrading does not help. A future chrono
+    # *vulnerability* advisory has its own ID and still fails this check.
+    # Revisit when rmcp moves to jiff/time. Mirrored in the `cargo audit` step
+    # (.github/workflows/ci.yml).
+    "RUSTSEC-2026-0543",
 ]
 
 [bans]
