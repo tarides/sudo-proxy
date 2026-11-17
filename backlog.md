@@ -21,8 +21,8 @@ Plan, revised after a code review (full notes in the
 1. **PR 1 — harness + 3 scenarios.** `tests/common/pty.rs`, hand-rolled on
    `libc` (no new dependency): `openpty`, then `setsid` + `TIOCSCTTY` in
    `pre_exec` around `CARGO_BIN_EXE_sudo-proxy`. The pty is the controlling
-   terminal only; stdin is null and stdout/stderr are piped. Helpers: `expect`,
-   `send`, `wait_raw_mode`.
+   terminal only; stdin and stdout are null and stderr goes to a log file.
+   Helpers: `expect`, `answer` (waits for raw mode, then types), `shim_log`.
    - **Key race:** before sending a key, poll `tcgetattr(master)` until `ICANON`
      is cleared. Seeing `Execute?` is not enough: `TCSAFLUSH` at
      `src/tui.rs:1106` runs after the question is flushed and discards early

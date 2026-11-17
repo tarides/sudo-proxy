@@ -2,13 +2,14 @@
 //!
 //! The daemon's prompt, banner and result display all go through `/dev/tty`
 //! (`src/tui.rs`), so the harness makes a fresh pty the daemon's *controlling
-//! terminal* (`setsid` + `TIOCSCTTY`) and leaves fds 0/1/2 alone. The test
-//! reads what the daemon drew from the master side and types answers into it.
+//! terminal* (`setsid` + `TIOCSCTTY`) without putting it on fds 0/1/2 (stdin
+//! and stdout are null, stderr goes to `daemon.log`). The test reads what the
+//! daemon drew from the master side and types answers into it.
 //!
 //! Key timing: the prompt flushes its question line *before* switching the
 //! tty to raw mode with `TCSAFLUSH`, which discards input already queued. A key
-//! sent as soon as the `Execute?` question shows up can land in that window and be thrown
-//! away, leaving the prompt to time out. [`PtyDaemon::answer`] therefore waits
+//! sent as soon as the `Execute?` question shows up can land in that window
+//! and be thrown away, leaving the prompt to time out. [`PtyDaemon::answer`] therefore waits
 //! until the slave's termios (visible through the master on Linux) has
 //! `ICANON` cleared before writing the key.
 //!
@@ -212,12 +213,20 @@ impl PtyDaemon {
         t
     }
 
+    /// The per-daemon temp dir (removed on drop): a place for test files
+    /// that must not outlive a failing test.
+    pub fn dir(&self) -> &Path {
+        self.dir.path()
+    }
+
     /// Everything the daemon drew so far, `\r\n` folded to `\n`.
     pub fn capture(&self) -> String {
         normalize(&self.capture.0.lock().unwrap().0)
     }
 
-    /// Each argv the `sudo` shim was invoked with, in order.
+    /// Each argv the `sudo` shim was invoked with, in order. A record is the
+    /// arguments, each NUL-terminated, then `\n` (argv cannot contain a
+    /// newline: the daemon rejects one at validation).
     pub fn shim_log(&self) -> Vec<Vec<String>> {
         let Ok(bytes) = std::fs::read(self.dir.path().join("sudo.log")) else {
             return Vec::new();
@@ -226,10 +235,10 @@ impl PtyDaemon {
             .split(|&b| b == b'\n')
             .filter(|rec| !rec.is_empty())
             .map(|rec| {
-                rec.split(|&b| b == 0)
-                    .filter(|a| !a.is_empty())
-                    .map(|a| String::from_utf8_lossy(a).into_owned())
-                    .collect()
+                // Strip the last terminator rather than filtering empties, so
+                // a genuine "" argument is kept.
+                let rec = rec.strip_suffix(&[0]).unwrap_or(rec);
+                rec.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
             })
             .collect()
     }
@@ -245,9 +254,13 @@ impl PtyDaemon {
 
 impl Drop for PtyDaemon {
     fn drop(&mut self) {
-        // SIGTERM lets the daemon's handler unlink the socket.
-        unsafe {
-            libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+        // SIGTERM lets the daemon's handler unlink the socket. Only while it
+        // is unreaped: after a reap (e.g. the early-exit path in `spawn`) the
+        // pid may already belong to another process.
+        if matches!(self.child.try_wait(), Ok(None)) {
+            unsafe {
+                libc::kill(self.child.id() as libc::pid_t, libc::SIGTERM);
+            }
         }
         let deadline = Instant::now() + Duration::from_secs(5);
         while matches!(self.child.try_wait(), Ok(None)) && Instant::now() < deadline {
@@ -262,17 +275,27 @@ impl Drop for PtyDaemon {
     }
 }
 
+/// Open a pty pair with both fds CLOEXEC from the start. `openpty(3)` returns
+/// them inheritable, and a test on another thread spawning its daemon between
+/// `openpty` and a later `fcntl` would leak this pty into that daemon and its
+/// children.
 fn open_pty() -> (File, File) {
-    let mut master: libc::c_int = -1;
-    let mut slave: libc::c_int = -1;
+    let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    assert!(master >= 0, "posix_openpt: {}", io::Error::last_os_error());
+    // SAFETY: posix_openpt just returned this fd; nothing else owns it.
+    let master = unsafe { File::from_raw_fd(master) };
+    let m = master.as_raw_fd();
+    assert_eq!(unsafe { libc::grantpt(m) }, 0, "grantpt: {}", io::Error::last_os_error());
+    assert_eq!(unsafe { libc::unlockpt(m) }, 0, "unlockpt: {}", io::Error::last_os_error());
+    let mut name = [0 as libc::c_char; 128];
+    assert_eq!(unsafe { libc::ptsname_r(m, name.as_mut_ptr(), name.len()) }, 0, "ptsname_r");
+    let slave = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    assert!(slave >= 0, "open slave: {}", io::Error::last_os_error());
+    // SAFETY: open just returned this fd; nothing else owns it.
+    let slave = unsafe { File::from_raw_fd(slave) };
     let ws = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &ws) };
-    assert_eq!(rc, 0, "openpty: {}", io::Error::last_os_error());
-    for fd in [master, slave] {
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) }, 0);
-    }
-    // SAFETY: openpty just returned these fds; nothing else owns them.
-    unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) }
+    assert_eq!(unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ, &ws) }, 0);
+    (master, slave)
 }
 
 /// Copy master output into the capture until `stop` (or a read error, which

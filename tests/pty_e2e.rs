@@ -52,14 +52,15 @@ fn deny_with_n_and_with_enter() {
     let mut d = PtyDaemon::spawn(PtyOpts::default());
 
     for (id, key) in [("pty-deny-n", b'n'), ("pty-deny-enter", b'\r')] {
-        let marker = format!("/tmp/sudo-proxy-pty-{id}-{}", std::process::id());
-        let h = d.request_async(&req(id, &["touch", &marker], "pty harness deny"));
+        // In the harness dir, so it is cleaned up even when the test fails.
+        let marker = d.dir().join(format!("{id}.ran"));
+        let h = d.request_async(&req(id, &["touch", marker.to_str().unwrap()], "pty harness deny"));
         let prompt = d.answer(key);
         assert!(prompt.contains(id), "prompt: {prompt}");
         let resp = h.join().unwrap();
         assert_eq!(resp.status, Status::Denied, "{id}: {resp:?}");
         d.expect("→ Denied");
-        assert!(!std::path::Path::new(&marker).exists(), "{id}: denied command ran");
+        assert!(!marker.exists(), "{id}: denied command ran");
         assert!(d.is_cooked(), "{id}: termios not restored");
     }
     assert!(d.shim_log().is_empty());
@@ -69,15 +70,16 @@ fn deny_with_n_and_with_enter() {
 fn privileged_goes_through_sudo_with_literal_argv() {
     let mut d = PtyDaemon::spawn(PtyOpts::default());
 
-    // Whole-command privilege: run as root, so no `-u`.
-    let mut root = req("pty-priv-root", &["echo", "as root", "$HOME;x"], "pty harness root");
+    // Whole-command privilege: run as root, so no `-u`. The empty argument
+    // and the shell metacharacters must reach sudo untouched.
+    let mut root = req("pty-priv-root", &["echo", "as root", "", "$HOME;x"], "pty harness root");
     root.privileged = true;
     let h = d.request_async(&root);
     let prompt = d.answer(b'y');
     assert!(prompt.contains("Execute as root?"), "prompt: {prompt}");
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
-    assert_eq!(common::decode_stdout(&resp), "as root $HOME;x\n");
+    assert_eq!(common::decode_stdout(&resp), "as root  $HOME;x\n");
 
     // A plan step run as a named user: `-u nobody`.
     let mut user = common::make_req("pty-priv-user", vec![]);
@@ -98,7 +100,7 @@ fn privileged_goes_through_sudo_with_literal_argv() {
     assert_eq!(log.len(), 2, "one sudo spawn per privileged step: {log:?}");
     let (u, argv) = split_sudo(&log[0]);
     assert_eq!(u, None);
-    assert_eq!(argv, ["echo", "as root", "$HOME;x"]);
+    assert_eq!(argv, ["echo", "as root", "", "$HOME;x"]);
     let (u, argv) = split_sudo(&log[1]);
     assert_eq!(u, Some("nobody"));
     assert_eq!(argv, ["echo", "as-nobody"]);
