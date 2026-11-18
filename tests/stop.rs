@@ -115,3 +115,52 @@ fn stale_stop_is_rejected_and_daemon_survives() {
     let resp = s.send(&make_req("still-alive", vec![vec!["true"]]));
     assert_eq!(resp.status, Status::Ok, "daemon must survive a stale stop");
 }
+
+/// Issue #63: a stop that is fresh but dated before the daemon started is
+/// rejected, and the daemon keeps serving.
+#[test]
+fn stop_dated_before_daemon_start_is_rejected() {
+    let s = start_test_server(TestServerOpts::default());
+
+    let mut req = make_control_req("pre-start-stop", Action::Stop);
+    req.time = iso_offset(-5);
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error);
+    assert!(
+        resp.message.as_deref().unwrap_or("").contains("predates"),
+        "expected start-time rejection, got: {resp:?}"
+    );
+
+    let resp = s.send(&make_req("still-alive-63", vec![vec!["true"]]));
+    assert_eq!(resp.status, Status::Ok, "daemon must survive a pre-start stop");
+}
+
+/// Issue #63 repro: a stop accepted by one daemon instance is replayed,
+/// byte-identical, against a freshly started instance within the freshness
+/// window. The new instance must refuse it and stay up.
+#[test]
+fn captured_stop_does_not_stop_restarted_daemon() {
+    let a = start_test_server(TestServerOpts::default());
+    let captured = make_control_req("captured-stop", Action::Stop);
+    let resp = a.send(&captured);
+    assert_eq!(resp.status, Status::Ok, "first instance accepts the stop");
+    drop(a);
+
+    // `time` has one-second resolution: start the second instance in a later
+    // wall-clock second than the captured request.
+    let sent = iso_offset(0);
+    while iso_offset(0) == sent {
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let b = start_test_server(TestServerOpts::default());
+    let resp = b.send(&captured);
+    assert_eq!(resp.status, Status::Error, "replayed stop must be refused: {resp:?}");
+    assert!(
+        resp.message.as_deref().unwrap_or("").contains("predates"),
+        "expected start-time rejection, got: {resp:?}"
+    );
+
+    let resp = b.send(&make_req("restarted-alive", vec![vec!["true"]]));
+    assert_eq!(resp.status, Status::Ok, "restarted daemon must survive the replay");
+}

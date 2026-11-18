@@ -3,6 +3,26 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — a captured `stop` no longer stops a restarted daemon (#63)
+
+Replay protection (`SeenIds`) keeps the ids it has seen in memory, one set per
+daemon instance. A `stop` accepted by one instance was therefore accepted
+again by a newly started instance if it was resent within the 60 s freshness
+window, despite docs/protocol.md promising that a captured stop could not be
+replayed. The daemon now records its start time (in Unix seconds, before
+binding the socket) and rejects a `stop` whose `time` is earlier than that.
+Any stop that an earlier instance accepted is dated before that instance exited,
+so it predates the new one. Nothing changes on the wire and clients need no update.
+Only `stop` is gated: replaying a `ping` is harmless, a replayed exec still
+reaches the approval prompt, and gating either one would make legitimate
+requests sent just after `start_server` depend on the client's clock. The one
+remaining gap is a restart within the same wall-clock second as the original
+stop. `parse_age` is now split into a pure `parse_epoch` plus a clock read.
+Tests: `server::tests::check_not_before_start_boundaries`,
+`parse_epoch_round_trips_epoch_to_iso`, and in `tests/stop.rs`
+`stop_dated_before_daemon_start_is_rejected` and
+`captured_stop_does_not_stop_restarted_daemon` (the issue's repro).
+
 ## Unreleased — `pkexec-cache` check no longer says "not installed" when it cannot read rules.d (#75)
 
 The check mode began with `Path::exists()`, which returns `false` on any error,
