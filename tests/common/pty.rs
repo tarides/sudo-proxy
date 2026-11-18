@@ -46,6 +46,9 @@ pub struct PtyOpts {
     /// Leave colours on (no `NO_COLOR`). Bell and blink are always off so a
     /// capture is stable.
     pub color: bool,
+    /// Write `config/sudo-proxy/hosts.json` with these contents and mode
+    /// before the daemon starts.
+    pub hosts_json: Option<(String, u32)>,
 }
 
 /// What the reader thread has seen on the master, and whether it hit EOF.
@@ -82,6 +85,16 @@ impl PtyDaemon {
         let socket = dir.path().join("p.sock");
         for sub in ["home", "config"] {
             std::fs::create_dir(dir.path().join(sub)).expect("mkdir");
+        }
+        if let Some((json, mode)) = &opts.hosts_json {
+            std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(dir.path().join("config"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            let cfg = dir.path().join("config/sudo-proxy");
+            std::fs::create_dir(&cfg).expect("mkdir");
+            std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let f = cfg.join("hosts.json");
+            std::fs::write(&f, json).expect("hosts.json");
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(*mode)).unwrap();
         }
 
         let (master, slave) = open_pty();
@@ -185,6 +198,12 @@ impl PtyDaemon {
         self.wait_raw_mode();
         self.master.write_all(&[key]).expect("write key");
         format!("Privilege Request{body}")
+    }
+
+    /// Type `key` once the tty is in raw mode, for a prompt already consumed.
+    pub fn answer_raw(&mut self, key: u8) {
+        self.wait_raw_mode();
+        self.master.write_all(&[key]).expect("write key");
     }
 
     /// True while the slave is in canonical (cooked) mode with echo on: the
