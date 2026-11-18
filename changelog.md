@@ -3,6 +3,26 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — the `Resolves:` line names the binary that actually runs (#62)
+
+The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
+spawned the bare name with a cleared environment, so the child searched the
+default login PATH (sudo searched its `secure_path`, pkexec's `env` the login
+PATH). A daemon started from a dev shell (Nix, virtualenv, `~/.local/bin`)
+could show one file and run another, or show a file and then fail with ENOENT.
+A relative name such as `./tool` under a `chdir` was checked against the
+daemon's working directory but run from the plan's.
+
+`executor::resolve_command` now resolves each leaf once, at plan compile time,
+on the child's PATH and against the leaf's `chdir`. The TUI and GUI prompts
+display that result and `build_command` spawns it (keeping the requested
+`argv[0]`), including as the command after `sudo --` and `pkexec env -C DIR --`.
+A name that does not resolve is refused at spawn with `command not found`
+instead of being looked up a second time. The pkexec `=` check now covers the
+resolved path that `env` receives. Regressions: unit tests in `executor`, and
+`resolves_line_names_the_binary_that_runs` in `tests/pty_e2e.rs`, which follows
+the issue's repro.
+
 ## v1.2.1 — 2026-11-18 (security release)
 
 A patch release on top of v1.2.0 with two security fixes and nothing else:

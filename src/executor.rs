@@ -116,7 +116,9 @@ pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
     }
 }
 
-/// Resolve a command name to an absolute path by searching PATH.
+/// Resolve a command name to an absolute path by searching the **daemon's**
+/// PATH. For locating helper tools the daemon itself runs (zenity, kdialog);
+/// never for a requested command — see [`resolve_command`].
 pub fn which(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -125,7 +127,24 @@ pub fn which(name: &str) -> Option<PathBuf> {
         }
         return None;
     }
-    let path_var = std::env::var("PATH").unwrap_or_default();
+    search_path(name, &std::env::var("PATH").unwrap_or_default())
+}
+
+/// Resolve a requested command's `argv[0]` exactly as its child would: a bare
+/// name is searched on the child's PATH (always [`DEFAULT_LOGIN_PATH`] — no
+/// request can set PATH), and a name containing `/` is taken relative to the
+/// leaf's working directory, where the child starts. The prompt shows this
+/// result and the executor spawns it, so the two cannot name different files
+/// (issue #62).
+pub fn resolve_command(name: &str, cwd: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        let p = Path::new(cwd).join(name);
+        return p.is_file().then_some(p);
+    }
+    search_path(name, DEFAULT_LOGIN_PATH)
+}
+
+fn search_path(name: &str, path_var: &str) -> Option<PathBuf> {
     for dir in path_var.split(':') {
         let candidate = Path::new(dir).join(name);
         if let Ok(meta) = candidate.metadata() {
@@ -249,8 +268,9 @@ struct LeafPlan {
     /// True for a `System` (shell escape-hatch) leaf. The prompt flags it as
     /// opaque; `resolved_bin` resolves only the shell.
     opaque: bool,
-    /// `argv[0]` resolved through PATH + canonicalize, for the prompt. Computed
-    /// in Pass A so the prompt and the executor can never disagree.
+    /// `argv[0]` resolved by [`resolve_command`]. The prompt displays it and
+    /// [`build_command`] spawns it, so the two can never disagree; `None` means
+    /// the stage is refused at spawn rather than looked up again.
     resolved_bin: Option<PathBuf>,
     /// Exit codes treated as success (besides 0) for seq short-circuiting.
     accepted: Vec<i32>,
@@ -504,7 +524,7 @@ fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result
 
 /// Append a resolved leaf to the list and return its index (= stage id).
 fn push_leaf(argv: Vec<String>, opaque: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
-    let resolved_bin = argv.first().and_then(|name| which(name));
+    let resolved_bin = argv.first().and_then(|name| resolve_command(name, &ctx.cwd));
     let stage_id = leaves.len();
     leaves.push(LeafPlan {
         argv,
@@ -771,7 +791,7 @@ fn check_pkexec_leaves(leaves: &[LeafPlan], env_has_chdir: bool) -> Result<(), S
                     .to_string(),
             );
         }
-        if leaf.argv[0].contains('=') {
+        if leaf_program(leaf).is_some_and(|p| p.as_os_str().as_encoded_bytes().contains(&b'=')) {
             return Err("under pkexec, a command name must not contain '='".to_string());
         }
     }
@@ -907,7 +927,10 @@ fn run_one(
     deadline: Instant,
     fg_lock: Option<&Mutex<()>>,
 ) -> RunResult {
-    let mut cmd = build_command(leaf, mode);
+    let mut cmd = match build_command(leaf, mode) {
+        Ok(c) => c,
+        Err(e) => return spawn_err(e),
+    };
     let stdout_file = match set_stdout(&mut cmd, &leaf.stdout) {
         Ok(f) => f,
         Err(e) => return spawn_err(format!("failed to open stdout redirect: {e}")),
@@ -1003,10 +1026,19 @@ fn spawn_err(msg: String) -> RunResult {
 /// applied. Stdio is configured by the caller (so pipe wiring can override it).
 /// No shell is ever introduced here — an escalated leaf is `sudo … -- argv` or
 /// `pkexec … argv`.
-fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Command {
-    match &leaf.runas {
+///
+/// The program is always the prompt-displayed `resolved_bin`, never `argv[0]`
+/// looked up again (by `Command`, `sudo`'s `secure_path`, or `env`), so the
+/// file that runs is the file the human approved (issue #62). An unresolved
+/// name is refused here instead of being searched for a second time.
+fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, String> {
+    let program = leaf_program(leaf)
+        .ok_or_else(|| format!("command not found: {}", leaf.argv[0]))?;
+    Ok(match &leaf.runas {
         LeafRunAs::Direct => {
-            let mut c = Command::new(&leaf.argv[0]);
+            let mut c = Command::new(program);
+            // Keep the requested argv[0] (multi-call binaries dispatch on it).
+            c.arg0(&leaf.argv[0]);
             c.args(&leaf.argv[1..]);
             c.env_clear();
             for (k, v) in &leaf.env {
@@ -1038,9 +1070,8 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Command {
                 c.arg("-C");
                 c.arg(&leaf.cwd);
                 c.arg("--");
-                for a in &leaf.argv {
-                    c.arg(a);
-                }
+                c.arg(program);
+                c.args(&leaf.argv[1..]);
                 c.env_clear();
                 for (k, v) in &leaf.env {
                     c.env(k, v);
@@ -1067,14 +1098,18 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Command {
                     c.arg(format!("{k}={v}"));
                 }
                 c.arg("--");
-                for a in &leaf.argv {
-                    c.arg(a);
-                }
+                c.arg(program);
+                c.args(&leaf.argv[1..]);
                 c.current_dir(&leaf.cwd);
                 c
             }
         },
-    }
+    })
+}
+
+/// The file a leaf will execute: its prompt-displayed resolution.
+fn leaf_program(leaf: &LeafPlan) -> Option<&Path> {
+    leaf.resolved_bin.as_deref()
 }
 
 fn open_out(path: &str, append: bool) -> std::io::Result<File> {
@@ -1190,7 +1225,13 @@ fn run_pipe(
         let is_first = pos == 0;
         let is_last = pos == n - 1;
 
-        let mut cmd = build_command(leaf, mode);
+        let mut cmd = match build_command(leaf, mode) {
+            Ok(c) => c,
+            Err(e) => {
+                let _guard = KillOnDrop::new(children);
+                return spawn_error_status(e);
+            }
+        };
 
         // stdin: first stage honours its own spec; later stages read the
         // previous stage's stdout.
@@ -1549,30 +1590,35 @@ mod tests {
             stdout: OutSpec::Capture,
             stderr: ErrSpec::Capture,
             opaque: false,
-            resolved_bin: None,
+            resolved_bin: Some(PathBuf::from(format!("/usr/bin/{}", argv[0]))),
             accepted: vec![],
             forward_agent: false,
             stage_id: 0,
         }
     }
 
-    /// Under pkexec an escalated leaf runs as `pkexec env -C DIR -- argv`, so
-    /// it keeps the approved cwd; `env` must support `-C`, and an argv[0] that
-    /// `env` would take as `NAME=VALUE` is refused.
+    /// Under pkexec an escalated leaf runs as `pkexec env -C DIR -- BIN args`,
+    /// so it keeps the approved cwd; `env` must support `-C`, and a program
+    /// path that `env` would take as `NAME=VALUE` is refused.
     #[test]
     fn pkexec_leaves_keep_cwd_through_env() {
         let mut l = leaf(&["id"], LeafRunAs::Root);
         l.cwd = "/srv".into();
-        let c = build_command(&l, EscalationMode::Pkexec);
+        let c = build_command(&l, EscalationMode::Pkexec).unwrap();
         let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
         assert_eq!(c.get_program(), "pkexec");
-        assert_eq!(args, ["env", "-C", "/srv", "--", "id"]);
+        assert_eq!(args, ["env", "-C", "/srv", "--", "/usr/bin/id"]);
 
         let ok = [leaf(&["id"], LeafRunAs::Root), leaf(&["A=B"], LeafRunAs::Direct)];
         assert!(check_pkexec_leaves(&ok, true).is_ok());
         assert!(check_pkexec_leaves(&ok, false).unwrap_err().contains("-C"));
         let bad = [leaf(&["LD_PRELOAD=/x", "id"], LeafRunAs::Root)];
         assert!(check_pkexec_leaves(&bad, true).unwrap_err().contains("'='"));
+        // The check covers the path actually handed to `env`: a relative name
+        // resolved under a `chdir` containing '=' is refused too.
+        let mut l = leaf(&["./tool"], LeafRunAs::Root);
+        l.resolved_bin = Some(PathBuf::from("/opt/a=b/tool"));
+        assert!(check_pkexec_leaves(&[l], true).unwrap_err().contains("'='"));
     }
 
     #[test]
@@ -1843,28 +1889,28 @@ mod tests {
             stdout: OutSpec::Capture,
             stderr: ErrSpec::Capture,
             opaque: false,
-            resolved_bin: None,
+            resolved_bin: Some(PathBuf::from("/usr/sbin/sysctl")),
             accepted: Vec::new(),
             forward_agent: false,
             stage_id: 0,
         };
 
-        // Root under sudo: `sudo -- sysctl -w …`, no shell.
-        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Sudo);
+        // Root under sudo: `sudo -- /usr/sbin/sysctl -w …`, no shell.
+        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Sudo).unwrap();
         assert_eq!(c.get_program().to_str().unwrap(), "sudo");
         let args: Vec<String> = c
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
         assert!(args.contains(&"--".to_string()), "sudo must use -- : {args:?}");
-        assert!(args.ends_with(&["sysctl".into(), "-w".into(), "vm.mmap_rnd_bits=28".into()]));
+        assert!(args.ends_with(&["/usr/sbin/sysctl".into(), "-w".into(), "vm.mmap_rnd_bits=28".into()]));
         assert!(
             !args.iter().any(|a| a == "-c"),
             "no shell -c on the privileged path: {args:?}"
         );
 
         // Named user under sudo: `sudo -u alice -- …`.
-        let c = build_command(&leaf(LeafRunAs::User("alice".into())), EscalationMode::Sudo);
+        let c = build_command(&leaf(LeafRunAs::User("alice".into())), EscalationMode::Sudo).unwrap();
         let args: Vec<String> = c
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -1873,11 +1919,50 @@ mod tests {
         assert_eq!(&args[1], "alice");
 
         // Pkexec root: `pkexec sysctl …` (no shell).
-        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec);
+        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec).unwrap();
         assert_eq!(c.get_program().to_str().unwrap(), "pkexec");
 
-        // Direct leaf: program IS the literal binary.
-        let c = build_command(&leaf(LeafRunAs::Direct), EscalationMode::Direct);
-        assert_eq!(c.get_program().to_str().unwrap(), "sysctl");
+        // Direct leaf: the program is the resolved binary, argv[0] unchanged.
+        let c = build_command(&leaf(LeafRunAs::Direct), EscalationMode::Direct).unwrap();
+        assert_eq!(c.get_program().to_str().unwrap(), "/usr/sbin/sysctl");
+    }
+
+    // Issue #62: an unresolved leaf is refused at spawn, in every mode, rather
+    // than handed to a second PATH lookup the prompt never showed.
+    #[test]
+    fn unresolved_leaf_is_refused_not_looked_up_again() {
+        for (runas, mode) in [
+            (LeafRunAs::Direct, EscalationMode::Direct),
+            (LeafRunAs::Root, EscalationMode::Sudo),
+            (LeafRunAs::Root, EscalationMode::Pkexec),
+        ] {
+            let mut l = leaf(&["only-here"], runas);
+            l.resolved_bin = None;
+            let err = build_command(&l, mode).unwrap_err();
+            assert!(err.contains("command not found: only-here"), "{err}");
+        }
+    }
+
+    // Issue #62: resolution ignores the daemon's PATH (the child never sees
+    // it) and takes a relative name against the leaf's cwd, not the daemon's.
+    #[test]
+    fn resolve_command_uses_child_path_and_leaf_cwd() {
+        let dir = std::env::temp_dir().join(format!("sp-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let tool = dir.join("bin/only-here-62");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A bare name only on some other PATH is not found…
+        assert_eq!(resolve_command("only-here-62", "/"), None);
+        // …while a system binary resolves on the child's default PATH.
+        let sh = resolve_command("sh", "/").expect("sh on default PATH");
+        assert!(DEFAULT_LOGIN_PATH.split(':').any(|d| sh.parent() == Some(Path::new(d))));
+        // A relative name resolves against the leaf cwd.
+        let cwd = dir.to_str().unwrap();
+        assert_eq!(resolve_command("bin/only-here-62", cwd), Some(dir.join("bin/only-here-62")));
+        assert_eq!(resolve_command("./bin/only-here-62", "/"), None);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

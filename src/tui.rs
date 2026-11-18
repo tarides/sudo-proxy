@@ -1,11 +1,12 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::time::Duration;
+use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::executor::{plan_display, which, LeafPrivilege, LeafView};
+use crate::executor::{plan_display, LeafPrivilege, LeafView};
 use crate::protocol::{Plan, RedirTarget, Response, RunAs, Status, Stream, ValidatedRequest};
 
 /// Quote a single token for safe, paste-able POSIX shell. Anything outside a
@@ -669,7 +670,7 @@ fn write_plan_stages<W: Write>(
         && views[0].redirects.is_empty()
     {
         if let Some(name) = views[0].argv.first() {
-            return write_resolves_line(w, name, style);
+            return write_resolves_line(w, name, views[0].resolved_bin.as_deref(), style);
         }
         return Ok(());
     }
@@ -859,7 +860,7 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                 None => format!("{bold}opaque — shell not found in PATH{reset}"),
             }
         } else {
-            resolve_detail(&name, style)
+            resolve_detail(view.resolved_bin.as_deref(), style)
         };
         if seen.insert(format!("{name}\u{0}{detail}")) {
             entries.push((name, detail));
@@ -880,14 +881,14 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
 /// always naming a concrete path. Used by the consolidated resolve block; it
 /// mirrors `write_resolves_line`'s symlink display but never elides — the block
 /// shows every binary, even one supplied as an already-canonical absolute path.
-fn resolve_detail(cmd_name: &str, style: &Style) -> String {
+fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
     let Style { bold, dim, reset, .. } = *style;
-    let resolved = match which(cmd_name) {
+    let resolved = match resolved {
         Some(p) => p,
         None => return format!("{bold}(not found in PATH){reset}"),
     };
     let resolved_str = resolved.display().to_string();
-    match std::fs::canonicalize(&resolved) {
+    match std::fs::canonicalize(resolved) {
         Ok(canonical) => {
             let canonical_str = canonical.display().to_string();
             if canonical_str != resolved_str {
@@ -900,8 +901,9 @@ fn resolve_detail(cmd_name: &str, style: &Style) -> String {
     }
 }
 
-/// Write the `Resolves:` line for a command name. PATH-searches the
-/// name (or accepts an absolute path), then `canonicalize`s the result
+/// Write the `Resolves:` line for a command name, given the plan's own
+/// resolution of it (`resolve_command` — the file the executor will spawn,
+/// never a fresh lookup), then `canonicalize`s the result
 /// so symlink redirection — including `/usr/local/bin/foo -> /tmp/evil`
 /// when the absolute path was supplied directly — is visible.
 ///
@@ -914,9 +916,14 @@ fn resolve_detail(cmd_name: &str, style: &Style) -> String {
 /// - canonicalize fails (broken symlink, EACCES): show what we know and
 ///   flag `(canonicalize failed)` so the prompt is honest about not
 ///   having verified the target.
-fn write_resolves_line<W: Write>(w: &mut W, cmd_name: &str, style: &Style) -> io::Result<()> {
+fn write_resolves_line<W: Write>(
+    w: &mut W,
+    cmd_name: &str,
+    resolved: Option<&Path>,
+    style: &Style,
+) -> io::Result<()> {
     let Style { bold, dim, reset, .. } = *style;
-    let resolved = match which(cmd_name) {
+    let resolved = match resolved {
         Some(p) => p,
         None => {
             return writeln!(w, "Resolves: {bold}(not found in PATH){reset}");
@@ -925,7 +932,7 @@ fn write_resolves_line<W: Write>(w: &mut W, cmd_name: &str, style: &Style) -> io
     let resolved_str = resolved.display().to_string();
     let resolved_differs = resolved_str != *cmd_name;
 
-    match std::fs::canonicalize(&resolved) {
+    match std::fs::canonicalize(resolved) {
         Ok(canonical) => {
             let canonical_str = canonical.display().to_string();
             let canonical_differs = canonical_str != resolved_str;
@@ -1186,7 +1193,8 @@ mod tests {
     fn render_resolves(cmd_name: &str) -> String {
         let mut buf: Vec<u8> = Vec::new();
         let st = Style { bold: "B", dim: "D", reset: "R", root: "ROOT", root_boundary: "RB", user: "USR" };
-        write_resolves_line(&mut buf, cmd_name, &st).expect("write");
+        let resolved = crate::executor::resolve_command(cmd_name, "/");
+        write_resolves_line(&mut buf, cmd_name, resolved.as_deref(), &st).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
 
