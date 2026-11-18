@@ -17,9 +17,22 @@ use crate::tui::{self, Prompter, ResultSink};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 const MAX_REQUEST_AGE: Duration = Duration::from_secs(60);
-/// How long replay-protection ids are remembered. Twice MAX_REQUEST_AGE so that
-/// any id that could still pass the freshness check is also still in the set.
+/// How far in the future a request's `time` may be. A request to a remote
+/// daemon carries the *client's* clock, so a little skew is tolerated; beyond
+/// it the request is rejected. Without this bound a future-dated request
+/// stayed fresh forever and became replayable once its id was evicted
+/// (GHSA-h6r4-gh2r-qr98).
+const MAX_FUTURE_SKEW: Duration = Duration::from_secs(30);
+/// How long replay-protection ids are remembered. A request accepted at `t`
+/// has `time <= t + MAX_FUTURE_SKEW`, so it can pass the freshness check
+/// again only until `t + MAX_FUTURE_SKEW + MAX_REQUEST_AGE`. Retention must
+/// cover that span so any id that could still pass freshness is still in the
+/// set; the assertion below enforces it at compile time.
 const REPLAY_RETENTION: Duration = Duration::from_secs(120);
+const _: () = assert!(
+    REPLAY_RETENTION.as_secs() >= MAX_REQUEST_AGE.as_secs() + MAX_FUTURE_SKEW.as_secs(),
+    "REPLAY_RETENTION must cover MAX_REQUEST_AGE + MAX_FUTURE_SKEW"
+);
 /// Per-syscall read/write timeout. Bounds any single I/O operation.
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Wall-clock deadline for completing the request handshake (read+parse).
@@ -50,19 +63,31 @@ pub fn forwarded_agent_socket() -> Option<String> {
     std::env::var("SSH_AUTH_SOCK").ok()
 }
 
-/// Reject requests whose `time` is missing, malformed, or older than
-/// MAX_REQUEST_AGE. Performed at connection-handler entry, before any
-/// TTY contention, so a request's freshness is judged at acceptance
-/// rather than after waiting in line.
+/// Reject requests whose `time` is missing, malformed, older than
+/// MAX_REQUEST_AGE, or more than MAX_FUTURE_SKEW in the future. Performed at
+/// connection-handler entry, before any TTY contention, so a request's
+/// freshness is judged at acceptance rather than after waiting in line.
 fn check_freshness(req: &Request) -> Result<(), String> {
     if req.time.is_empty() {
         return Err("missing time field".to_string());
     }
     let age = parse_age(&req.time).ok_or_else(|| "malformed time field".to_string())?;
-    if age > MAX_REQUEST_AGE {
+    check_age(age)
+}
+
+/// The freshness window on a signed age (seconds; negative = future-dated).
+/// Split from `check_freshness` so the window can be tested without a clock.
+fn check_age(age: i64) -> Result<(), String> {
+    if age < 0 && age.unsigned_abs() > MAX_FUTURE_SKEW.as_secs() {
         return Err(format!(
-            "request too old: {}s (max {}s)",
-            age.as_secs(),
+            "request time is {}s in the future (max skew {}s)",
+            age.unsigned_abs(),
+            MAX_FUTURE_SKEW.as_secs()
+        ));
+    }
+    if age > 0 && age.unsigned_abs() > MAX_REQUEST_AGE.as_secs() {
+        return Err(format!(
+            "request too old: {age}s (max {}s)",
             MAX_REQUEST_AGE.as_secs()
         ));
     }
@@ -108,8 +133,10 @@ impl Drop for InFlightGuard {
     }
 }
 
-/// Parse an ISO 8601 UTC timestamp and return its age relative to now.
-fn parse_age(timestamp: &str) -> Option<Duration> {
+/// Parse an ISO 8601 UTC timestamp and return its signed age relative to
+/// now, in seconds: positive for the past, negative for the future. A future
+/// timestamp is no longer clamped to 0 — `check_age` bounds it.
+fn parse_age(timestamp: &str) -> Option<i64> {
     // Expect format: 2026-02-13T14:30:00Z or similar
     // Minimal parser for YYYY-MM-DDTHH:MM:SSZ
     let ts = timestamp.trim().trim_end_matches('Z');
@@ -141,12 +168,9 @@ fn parse_age(timestamp: &str) -> Option<Duration> {
         time_parts[2],
     )?;
 
-    let now_secs = now.as_secs();
-    if ts_secs > now_secs {
-        Some(Duration::from_secs(0))
-    } else {
-        Some(Duration::from_secs(now_secs - ts_secs))
-    }
+    let now_secs = i64::try_from(now.as_secs()).ok()?;
+    let ts_secs = i64::try_from(ts_secs).ok()?;
+    now_secs.checked_sub(ts_secs)
 }
 
 fn runtime_dir() -> PathBuf {
@@ -1103,11 +1127,78 @@ mod tests {
     }
 
     #[test]
-    fn parse_age_clamps_future_timestamp_to_zero() {
-        // A timestamp far enough in the future should not panic on subtract;
-        // the parser caps the age at zero.
-        let age = parse_age("3000-01-01T00:00:00Z");
-        assert_eq!(age, Some(Duration::from_secs(0)));
+    fn far_future_timestamp_is_rejected_not_clamped() {
+        // GHSA-h6r4-gh2r-qr98: a far-future timestamp used to clamp to age 0
+        // and pass freshness forever. It now parses to a negative age, and
+        // the freshness window rejects it.
+        let age = parse_age("3000-01-01T00:00:00Z").expect("valid ts");
+        assert!(age < 0, "future timestamp must have a negative age, got {age}");
+        let err = check_age(age).unwrap_err();
+        assert!(err.contains("in the future"), "{err}");
+    }
+
+    #[test]
+    fn check_age_window_boundaries() {
+        let skew = MAX_FUTURE_SKEW.as_secs() as i64;
+        let max = MAX_REQUEST_AGE.as_secs() as i64;
+        assert!(check_age(0).is_ok());
+        assert!(check_age(-skew).is_ok(), "exactly at the skew bound");
+        assert!(check_age(-skew - 1).is_err(), "just past the skew bound");
+        assert!(check_age(max).is_ok(), "exactly at the age bound");
+        assert!(check_age(max + 1).is_err(), "just past the age bound");
+        assert!(check_age(i64::MIN).is_err());
+        assert!(check_age(i64::MAX).is_err());
+    }
+
+    // === Property: any id that can pass freshness is still remembered ======
+    //
+    // Spec clause (C3, GHSA-h6r4-gh2r-qr98): if a request with a fixed `time`
+    // is accepted at instant `t0` (its id inserted into `SeenIds`), then at
+    // every later instant `t0 + d` at which the *same bytes* would pass the
+    // freshness check again, the id is still in the set, so the replay is
+    // rejected as a duplicate. Before the fix this failed for any request
+    // dated more than REPLAY_RETENTION into the future.
+
+    /// The predicate, for a request whose signed age at acceptance was
+    /// `age0` (seconds) and a replay `d` seconds later.
+    fn fresh_replay_is_still_remembered(age0: i64, d: u64) -> bool {
+        if check_age(age0).is_err() {
+            return true; // never accepted: vacuous
+        }
+        let Some(age_then) = age0.checked_add(d as i64) else { return true };
+        if check_age(age_then).is_err() {
+            return true; // replay rejected by freshness: fine
+        }
+        let (clock, now) = fake_clock();
+        let mut ids = SeenIds::new(now);
+        assert!(ids.try_insert("r".into()));
+        advance(&clock, Duration::from_secs(d));
+        // A concurrent insert triggers eviction exactly as a replay would.
+        let _ = ids.try_insert("other".into());
+        ids.contains("r")
+    }
+
+    #[test]
+    fn prop_fresh_replay_is_still_remembered() {
+        let mut rng = Rng::new(0x5EE1D5_C0FFEE);
+        let span = (MAX_REQUEST_AGE + MAX_FUTURE_SKEW + REPLAY_RETENTION).as_secs() as i64;
+        for _ in 0..20000 {
+            // Acceptance ages from far future to just past stale, replay
+            // delays over the whole retention horizon and beyond.
+            let age0 = (rng.next_u64() % (4 * span as u64)) as i64 - 3 * span;
+            let d = rng.next_u64() % (2 * span as u64);
+            assert!(
+                fresh_replay_is_still_remembered(age0, d),
+                "replay of a request accepted at age {age0}s passes freshness \
+                 {d}s later but its id was evicted"
+            );
+        }
+        // The advisory's witness: dated one hour ahead, replayed after 125 s.
+        assert!(fresh_replay_is_still_remembered(-3600, 125));
+        // Worst case the window allows: accepted at the skew bound, replayed
+        // at the age bound.
+        let worst = (MAX_FUTURE_SKEW + MAX_REQUEST_AGE).as_secs();
+        assert!(fresh_replay_is_still_remembered(-(MAX_FUTURE_SKEW.as_secs() as i64), worst));
     }
 
     // === Property: parse_age is total and panic-free ====================
@@ -1183,7 +1274,7 @@ mod tests {
             .as_secs();
         let mut rng = Rng::new(0xF00DF00DF00DF00D);
         for _ in 0..5000 {
-            // Span stale (deep past) through future (age clamps to 0); the
+            // Span stale (deep past) through future (negative age); the
             // earlier endpoint ranges from 2001 up to ~now, the gap is always
             // at least one second so the now-drift between the two reads of
             // the clock cannot invert the ordering.
@@ -1200,7 +1291,7 @@ mod tests {
         // freshness window — integer-wrap must not make it look fresh.
         let stale = parse_age("2000-01-01T00:00:00Z").expect("valid ts");
         assert!(
-            stale.as_secs() > MAX_REQUEST_AGE.as_secs(),
+            stale > MAX_REQUEST_AGE.as_secs() as i64,
             "a year-2000 timestamp must be classified stale, got {stale:?}"
         );
     }

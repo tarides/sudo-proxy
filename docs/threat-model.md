@@ -96,7 +96,7 @@ invariant at a given boundary are omitted.
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
-| Tampering | Another user rewrites `hosts.json` to set `unattended_eligible`. | File owned by the user; dir not group/other-writable (0600/0700). Eligibility only *permits* the session-scoped `a` grant — it does not itself run anything unattended, and a human must still press `a`; the grant is never persisted. The **privileged** gate is never relaxed. A2 with write access to the config is already same-UID and can run unprivileged code directly, so this grants no new capability. | G7 / F4, F2 |
+| Tampering | Another user rewrites `hosts.json` to set `unattended_eligible`. | The daemon trusts the policy only if `hosts.json` is a regular file owned by its UID and not group/world-writable, and every directory up to `$HOME` is owned by it or root and not group/world-writable (StrictModes-style: `O_NOFOLLOW` + `fstat` on the open fd; `hosts::load_policy_from`). Otherwise it warns and fails closed to not eligible (GHSA-xx2m-j9f7-gcmr). `save_to` writes 0600/0700. Eligibility only *permits* the session-scoped `a` grant — it does not itself run anything unattended, and a human must still press `a`; the grant is never persisted. The **privileged** gate is never relaxed. A2 with write access to the config is already same-UID and can run unprivileged code directly, so this grants no new capability. | G7 / F4, F2 |
 | Info disclosure | World-readable `hosts.json` leaks host inventory, cached UIDs, policy. | After F4 fix: 0600 file / 0700 dir, mirroring the socket-bind umask pattern. | F4 |
 | Elevation | Flip the privileged gate, or run unprivileged unattended, via the persisted policy. | No persisted value enables unattended exec on load (a stale `confirm_unprivileged` is inert; `unattended_eligible` only permits, never grants). Only an interactive `a` keypress on an eligible daemon flips the in-memory grant; the **privileged** gate is never relaxed. | G7 (C4, C8) / F2 |
 
@@ -147,7 +147,7 @@ A  A root command runs that the human did NOT approve
     ├─ 4.3 Exhaust resources to make the gate fail open
     │        [caps + default-deny timeout → G5.2 / G6.4 · blocked]
     └─ 4.4 Tamper hosts.json to weaken the gate
-             [file perms / F4; privileged gate independent → G5.3 · blocked
+             [enforced owner/mode check / F4; privileged gate independent → G5.3 · blocked
               (residual: unprivileged auto-approve, by design)]
 ```
 
