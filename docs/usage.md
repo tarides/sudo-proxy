@@ -47,7 +47,10 @@ before any prompt: set `"policy": {"no_shell": true}` in the host's
 `~/.config/sudo-proxy/hosts.json`, or start the daemon with `--no-shell`
 (`--allow-shell` overrides the file for a local daemon). `--no-shell` is
 forwarded to the remote daemon with `--host`; to *loosen* a remote's own
-policy, edit its hosts.json. Wrappers (`env sh -c`, `nice bash …`) and other
+policy, edit its hosts.json. As with `unattended_eligible`, the file's policy
+is trusted only if the file and its directories are yours and not group- or
+world-writable; otherwise the daemon warns and fails closed, here meaning strict
+mode **on**. Wrappers (`env sh -c`, `nice bash …`) and other
 interpreters (`python -c`) are not detected yet.
 
 ## Command-line

@@ -20,7 +20,10 @@ defeating the "make `Shell` avoidable" goal. And the strict mode that
   `--no-shell` / `--allow-shell` (same tri-state as `unattended_eligible`),
   rejects any request with an opaque step before prompting, ahead of the TUI,
   `--pkexec` and unattended paths. `--no-shell` is forwarded with `--host`;
-  `--allow-shell` is refused there.
+  `--allow-shell` is refused there. The file is read through the same
+  owner-private check as `unattended_eligible` (GHSA-xx2m-j9f7-gcmr); if it
+  fails, strict mode is **on** (fail closed), so a file another user can write
+  cannot switch it off.
 - **Tests.** `tests/no_shell.rs` checks six opaque shapes rejected without a
   prompt, structured requests still running, and everything prompted when the
   policy is off. There are unit tests for detection (including a renamed

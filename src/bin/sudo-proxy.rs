@@ -89,29 +89,33 @@ fn main() {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
-    // Resolve unattended eligibility: explicit CLI flag wins; otherwise the
-    // persisted `policy.unattended_eligible` in hosts.json; otherwise the
-    // built-in default (off, fail-closed). This is barrier 1 of G7 — an
-    // out-of-band operator opt-in; nothing on the wire can change it.
-    // The file's policy is trusted only if no other principal could have
-    // written it (StrictModes-style check); otherwise fail closed.
-    let unattended_eligible = opts.unattended_eligible.unwrap_or_else(|| {
-        match sudo_proxy::hosts::load_trusted_policy() {
-            Ok(p) => p.unattended_eligible,
-            Err(why) => {
-                eprintln!(
-                    "sudo-proxy: ignoring hosts.json policy (not unattended-eligible): {why}"
-                );
-                false
-            }
+    // Resolve both hosts.json policy settings: an explicit CLI flag wins;
+    // otherwise the file's `policy`; otherwise the built-in default. The file
+    // is read only if a flag is missing, and trusted only if no other
+    // principal could have written it (StrictModes-style check,
+    // GHSA-xx2m-j9f7-gcmr). An untrusted file fails closed for each setting:
+    // not unattended-eligible (barrier 1 of G7, an out-of-band operator
+    // opt-in that nothing on the wire can change), and strict no-shell mode
+    // on, so a writable file cannot quietly switch it off.
+    let policy = (opts.unattended_eligible.is_none() || opts.no_shell.is_none())
+        .then(sudo_proxy::hosts::load_trusted_policy);
+    if let Some(Err(why)) = &policy {
+        let mut effects = Vec::new();
+        if opts.unattended_eligible.is_none() {
+            effects.push("not unattended-eligible");
         }
-    });
-
-    // Resolve strict no-shell mode the same way: CLI flag, then
-    // `policy.no_shell` in hosts.json, then off.
+        if opts.no_shell.is_none() {
+            effects.push("no_shell on");
+        }
+        eprintln!("sudo-proxy: ignoring hosts.json policy ({}): {why}", effects.join(", "));
+    }
+    let policy = policy.and_then(Result::ok);
+    let unattended_eligible = opts
+        .unattended_eligible
+        .unwrap_or_else(|| policy.as_ref().is_some_and(|p| p.unattended_eligible));
     let no_shell = opts
         .no_shell
-        .unwrap_or_else(|| sudo_proxy::hosts::HostsConfig::load().policy.no_shell);
+        .unwrap_or_else(|| policy.as_ref().is_none_or(|p| p.no_shell));
 
     let config = server::ServerConfig {
         mode,

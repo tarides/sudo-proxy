@@ -37,3 +37,15 @@ fn no_shell_policy_rejects_before_prompt() {
     let json = r#"{"policy":{"no_shell":true}}"#;
     check(PtyDaemon::spawn(PtyOpts { hosts_json: Some((json.into(), 0o600)), ..Default::default() }));
 }
+
+/// A `hosts.json` another user could write is not trusted, and for `no_shell`
+/// failing closed means strict mode on: even a file that says
+/// `"no_shell": false` cannot switch it off.
+#[test]
+fn untrusted_policy_turns_no_shell_on() {
+    let json = r#"{"policy":{"no_shell":false}}"#;
+    let d = PtyDaemon::spawn(PtyOpts { hosts_json: Some((json.into(), 0o666)), ..Default::default() });
+    let log = std::fs::read_to_string(d.dir().join("daemon.log")).unwrap_or_default();
+    assert!(log.contains("ignoring hosts.json policy (not unattended-eligible, no_shell on)"), "{log}");
+    check(d);
+}
