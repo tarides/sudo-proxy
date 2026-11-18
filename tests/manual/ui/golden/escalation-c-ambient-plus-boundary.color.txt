@@ -1,0 +1,17 @@
+
+\e[1m━━━ Privilege Request ━━━\e[0m
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-escalation-c-ambient-plus-boundary
+Reason:  \e[1mui golden escalation-c-ambient-plus-boundary\e[0m
+Command: \e[1msudo id -un && sudo whoami\e[0m
+Resolves:
+  id      <PATH>
+  whoami  <PATH>
+Steps:
+\e[2m0\e[0m  \e[38;5;210msudo id -un\e[0m\e[38;5;210m &&\e[0m
+\e[2m1\e[0m  \e[38;5;196msudo whoami\e[0m
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+\e[1m━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m

@@ -1,0 +1,16 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-escalation-a-ambient
+Reason:  ui golden escalation-a-ambient
+Command: sudo id -un && sudo id -u
+Resolves:
+  id  <PATH>
+Steps:
+0  sudo id -un &&
+1  sudo id -u
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━

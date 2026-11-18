@@ -98,7 +98,20 @@ the ones you want to see run.
 
 ### UI checks (`tests/manual/ui/`)
 
-Send each one and compare the prompt with the expected column:
+These are automated by `tests/pty_ui_golden.rs`. It sends each plan to a real
+daemon through a pty, with and without colour, and compares the prompt with
+`tests/manual/ui/golden/<name>.{color,plain}.txt` (escapes shown as `\e`; the
+time and resolved paths are masked). It also asserts the colours in the table
+below directly. After an intended prompt change, regenerate and review the
+diff of the goldens:
+
+```bash
+UPDATE_GOLDEN=1 cargo test --test pty_ui_golden
+git diff tests/manual/ui/golden/
+```
+
+To check how the colours actually look in a terminal, send each one by hand and
+compare the prompt with the expected column:
 
 | File | Flags | Expect |
 |---|---|---|

@@ -1,0 +1,18 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-escalation-b-boundary
+Reason:  ui golden escalation-b-boundary
+Command: echo hi && sudo whoami && echo bye
+Resolves:
+  echo    <PATH>
+  whoami  <PATH>
+Steps:
+0  echo hi &&
+1  sudo whoami &&
+2  echo bye
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━

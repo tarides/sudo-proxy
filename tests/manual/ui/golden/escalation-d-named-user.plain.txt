@@ -1,0 +1,17 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-escalation-d-named-user
+Reason:  ui golden escalation-d-named-user
+Command: echo hi && sudo -u nobody id -un
+Resolves:
+  echo  <PATH>
+  id    <PATH>
+Steps:
+0  echo hi &&
+1  sudo -u nobody id -un
+Execute with elevated privileges? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━
