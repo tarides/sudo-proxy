@@ -3,6 +3,25 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — `pkexec-cache` validates the username it writes into the polkit rule (#64)
+
+`pkexec-cache --create` took the username from `SUDO_USER`, `PKEXEC_UID` or
+`LOGNAME`/`USER` without checking it and pasted it into the generated polkit
+JavaScript as `subject.user == "{username}"`. A name containing `"` changed the
+rule's logic: `SUDO_USER='x" || true || "'` produced a rule granting
+`AUTH_ADMIN_KEEP` to every action for every subject. This needed root, but root
+running the tool directly with an inherited `LOGNAME`/`USER` was a realistic path.
+Every candidate name is now checked against the login-name charset
+`^[a-z_][a-z0-9_-]*\$?$` (at most 32 characters) and looked up with
+`getpwnam_r`; a missing or uid-0 account is refused, and a set but invalid value
+is an error rather than a fall-through to the next source. The name is emitted as
+a JSON string literal, and `--check` decodes it the same way and reports a rule
+whose name fails validation as `corrupt`. For valid names the rule file is
+byte-identical to before, so installed rules still check as `installed`.
+Tests: `pkexec-cache` unit tests `validate_username_*`, `expected_content_*`,
+`extract_username_*`, `injected_rule_does_not_check_as_installed` (the issue's
+repro) and `resolve_user_rejects_root_and_unknown_users`.
+
 ## v1.2.1 — 2026-11-18 (security release)
 
 A patch release on top of v1.2.0 with two security fixes and nothing else:
