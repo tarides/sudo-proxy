@@ -213,6 +213,10 @@ pseudo-terminal harness. Three headless-friendly paths:
   unescalated, so the literal argv handed to `sudo` is checked end to end.
   Send keys with `PtyDaemon::answer`, which waits for the tty to enter raw
   mode first; the prompt discards input typed before that.
+  `tests/pty_unattended.rs` covers the `a` answer (offered only when eligible,
+  the grant keyed by `session`, never for a privileged request) and the prompt
+  timeout. The timeout test waits the real 60 s, so it is `#[ignore]`d: run it
+  with `cargo test --test pty_unattended -- --ignored`.
 
 What stays manual: how colours, the bell and the blink actually look in a
 terminal, real sudo passwords, the pkexec dialog, and the remote SSH tunnel.
