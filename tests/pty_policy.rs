@@ -15,7 +15,7 @@ fn run(mode: u32) -> (String, String) {
     d.expect("Privilege Request");
     let q = d.expect("]");
     // Deny so nothing is granted; we only care what was offered.
-    let _ = d.answer_raw(b'n');
+    d.answer_raw(b'n');
     assert_eq!(h.join().unwrap().status, Status::Denied);
     let log = std::fs::read_to_string(d.dir().join("daemon.log")).unwrap_or_default();
     (q, log)
