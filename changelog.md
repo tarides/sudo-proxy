@@ -3,6 +3,30 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-18 — Future-dated requests rejected; replay window closed (GHSA-h6r4-gh2r-qr98)
+
+`parse_age` treated a `time` in the future as age 0, so a future-dated request
+passed the freshness check forever. Replay protection forgets an id after
+120 s, so the same bytes were then accepted again. That made a captured `stop`
+replayable, and it broke REVIEWING.md C3 and the `docs/protocol.md` claim.
+
+`parse_age` now returns a signed age. The new `check_age` rejects a `time` more
+than `MAX_FUTURE_SKEW` (30 s) ahead. 30 s rather than a few seconds because
+remote requests carry the client's clock. A compile-time assertion keeps
+`REPLAY_RETENTION >= MAX_REQUEST_AGE + MAX_FUTURE_SKEW`, so any request that
+could pass freshness again is still deduplicated.
+
+Tests:
+
+- The clamp test is replaced by a rejection test and a window-boundary test.
+- A new property test says that any id that can pass freshness is still
+  remembered. It fails when the skew check is disabled.
+
+In the TLA+ `ReplayWindow` model, `FreshAt` bounds the future by `Skew`, and
+`NoFutureReplay` moves into the checked `.cfg`, where it holds. Negative
+controls show `Retention >= Freshness + Skew` is the tight bound. Rung: C3 /
+extended Rung 4.
+
 ## 2026-09-15 — Glama quality score: from unscored to grade A
 
 Release/hygiene work, not an assurance-ladder rung.

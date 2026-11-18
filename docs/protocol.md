@@ -32,8 +32,9 @@ request with an empty or missing `pipeline` is rejected at validation):
 
 - `id` — defaults to a fresh UUIDv4.
 - `host`, `session`, `time`, `reason`, `env` — empty if omitted, but
-  `time` must be a fresh, non-empty ISO 8601 timestamp; missing or
-  unparseable values are rejected.
+  `time` must be a fresh, non-empty ISO 8601 UTC timestamp: at most 60 s
+  old and at most 30 s in the future (clock-skew allowance). Missing,
+  unparseable, stale or too-far-future values are rejected.
 - `privileged` — defaults to `true` (the most-restrictive default; a
   client that forgets the field still goes through approval + sudo).
 - `forward_agent` — defaults to `false`. Setting `true` is only valid

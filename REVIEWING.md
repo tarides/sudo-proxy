@@ -45,9 +45,11 @@ finding.
   keypress. → `src/tui.rs` (`classify_key`, `tui.rs:130`), `src/server.rs`
   (`handle_connection`, `server.rs:422`).
 - **C3 — No approval reuse.** An approval cannot be replayed. Request UUIDs are
-  deduplicated and every request must carry a `time` within 60 s. *Attack:*
-  cause the same approval to authorise two executions, or make a stale request
-  pass. → `src/server.rs` (`check_freshness` `:58`, `try_insert` `:213`).
+  deduplicated and every request must carry a `time` at most 60 s old and at
+  most 30 s in the future; replay retention (120 s) covers that whole window, so
+  any request that could pass freshness again is still deduplicated. *Attack:*
+  cause the same approval to authorise two executions, make a stale request
+  pass, or replay a (future-dated) request after its id is evicted. → `src/server.rs` (`check_freshness` `:58`, `try_insert` `:213`).
 - **C4 — Unattended mode can't be enabled from the wire.** A daemon becomes
   eligible for unattended unprivileged execution *only* via an out-of-band edit
   of `hosts.json` (`policy.unattended_eligible`), which is read once at startup
