@@ -135,6 +135,8 @@ pub struct TestServer {
     pub sink: Arc<RecordingSink>,
     pub in_flight: Arc<AtomicUsize>,
     pub tty_lock: Arc<Mutex<()>>,
+    /// JSONL audit file every test server writes (syslog off).
+    pub audit_path: PathBuf,
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     _tempdir: TempDir,
@@ -143,6 +145,11 @@ pub struct TestServer {
 pub fn start_test_server(opts: TestServerOpts) -> TestServer {
     let tempdir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let socket_path = tempdir.path().join("p.sock");
+    let audit_path = tempdir.path().join("state/sudo-proxy/audit.jsonl");
+    let audit_cfg = sudo_proxy::audit::AuditConfig {
+        file: Some(audit_path.clone()),
+        syslog: false,
+    };
     let prompter = Arc::new(ScriptedPrompter::new());
     let sink = Arc::new(RecordingSink::new());
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -165,6 +172,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             unattended_eligible: opts.unattended_eligible,
             no_shell: opts.no_shell,
             max_in_flight: opts.max_in_flight,
+            audit: audit_cfg,
         };
         // Coercion to Arc<dyn Trait> happens here at the function-argument
         // site, where the parameter type is known.
@@ -203,6 +211,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
         sink,
         in_flight,
         tty_lock,
+        audit_path,
         shutdown,
         handle: Some(handle),
         _tempdir: tempdir,
@@ -232,6 +241,34 @@ impl TestServer {
     pub fn send_raw(&self, line: &[u8]) -> Vec<u8> {
         send_raw(&self.socket_path, line)
     }
+
+    /// Parsed audit records written so far, in order.
+    pub fn audit_records(&self) -> Vec<serde_json::Value> {
+        read_audit(&self.audit_path)
+    }
+
+    /// The one audit record for request `id`; panics if there is not exactly one.
+    pub fn audit_for(&self, id: &str) -> serde_json::Value {
+        let mut recs: Vec<_> = self
+            .audit_records()
+            .into_iter()
+            .filter(|r| r["id"] == id)
+            .collect();
+        assert_eq!(
+            recs.len(),
+            1,
+            "expected one audit record for {id}: {recs:?}"
+        );
+        recs.pop().unwrap()
+    }
+}
+
+pub fn read_audit(path: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("audit line is JSON"))
+        .collect()
 }
 
 impl Drop for TestServer {

@@ -114,7 +114,6 @@ Functional but minimal.
 - Command/argument allowlisting (needs policy framework)
 - Inode pinning for TOCTOU on resolved paths
 - Risk scoring display
-- Audit log to file
 - Per-session socket isolation
 
 ### Design note: allowlisting (when it lands)

@@ -104,7 +104,11 @@ impl PtyDaemon {
         let slave_fd = slave.as_raw_fd();
 
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sudo-proxy"));
-        cmd.arg("--socket").arg(&socket).arg("-v").args(&opts.args);
+        cmd.arg("--socket")
+            .arg(&socket)
+            .arg("-v")
+            .arg("--no-syslog")
+            .args(&opts.args);
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         let mut daemon_path: Vec<String> =
             opts.extra_path.iter().map(|p| p.display().to_string()).collect();

@@ -46,7 +46,7 @@ fn a_without_eligibility_approves_once() {
     assert_eq!(h.join().unwrap().status, Status::Denied);
 
     let log = d.daemon_log();
-    assert!(!log.contains("[unattended]"), "{log}");
+    assert!(!log.lines().any(|l| l.contains(" unprivileged unattended ")), "{log}");
 }
 
 #[test]
@@ -88,10 +88,12 @@ fn a_grant_is_keyed_by_session() {
     assert!(!prompt.contains("a = approve"), "{prompt}");
     assert_eq!(h.join().unwrap().status, Status::Denied);
 
+    // Exactly one audit record ran unattended: request 2, from sess-a.
     let log = d.daemon_log();
-    assert!(log.contains("[ua-grant-2] [unattended] [session sess-a]"), "{log}");
-    assert!(!log.contains("[session sess-b]"), "{log}");
-    assert_eq!(log.matches("[unattended]").count(), 1, "{log}");
+    let unattended: Vec<&str> = log.lines().filter(|l| l.contains(" unprivileged unattended ")).collect();
+    assert_eq!(unattended.len(), 1, "{log}");
+    assert!(unattended[0].contains("[ua-grant-2]"), "{log}");
+    assert!(unattended[0].contains(" session=sess-a "), "{log}");
     assert!(d.shim_log().is_empty(), "nothing was escalated: {:?}", d.shim_log());
 }
 

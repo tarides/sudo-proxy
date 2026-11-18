@@ -22,6 +22,12 @@ struct Opts {
     /// `Some(_)` = `--no-shell` / `--allow-shell` was passed and overrides it.
     no_shell: Option<bool>,
     forward_agent: bool,
+    /// `--audit-log PATH`: overrides the default audit file location.
+    audit_log: Option<PathBuf>,
+    /// `--no-audit-log`: disable the audit file (the stderr line stays).
+    no_audit_log: bool,
+    /// `--no-syslog`: disable the syslog audit sink.
+    no_syslog: bool,
 }
 
 fn main() {
@@ -124,6 +130,7 @@ fn main() {
         log_json: opts.log_json,
         unattended_eligible,
         no_shell,
+        audit: audit_config(opts.audit_log, opts.no_audit_log, opts.no_syslog),
         ..Default::default()
     };
 
@@ -158,6 +165,32 @@ fn main() {
     }
 }
 
+/// Audit sinks (issue #65): the JSONL file and syslog are on by default.
+fn audit_config(
+    audit_log: Option<PathBuf>,
+    no_audit_log: bool,
+    no_syslog: bool,
+) -> sudo_proxy::audit::AuditConfig {
+    let file = if no_audit_log {
+        None
+    } else {
+        match audit_log.or_else(sudo_proxy::audit::default_audit_path) {
+            Some(p) => Some(p),
+            None => {
+                eprintln!(
+                    "error: cannot locate the audit log (neither XDG_STATE_HOME nor HOME is \
+                     an absolute path); pass --audit-log PATH or --no-audit-log"
+                );
+                process::exit(1);
+            }
+        }
+    };
+    sudo_proxy::audit::AuditConfig {
+        file,
+        syslog: !no_syslog,
+    }
+}
+
 fn parse_args(args: &[String]) -> Opts {
     let mut socket = None;
     let mut host = None;
@@ -170,6 +203,9 @@ fn parse_args(args: &[String]) -> Opts {
     let mut unattended_eligible: Option<bool> = None;
     let mut no_shell: Option<bool> = None;
     let mut forward_agent = false;
+    let mut audit_log = None;
+    let mut no_audit_log = false;
+    let mut no_syslog = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -193,9 +229,21 @@ fn parse_args(args: &[String]) -> Opts {
             "--no-shell" => no_shell = Some(true),
             "--allow-shell" => no_shell = Some(false),
             "--forward-agent" => forward_agent = true,
+            "--audit-log" => match iter.next() {
+                Some(p) => audit_log = Some(PathBuf::from(p)),
+                None => {
+                    eprintln!("--audit-log requires a PATH");
+                    std::process::exit(1);
+                }
+            },
+            s if s.starts_with("--audit-log=") => {
+                audit_log = s.strip_prefix("--audit-log=").map(PathBuf::from);
+            }
+            "--no-audit-log" => no_audit_log = true,
+            "--no-syslog" => no_syslog = true,
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent] [--audit-log PATH | --no-audit-log] [--no-syslog]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -219,6 +267,11 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              sets policy.no_shell (local daemon only)");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
+                eprintln!("  --audit-log PATH            Audit log file (JSON lines, mode 0600, append-only)");
+                eprintln!("                              (default: $XDG_STATE_HOME/sudo-proxy/audit.jsonl,");
+                eprintln!("                              else ~/.local/state/sudo-proxy/audit.jsonl)");
+                eprintln!("  --no-audit-log              Do not write the audit file (stderr audit lines remain)");
+                eprintln!("  --no-syslog                 Do not send audit records to syslog (LOG_AUTHPRIV)");
                 std::process::exit(0);
             }
             _ => {
@@ -237,6 +290,9 @@ fn parse_args(args: &[String]) -> Opts {
         unattended_eligible,
         no_shell,
         forward_agent,
+        audit_log,
+        no_audit_log,
+        no_syslog,
     }
 }
 

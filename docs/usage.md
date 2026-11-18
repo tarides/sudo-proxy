@@ -62,6 +62,12 @@ sudo-proxy
 # Quiet by default; verbose prints startup info and logs each request
 sudo-proxy -v
 
+# Audit log (on by default): one record per request outcome, rejections
+# included, to stderr, $XDG_STATE_HOME/sudo-proxy/audit.jsonl (else
+# ~/.local/state/sudo-proxy/audit.jsonl) and syslog. See "Audit log" below.
+sudo-proxy --audit-log /path/to/audit.jsonl
+sudo-proxy --no-audit-log --no-syslog   # stderr audit lines only
+
 # Connect to a remote host via SSH tunnel
 # Resolves remote UID, sets up tunnel, execs into SSH running sudo-proxy
 sudo-proxy --host remotehost
@@ -165,3 +171,40 @@ Security model:
 - Without `--forward-agent` on the launcher, requests with
   `forward_agent: true` still run, but no `SSH_AUTH_SOCK` is set on the
   child (the daemon has no socket to inject).
+
+## Audit log
+
+The daemon records the outcome of every request: approved, approved with a
+session grant (`a`), unattended, denied, timed out, and every rejection
+(replayed id, stale or missing `time`, forbidden characters, disallowed env,
+invalid plan, malformed JSON, busy, foreign peer UID). Recording is on by
+default and does not depend on `-v`. Each record goes to three sinks:
+
+- **stderr**: one line, every request-derived field escaped and clipped;
+- **a JSON-lines file**: `$XDG_STATE_HOME/sudo-proxy/audit.jsonl`, else
+  `~/.local/state/sudo-proxy/audit.jsonl`. It is created mode 0600 in a 0700
+  directory and opened `O_APPEND`. Use `--audit-log PATH` to move it and
+  `--no-audit-log` to turn it off;
+- **syslog**: facility `authpriv`, identifier `sudo-proxy`. Use `--no-syslog`
+  to turn it off. On systemd hosts: `journalctl -t sudo-proxy`.
+
+A remote daemon (`sudo-proxy --host HOST`) writes its log on the remote host,
+where the command was gated.
+
+Example record:
+
+```json
+{"time":"2026-11-18T10:04:31Z","outcome":"rejected:duplicate_id","peer_uid":1000,"id":"6f1c…","session":"sudo-proxy-mcp","host":"","privileged":true,"detail":"duplicate request id: 6f1c…"}
+```
+
+Fields: `time` (RFC 3339 UTC), `outcome` (`approved`, `approved_session`,
+`unattended`, `pkexec`, `denied`, `timeout`, `ping`, `stop`, `prompt_error`,
+`rejected:<reason>`), `peer_uid`, `id`, `session`, `host`, `privileged`,
+`command` (only for requests that passed validation), `detail` (the error sent
+to the client), `status` and `exit_codes` (for requests that ran). Request
+`env` values, `reason`, and the raw bytes of an invalid request are never
+recorded.
+
+The file belongs to the daemon's UID, which is also the requester's UID, so a
+same-UID process can rewrite it. The syslog copy is the record the requester
+cannot alter; forward it off the host if that matters.
