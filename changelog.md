@@ -3,7 +3,17 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
-## 2026-11-18 — `hosts.json` policy trusted only when owner-private (GHSA-xx2m-j9f7-gcmr)
+## v1.2.1 — 2026-11-18 (security release)
+
+A patch release on top of v1.2.0 with two security fixes and nothing else:
+
+- **GHSA-xx2m-j9f7-gcmr** (medium): the `hosts.json` unattended-eligibility
+  policy is ignored unless the file and its directories are owner-private.
+- **GHSA-h6r4-gh2r-qr98** (low): a request whose `time` is more than 30 s in the
+  future is rejected, which closes a replay window (a captured `stop` could be
+  replayed).
+
+### `hosts.json` policy trusted only when owner-private (GHSA-xx2m-j9f7-gcmr)
 
 The daemon read `policy.unattended_eligible` from `hosts.json` without checking
 who owned the file or its mode. So a file that someone else could write (a
@@ -25,6 +35,30 @@ If the check fails, the daemon prints a warning on stderr and is not eligible
 inventory is unaffected. The pty harness (#68) confirmed the end-to-end
 behaviour: an eligible 0666 file gives `[y/N]` and a warning, and a 0600 file
 gives `[y/N/a]`. Rung: G7 barrier 1 (C8).
+
+### Future-dated requests rejected; replay window closed (GHSA-h6r4-gh2r-qr98)
+
+`parse_age` treated a `time` in the future as age 0, so a future-dated request
+passed the freshness check forever. Replay protection forgets an id after
+120 s, so the same bytes were then accepted again. That made a captured `stop`
+replayable, and it broke REVIEWING.md C3 and the `docs/protocol.md` claim.
+
+`parse_age` now returns a signed age. The new `check_age` rejects a `time` more
+than `MAX_FUTURE_SKEW` (30 s) ahead. 30 s rather than a few seconds because
+remote requests carry the client's clock. A compile-time assertion keeps
+`REPLAY_RETENTION >= MAX_REQUEST_AGE + MAX_FUTURE_SKEW`, so any request that
+could pass freshness again is still deduplicated.
+
+Tests:
+
+- The clamp test is replaced by a rejection test and a window-boundary test.
+- A new property test says that any id that can pass freshness is still
+  remembered. It fails when the skew check is disabled.
+
+In the TLA+ `ReplayWindow` model, `FreshAt` bounds the future by `Skew`, and
+`NoFutureReplay` moves into the checked `.cfg`, where it holds. Negative
+controls show `Retention >= Freshness + Skew` is the tight bound. Rung: C3 /
+extended Rung 4.
 
 ## 2026-09-15 — Glama quality score: from unscored to grade A
 
