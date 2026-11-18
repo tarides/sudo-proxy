@@ -157,7 +157,7 @@ target cannot route around that gate.*
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
 | **G7.1** | No unprivileged command runs unattended except behind two barriers — `unattended_eligible` (config-only, immutable at runtime) AND an in-session `a` keypress — and the grant is never persisted. | — | |
-| **Sn7.1** | `tests/approval.rs` (`every_unprivileged_request_is_prompted_when_not_eligible`, `non_eligible_approved_always_grants_nothing`, `eligible_approved_always_grants_session_but_never_persists`); `src/hosts.rs` (`stale_confirm_unprivileged_key_is_inert`). TLC: `NoUnattendedUnprivilegedExec` ([`proofs/tla/`](../proofs/tla/)). Closes audit **F2**. | 2, 4 | [discharged] |
+| **Sn7.1** | `tests/approval.rs` (`every_unprivileged_request_is_prompted_when_not_eligible`, `non_eligible_approved_always_grants_nothing`, `eligible_approved_always_grants_session_but_never_persists`, `grant_is_keyed_by_session`); `src/hosts.rs` (`stale_confirm_unprivileged_key_is_inert`). TLC: `NoUnattendedUnprivilegedExec` ([`proofs/tla/`](../proofs/tla/)). Closes audit **F2**. | 2, 4 | [discharged] |
 | **G7.2** | No persisted policy value enables unattended execution on load (fail-closed default; stale `confirm_unprivileged` inert). | — | |
 | **Sn7.2** | `src/hosts.rs` serde tests; `Policy::default` is `unattended_eligible=false`. | 2 | [discharged] |
 | **G7.3** | A self/loopback target is classified local and cannot route SSH-to-self around local policy; local unprivileged is delegated to the Bash tool. Soundness of undetected aliases rests on G7.1 holding on every daemon (C10). | — | |

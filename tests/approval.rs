@@ -12,7 +12,8 @@
 //!    `unattended_eligible` (barrier 1, config-only — an out-of-band operator
 //!    opt-in) AND a human answered `ApprovedAlways` (barrier 2, the `'a'` key,
 //!    which `tui::classify_key` emits solely for an unprivileged request). The
-//!    resulting grant is session-scoped and **never persisted**. On a
+//!    resulting grant covers only the requesting `session` (issue #8) and is
+//!    **never persisted**. On a
 //!    non-eligible daemon `ApprovedAlways` approves the one command and grants
 //!    nothing.
 
@@ -156,4 +157,43 @@ fn eligible_approved_always_grants_session_but_never_persists() {
             "the session grant must never be persisted: {saved}"
         );
     }
+}
+
+#[test]
+fn grant_is_keyed_by_session() {
+    // Issue #8: an `a` on a request from one session must not open the gate
+    // for another session sharing the daemon. The granted session runs
+    // unattended; a different session is still prompted, and can earn its
+    // own grant independently.
+    let s = start_test_server(TestServerOpts {
+        unattended_eligible: true,
+        ..Default::default()
+    });
+    s.prompter
+        .set_response(|_| (Duration::ZERO, PromptResult::ApprovedAlways));
+    let req_in = |id: &str, session: &str| {
+        let mut r = make_req(id, vec![vec!["true"]]);
+        r.session = session.to_string();
+        r
+    };
+
+    // Session A: prompted once, granted.
+    assert_eq!(s.send(&req_in("k-a-1", "project-a")).status, Status::Ok);
+    assert_eq!(s.prompter.call_count(), 1);
+    assert_eq!(s.send(&req_in("k-a-2", "project-a")).status, Status::Ok);
+    assert_eq!(s.prompter.call_count(), 1, "session A is granted");
+
+    // Session B: A's grant does not apply, so it is prompted.
+    s.prompter.set_response(|_| (Duration::ZERO, PromptResult::Denied));
+    assert_eq!(s.send(&req_in("k-b-1", "project-b")).status, Status::Denied);
+    assert_eq!(s.prompter.call_count(), 2, "session B must be prompted");
+
+    // A is still granted; B earns its own grant only by its own `a`.
+    assert_eq!(s.send(&req_in("k-a-3", "project-a")).status, Status::Ok);
+    assert_eq!(s.prompter.call_count(), 2);
+    s.prompter
+        .set_response(|_| (Duration::ZERO, PromptResult::ApprovedAlways));
+    assert_eq!(s.send(&req_in("k-b-2", "project-b")).status, Status::Ok);
+    assert_eq!(s.send(&req_in("k-b-3", "project-b")).status, Status::Ok);
+    assert_eq!(s.prompter.call_count(), 3, "session B granted by its own `a`");
 }

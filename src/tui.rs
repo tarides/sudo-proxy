@@ -568,10 +568,13 @@ pub fn prompt_tty(
         // Escalation only to a named non-root user (no root stage).
         ("Execute with elevated privileges?", "[y/N]")
     } else if offer_always {
+        // The grant is keyed by the request's `session` (issue #8): name it, so
+        // the operator sees exactly which client `a` opens the gate for.
         writeln!(
             tty_w,
-            "{dim}a = approve and allow unprivileged on this host for this session \
-             (not saved){reset}"
+            "{dim}a = approve, and run later unprivileged requests from session \
+             '{}' on this host without asking until the daemon exits (not saved){reset}",
+            req.session
         )?;
         ("Execute?", "[y/N/a]")
     } else {
@@ -592,7 +595,7 @@ pub fn prompt_tty(
         // `a` on an eligible daemon grants the session; pressed when `a` was
         // not offered it degrades to a plain approve-once (the dispatcher will
         // not grant), so label it honestly.
-        PromptResult::ApprovedAlways if offer_always => "Approved (unattended for this session)",
+        PromptResult::ApprovedAlways if offer_always => "Approved (unattended for this session name)",
         PromptResult::ApprovedAlways => "Approved",
         PromptResult::Denied => "Denied",
     };

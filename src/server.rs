@@ -275,6 +275,26 @@ pub fn is_local_host(host: &str, own_hostname: &str) -> bool {
     false
 }
 
+/// Sessions a human has granted unattended unprivileged execution, by pressing
+/// `a` on an eligible daemon (barrier 2 of G7). Keyed by the request's
+/// `session`, so a grant made for one client does not open the gate for the
+/// others sharing the daemon (issue #8). `session` is self-declared, so this
+/// separates well-behaved clients; it is not a boundary against a same-UID
+/// client that claims another's session name (which could already run
+/// unprivileged code directly). In memory only, never persisted.
+#[derive(Default)]
+pub(crate) struct UnattendedGrants(Mutex<HashSet<String>>);
+
+impl UnattendedGrants {
+    pub(crate) fn is_granted(&self, session: &str) -> bool {
+        lock_recover(&self.0).contains(session)
+    }
+
+    pub(crate) fn grant(&self, session: &str) {
+        lock_recover(&self.0).insert(session.to_string());
+    }
+}
+
 /// Bounded set of recently-seen request ids, evicted by age.
 pub(crate) struct SeenIds {
     set: HashSet<String>,
@@ -436,12 +456,12 @@ pub fn run(
     let our_uid = unsafe { libc::getuid() };
     let seen_ids = Arc::new(Mutex::new(SeenIds::new(Instant::now)));
     // Eligibility is a runtime-immutable config input (barrier 1). The session
-    // grant (barrier 2) starts OFF and is the *only* thing an interactive `a`
-    // can flip — in memory only, never persisted. It dies with the daemon,
-    // i.e. with the SSH tunnel for a remote host, so the grant cannot outlive
-    // the session (invariant G7).
+    // grants (barrier 2) start EMPTY and only an interactive `a` can add one —
+    // for the requesting `session` only, in memory only, never persisted. They
+    // die with the daemon, i.e. with the SSH tunnel for a remote host, so no
+    // grant can outlive the daemon (invariant G7).
     let unattended_eligible = config.unattended_eligible;
-    let unattended_grant = Arc::new(AtomicBool::new(false));
+    let unattended_grants = Arc::new(UnattendedGrants::default());
 
     loop {
         if shutdown.load(Ordering::Relaxed) {
@@ -494,7 +514,7 @@ pub fn run(
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
         let log_json = config.log_json;
-        let unattended_grant = Arc::clone(&unattended_grant);
+        let unattended_grants = Arc::clone(&unattended_grants);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
             let _guard = guard;
@@ -506,7 +526,7 @@ pub fn run(
                 verbose,
                 log_json,
                 unattended_eligible,
-                unattended_grant,
+                unattended_grants,
                 prompter,
                 sink,
                 seen,
@@ -575,7 +595,7 @@ fn handle_connection(
     verbose: bool,
     log_json: bool,
     unattended_eligible: bool,
-    unattended_grant: Arc<AtomicBool>,
+    unattended_grants: Arc<UnattendedGrants>,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
     seen_ids: Arc<Mutex<SeenIds>>,
@@ -788,9 +808,10 @@ fn handle_connection(
                 }
             }
         }
-    } else if unattended_grant.load(Ordering::Relaxed) {
-        // A session-scoped grant is active: this daemon is eligible AND a human
-        // pressed `a` earlier in this session. Run unattended. The audit line
+    } else if unattended_grants.is_granted(&req.session) {
+        // This request's session holds a grant: this daemon is eligible AND a
+        // human pressed `a` on an earlier request from the same `session`. Run
+        // unattended. Other sessions are unaffected (issue #8). The audit line
         // is UNCONDITIONAL — in this no-prompt window it is the reliable record
         // of what ran, and unlike the TTY banner it never depends on the
         // tty_lock, so an unprivileged command is never blocked behind an
@@ -798,8 +819,9 @@ fn handle_connection(
         // (try_lock) for on-screen visibility. The grant lives only in memory
         // and dies with the daemon/tunnel; it is never persisted.
         eprintln!(
-            "[{}] [unattended] {}",
+            "[{}] [unattended] [session {}] {}",
             req.id,
+            req.session,
             crate::tui::command_summary(&req)
         );
         if let Ok(_g) = tty_lock.try_lock() {
@@ -809,7 +831,7 @@ fn handle_connection(
     } else {
         // Default unprivileged path: prompt every command. `a` is offered only
         // when eligible; on an eligible daemon an `a` press approves this
-        // command AND flips the in-memory session grant. When not eligible,
+        // command AND grants this request's `session` in memory. When not eligible,
         // `a` degrades to approve-once and grants nothing.
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
@@ -821,7 +843,7 @@ fn handle_connection(
                 // Grant the session only when eligible — never persisted, no
                 // hosts.json write. Barrier 1 (eligibility) gates barrier 2.
                 if unattended_eligible {
-                    unattended_grant.store(true, Ordering::Relaxed);
+                    unattended_grants.grant(&req.session);
                 }
                 exec_direct(&req, &env)
             }

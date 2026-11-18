@@ -86,8 +86,10 @@ Functional but minimal.
 - Per-daemon policy in `hosts.json` (`policy.unattended_eligible`, default
   false): whether the daemon may offer the session-scoped `a` answer. Read once
   at startup, immutable at runtime — an out-of-band operator opt-in (invariant
-  G7, barrier 1). Pressing `a` on an eligible daemon flips an in-memory,
-  never-persisted session grant (barrier 2); on a non-eligible daemon `a`
+  G7, barrier 1). Pressing `a` on an eligible daemon adds the request's
+  `session` to an in-memory, never-persisted grant set (barrier 2); later
+  unprivileged requests from that session only run unattended. On a
+  non-eligible daemon `a`
   approves just the one command
 - `--unattended-eligible` on server: makes the daemon eligible without editing
   the file (the session grant still needs the `a` keypress and is never persisted)
