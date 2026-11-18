@@ -158,18 +158,21 @@ between the two time windows in [`server.rs`](../../src/server.rs):
 |----------|-------|------|
 | `MAX_REQUEST_AGE` | 60 s | freshness gate (`check_freshness`) |
 | `REPLAY_RETENTION` | 120 s | seen-id eviction TTL (`SeenIds::evict_stale`) |
+| `MAX_FUTURE_SKEW` | 30 s | how far ahead `time` may be (`check_age`) |
 
 This model restores a **small abstract clock** and the **real TTL eviction**, and
 proves the temporal claim: *a captured request cannot evade replay-dedup by
 waiting for its id to be evicted while still passing the freshness gate.* Only the
 window **relationship** matters, not the absolute seconds, so the constants are
-`Freshness = 2`, `Retention = 4` (= 2·Freshness), `MaxTime = 6`, `Ids = {r1}`.
+`Freshness = 2`, `Skew = 1`, `Retention = 4` (= 2·Freshness), `MaxTime = 6`,
+`Ids = {r1}`.
 
 ### The theorem
 
 | Invariant | Claim | Maps to |
 |-----------|-------|---------|
 | **`PastReplayImpossible`** | No captured **past-dated** request is ever re-executed. | leaf 1.1 · G2.1 (temporal half) |
+| **`NoFutureReplay`** | No captured **future-dated** request is ever re-executed (GHSA-h6r4-gh2r-qr98). | leaf 1.1 · G2.1 · C3 |
 | `AcceptWasFresh` | The daemon only ever accepts a request that was fresh at acceptance. | modeling hygiene |
 | `TypeOK` | Type invariant. | — |
 
@@ -199,7 +202,17 @@ pushes eviction *later*, never earlier). TLC confirms it: the theorem **holds** 
 shipped `120 s = 2 × 60 s` is **conservative margin, not a necessity** — *not a
 bug*; the daemon is, if anything, safer than its comment claims.
 
-### Finding 2 — future-dated timestamps defeat replay protection after eviction
+### Finding 2 — future-dated timestamps defeat replay protection after eviction (FIXED)
+
+> **Fixed (GHSA-h6r4-gh2r-qr98).** `check_age` now rejects a `time` more than
+> `MAX_FUTURE_SKEW` (30 s) ahead instead of clamping it to age 0. A request
+> accepted at `t` then has `ts ≤ t + Skew`, passes freshness again only until
+> `t + Skew + Freshness`, and is evicted only after `t + Retention`; so the
+> tight bound becomes **`Retention ≥ Freshness + Skew`** (shipped:
+> 120 ≥ 60 + 30, asserted at compile time). `NoFutureReplay` is now in the
+> committed `.cfg` and holds (276 distinct states). TLC confirms the bound is
+> tight: it holds at `Retention = Freshness + Skew` and fails one unit below.
+> The text below is the original finding, kept for the record.
 
 `parse_age` **clamps future-dated timestamps to age 0** (`server.rs:146`) with no
 upper cap, so a request dated beyond `Retention` into the future keeps passing the
@@ -226,7 +239,8 @@ Apply by hand to the model / cfg, re-check, then revert. **Do not commit.**
 | **NC1** | `Retention = Freshness − 1` (window relationship broken) | `PastReplayImpossible` |
 | **Tight-bound** | run at `Retention = Freshness` (holds) vs `Freshness − 1` (fails) | confirms `Retention ≥ Freshness` is the tight threshold (finding 1) |
 | **NC2** | freshness gate disabled (`FreshAt(ts) == TRUE`) | `AcceptWasFresh` **and** `PastReplayImpossible` (freshness is load-bearing) |
-| **Finding 2** | add `NoFutureReplay` to `INVARIANTS` | future-dated counterexample (finding 2) — a real property of the code, not a model mutation |
+| **NC3** | `Skew = MaxTime` (future effectively unbounded, the pre-fix clamp) | `NoFutureReplay` — the finding 2 trace |
+| **NC4** | `Retention = Freshness + Skew − 1` | `NoFutureReplay` (confirms the tight bound) |
 
 > Note NC2 is *disable freshness*, not *evict by the wrong field*: at
 > `Retention ≥ Freshness`, evicting by the request timestamp instead of the
@@ -242,7 +256,7 @@ Apply by hand to the model / cfg, re-check, then revert. **Do not commit.**
   `try_insert` (`evict_stale` runs first, then the membership check, then the
   stamped insert).
 - Eviction keyed on **insertion** time (`Live(rec) == ¬(clock − insertedAt > Retention)`).
-- `parse_age`'s future-timestamp **clamp** (`FreshAt(ts) == IF ts > clock THEN TRUE …`).
+- `check_age`'s bounded future skew (`FreshAt(ts) == IF ts > clock THEN ts − clock ≤ Skew …`).
 - The attacker replays the **captured bytes** (same id, same timestamp); the honest
   client submits the one genuine request. Both, plus the clock, are nondeterministic.
 

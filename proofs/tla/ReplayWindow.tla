@@ -13,6 +13,7 @@
 (*                                                                         *)
 (* The two real-code windows (src/server.rs):                              *)
 (*   MAX_REQUEST_AGE   = 60s   -- freshness gate (check_freshness)          *)
+(*   MAX_FUTURE_SKEW   = 30s   -- how far ahead `time` may be (check_age)   *)
 (*   REPLAY_RETENTION  = 120s  -- seen-id eviction TTL (SeenIds::evict_stale*)
 (* are modelled by the small constants Freshness / Retention; only their   *)
 (* RELATIONSHIP matters, not the absolute seconds (see README).            *)
@@ -30,6 +31,7 @@ EXTENDS Integers, FiniteSets
 CONSTANTS Ids,        \* the bounded set of request ids; the cfg uses {r1}
           Freshness,  \* freshness window (abstract units); real code: 60s
           Retention,  \* replay-retention TTL; real code: 120s = 2*Freshness
+          Skew,       \* max future skew; real code: 30s = Freshness/2
           MaxTime     \* clock horizon; bounds the state space, keeps it finite
 
 (* --algorithm ReplayWindow
@@ -56,10 +58,10 @@ variables
     \* A PAST-dated captured request re-executed (replay slipped dedup). The
     \* window-sizing theorem says this is impossible once Retention >= Freshness.
     vReplay = FALSE,
-    \* A FUTURE-dated captured request re-executed after eviction. This one IS
-    \* reachable -- the finding: parse_age clamps future timestamps to age 0
-    \* (server.rs:146) with no upper cap, so a request dated beyond Retention
-    \* into the future is replayable regardless of how large Retention is.
+    \* A FUTURE-dated captured request re-executed after eviction. Reachable
+    \* before GHSA-h6r4-gh2r-qr98, when parse_age clamped future timestamps to
+    \* age 0 with no upper cap; unreachable now that check_age rejects a `time`
+    \* more than Skew ahead and Retention >= Freshness + Skew.
     vFutureReplay = FALSE,
 
     \* The request on the wire and the busy handshake with the daemon.
@@ -67,9 +69,9 @@ variables
     inReq = [id |-> CHOOSE i \in Ids : TRUE, ts |-> 0];
 
 define
-    \* Faithful to parse_age: a future-dated timestamp (ts > now) is clamped to
-    \* age 0 and so always passes; otherwise age = now - ts must be <= Freshness.
-    FreshAt(ts) == IF ts > clock THEN TRUE ELSE clock - ts <= Freshness
+    \* Faithful to check_age: a future-dated timestamp passes only within Skew
+    \* of now; otherwise age = now - ts must be <= Freshness.
+    FreshAt(ts) == IF ts > clock THEN ts - clock <= Skew ELSE clock - ts <= Freshness
 
     \* evict_stale keyed on INSERTION time (the faithful rule). The NC2 mutation
     \* changes `rec.insertedAt` to `rec.ts` -- evicting by the request timestamp,
@@ -148,7 +150,7 @@ VARIABLES clock, seen, origExists, origId, origTs, origAccAt, vReplay,
           vFutureReplay, busy, inReq
 
 (* define statement *)
-FreshAt(ts) == IF ts > clock THEN TRUE ELSE clock - ts <= Freshness
+FreshAt(ts) == IF ts > clock THEN ts - clock <= Skew ELSE clock - ts <= Freshness
 
 
 
@@ -255,19 +257,20 @@ TypeOK ==
 PastReplayImpossible == ~vReplay
 
 \* Sanity: the daemon only ever accepts a request that was fresh at acceptance
-\* (either future-dated -- clamped to age 0 -- or within the freshness window).
+\* (future-dated within Skew, or within the freshness window).
 AcceptWasFresh ==
-    origExists => (origTs > origAccAt \/ origAccAt - origTs <= Freshness)
+    origExists => IF origTs > origAccAt THEN origTs - origAccAt <= Skew
+                                         ELSE origAccAt - origTs <= Freshness
 
-\* ----- the future-clamp FINDING (NOT in the committed .cfg) -----
-\* This invariant FAILS by design: TLC returns a future-dated counterexample in
-\* which a captured request dated beyond Retention into the future is re-executed
-\* after its id is evicted. parse_age clamps future timestamps to age 0
-\* (server.rs:146) with no upper cap, so such a request keeps passing the
-\* freshness gate forever while its id ages out of `seen` -- making it replayable
-\* every Retention units regardless of how large Retention is. Add NoFutureReplay
-\* to INVARIANTS by hand to reproduce the trace; see README "Finding: future-
-\* dated replay".
+\* ----- the future-dated replay (GHSA-h6r4-gh2r-qr98, now FIXED) -----
+\* No captured FUTURE-dated request is ever re-executed. This used to FAIL:
+\* parse_age clamped future timestamps to age 0 with no upper cap, so a request
+\* dated beyond Retention into the future stayed fresh forever while its id
+\* aged out of `seen`. With the future bounded by Skew, a request accepted at
+\* t has ts <= t + Skew, passes freshness only until t + Skew + Freshness, and
+\* is evicted only after t + Retention -- so Retention >= Freshness + Skew
+\* closes it. Now in the committed .cfg. Negative control: set Skew = MaxTime
+\* (effectively unbounded, the old clamp) and TLC finds the old trace again.
 NoFutureReplay == ~vFutureReplay
 
 =============================================================================

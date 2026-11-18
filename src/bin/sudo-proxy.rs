@@ -83,10 +83,18 @@ fn main() {
     // persisted `policy.unattended_eligible` in hosts.json; otherwise the
     // built-in default (off, fail-closed). This is barrier 1 of G7 — an
     // out-of-band operator opt-in; nothing on the wire can change it.
+    // The file's policy is trusted only if no other principal could have
+    // written it (StrictModes-style check); otherwise fail closed.
     let unattended_eligible = opts.unattended_eligible.unwrap_or_else(|| {
-        sudo_proxy::hosts::HostsConfig::load()
-            .policy
-            .unattended_eligible
+        match sudo_proxy::hosts::load_trusted_policy() {
+            Ok(p) => p.unattended_eligible,
+            Err(why) => {
+                eprintln!(
+                    "sudo-proxy: ignoring hosts.json policy (not unattended-eligible): {why}"
+                );
+                false
+            }
+        }
     });
 
     let config = server::ServerConfig {
@@ -178,6 +186,8 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("  --unattended-eligible       Allow a human to grant unattended unprivileged execution");
                 eprintln!("                              for this session via the prompt's `a` answer (overrides hosts.json;");
                 eprintln!("                              the grant is in-memory only and never persisted)");
+                eprintln!("                              Without the flag, hosts.json's policy is used only if the file");
+                eprintln!("                              and its directories are yours and not group/world-writable");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 std::process::exit(0);
