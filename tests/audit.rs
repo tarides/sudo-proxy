@@ -103,7 +103,7 @@ fn stale_and_missing_time_are_recorded() {
     let mut req = make_req("a-stale", vec![vec!["true"]]);
     req.time = iso_offset(-70);
     assert_eq!(s.send(&req).status, Status::Error);
-    check_common(&s.audit_for("a-stale"), "rejected:stale_time");
+    check_common(&s.audit_for("a-stale"), "rejected:time");
 
     let mut req = make_req("a-notime", vec![vec!["true"]]);
     req.time = String::new();
@@ -123,6 +123,8 @@ fn validation_failure_is_recorded_without_command() {
     assert_eq!(s.send(&req).status, Status::Error);
     let r = s.audit_for("a-bidi");
     check_common(&r, "rejected:invalid_request");
+    // Recorded, but escaped: the file must be safe to `cat` on a terminal.
+    assert_eq!(r["session"], "evil\\u{202e}session");
     assert!(
         r.get("command").is_none(),
         "no command for unvalidated: {r}"

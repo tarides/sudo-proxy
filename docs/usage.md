@@ -199,11 +199,14 @@ Example record:
 
 Fields: `time` (RFC 3339 UTC), `outcome` (`approved`, `approved_session`,
 `unattended`, `pkexec`, `denied`, `timeout`, `ping`, `stop`, `prompt_error`,
-`rejected:<reason>`), `peer_uid`, `id`, `session`, `host`, `privileged`,
+`rejected:<reason>`), `peer_uid`, `id`, `session`, `requester` (when the client
+declared one), `host`, `privileged`,
 `command` (only for requests that passed validation), `detail` (the error sent
 to the client), `status` and `exit_codes` (for requests that ran). Request
 `env` values, `reason`, and the raw bytes of an invalid request are never
-recorded.
+recorded. Request-derived strings are clipped to 256 characters, and control,
+bidi and zero-width characters are written as `\u{…}` escapes (as on stderr), so
+the file is safe to `cat` or `tail -f` in a terminal.
 
 The file belongs to the daemon's UID, which is also the requester's UID, so a
 same-UID process can rewrite it. The syslog copy is the record the requester

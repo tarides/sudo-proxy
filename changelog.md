@@ -11,9 +11,10 @@ denials, or prompt timeouts, and its lines had no timestamps (threat-model B1,
 "Repudiation"). New `src/audit.rs`: every connection outcome now produces one
 record with an RFC 3339 timestamp, peer UID, id, session, self-declared
 requester (#25), host, outcome, and, for validated requests, the command
-summary. Records go to stderr (always), an append-only 0600 JSONL file at
-`$XDG_STATE_HOME/sudo-proxy/audit.jsonl` (on by default; `--audit-log PATH`,
-`--no-audit-log`), and syslog `LOG_AUTHPRIV` (on by default; `--no-syslog`). Env
+summary. Request-derived strings are clipped and their control/bidi characters
+escaped in every sink. Records go to stderr (always), an append-only 0600 JSONL
+file at `$XDG_STATE_HOME/sudo-proxy/audit.jsonl` (on by default;
+`--audit-log PATH`, `--no-audit-log`), and syslog `LOG_AUTHPRIV` (on by default; `--no-syslog`). Env
 values and `reason` are never recorded. If the audit file cannot be opened, the
 daemon refuses to start. The old unconditional `[id] [unattended] [session …]`
 line and the peer-UID rejection line are folded into the audit line. The

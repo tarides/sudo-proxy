@@ -557,12 +557,12 @@ pub fn run(
         if in_flight.load(Ordering::Relaxed) >= config.max_in_flight {
             let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
             let resp = Response::error("", "server busy: too many in-flight requests");
-            let _ = write_response(&mut stream, &resp);
             audit.record(&Event {
                 outcome: Some(Outcome::Rejected(Reject::Busy)),
-                detail: resp.message,
+                detail: resp.message.clone(),
                 ..Default::default()
             });
+            let _ = write_response(&mut stream, &resp);
             continue;
         }
 
@@ -681,13 +681,15 @@ fn handle_connection(
     // that closes before sending a byte (e.g. a liveness probe): no request,
     // nothing to record.
     let mut ev = Event::default();
+    // The record is written *before* the reply, so the log never lags what a
+    // client has been told.
     let reject = |stream: &mut UnixStream, ev: &Event, why: Reject, resp: Response| {
-        let _ = write_response(stream, &resp);
         audit.record(&Event {
             outcome: Some(Outcome::Rejected(why)),
-            detail: resp.message,
+            detail: resp.message.clone(),
             ..ev.clone()
         });
+        let _ = write_response(stream, &resp);
     };
 
     // Defense-in-depth: refuse connections from other UIDs even though the
@@ -785,7 +787,7 @@ fn handle_connection(
     // behind another user's prompt.
     if let Err(msg) = check_freshness(&req) {
         let resp = Response::error(&req.id, &msg);
-        reject(&mut stream, &ev, Reject::Stale, resp);
+        reject(&mut stream, &ev, Reject::Time, resp);
         return;
     }
 
@@ -828,9 +830,9 @@ fn handle_connection(
             }
             let mut resp = Response::ok(&req.id, vec![], b"");
             resp.message = Some("pong".to_string());
-            let _ = write_response(&mut stream, &resp);
             ev.outcome = Some(Outcome::Ping);
             audit.record(&ev);
+            let _ = write_response(&mut stream, &resp);
             return;
         }
         crate::protocol::Action::Stop => {
@@ -856,9 +858,9 @@ fn handle_connection(
             // Reply before flipping the flag so the client reliably reads
             // the Ok response before the process exits.
             let resp = Response::ok(&req.id, vec![], b"");
-            let _ = write_response(&mut stream, &resp);
             ev.outcome = Some(Outcome::Stop);
             audit.record(&ev);
+            let _ = write_response(&mut stream, &resp);
             shutdown.store(true, Ordering::Relaxed);
             return;
         }

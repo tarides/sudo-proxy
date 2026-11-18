@@ -70,7 +70,8 @@ pub enum Reject {
     InvalidJson,
     Invalid,
     ForwardAgent,
-    Stale,
+    /// Missing, malformed, too old, or too far in the future.
+    Time,
     Env,
     DuplicateId,
     InvalidPlan,
@@ -91,7 +92,7 @@ impl Reject {
             Reject::InvalidJson => "invalid_json",
             Reject::Invalid => "invalid_request",
             Reject::ForwardAgent => "forward_agent",
-            Reject::Stale => "stale_time",
+            Reject::Time => "time",
             Reject::Env => "env",
             Reject::DuplicateId => "duplicate_id",
             Reject::InvalidPlan => "invalid_plan",
@@ -244,13 +245,17 @@ impl AuditLog {
                 time: &time,
                 outcome: outcome.label(),
                 peer_uid: ev.peer_uid,
-                id: clip(&ev.id),
-                session: clip(&ev.session),
-                requester: clip(&ev.requester),
-                host: clip(&ev.host),
+                // Escaped like the stderr line: operators read this file with
+                // `cat`/`tail`, and JSON leaves bidi overrides and C1 controls
+                // raw, so a rejected request could otherwise reorder or
+                // restyle the terminal that displays it.
+                id: safe(&ev.id),
+                session: safe(&ev.session),
+                requester: safe(&ev.requester),
+                host: safe(&ev.host),
                 privileged: ev.privileged,
-                command: ev.command.as_deref().map(clip),
-                detail: ev.detail.as_deref().map(clip),
+                command: ev.command.as_deref().map(safe),
+                detail: ev.detail.as_deref().map(safe),
                 status: ev.status,
                 exit_codes: &ev.exit_codes,
             };
@@ -416,5 +421,26 @@ mod tests {
             serde_json::from_str(fs::read_to_string(&path).unwrap().trim()).unwrap();
         assert_eq!(v["outcome"], "denied");
         assert_eq!(v["id"], "x");
+    }
+
+    #[test]
+    fn file_record_escapes_bidi_and_controls() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("audit.jsonl");
+        let log = AuditLog::open(&AuditConfig {
+            file: Some(path.clone()),
+            syslog: false,
+        })
+        .unwrap();
+        log.record(&Event {
+            id: "i\u{9b}d".into(),
+            session: "evil\u{202e}session\x1b[31m".into(),
+            outcome: Some(Outcome::Rejected(Reject::Invalid)),
+            ..Default::default()
+        });
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains('\u{202e}') && !raw.contains('\u{9b}'), "{raw}");
+        let v: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
+        assert_eq!(v["session"], "evil\\u{202e}session\\u{1b}[31m");
     }
 }
