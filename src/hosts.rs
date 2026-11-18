@@ -172,7 +172,8 @@ pub fn load_trusted_policy() -> Result<Policy, String> {
 ///   owned by `uid` and not group- or world-writable.
 /// - Every directory from the file's parent up to `stop_at` (canonicalized;
 ///   up to `/` if the file is not under it) must be owned by `uid` or root and
-///   not group- or world-writable.
+///   not group- or world-writable, except a root-owned sticky directory such
+///   as `/tmp`.
 /// - Unparseable JSON is `Ok(Policy::default())`, as with `HostsConfig::load`.
 ///
 /// `Err` carries a human-readable reason; callers fail closed (not eligible).
@@ -221,7 +222,11 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
                 m.uid()
             ));
         }
-        if m.mode() & 0o022 != 0 {
+        // A root-owned sticky directory (e.g. /tmp, 1777) is safe to pass
+        // through: others may add entries but cannot rename or remove ours,
+        // so the owner-private subtree below it cannot be swapped out.
+        let root_sticky = m.uid() == 0 && m.mode() & 0o1000 != 0;
+        if m.mode() & 0o022 != 0 && !root_sticky {
             return Err(format!(
                 "{}: directory mode {:04o} is group/world-writable",
                 dir.display(),
@@ -442,6 +447,17 @@ mod tests {
             .unwrap();
         let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
         assert!(e.contains("directory mode"), "{e}");
+    }
+
+    #[test]
+    fn strict_rejects_non_root_sticky_world_writable_dir() {
+        // The sticky exemption is for root-owned dirs only: a 1777 dir owned
+        // by a user (here, ourselves) is still rejected.
+        let (root, path) = eligible_config(0o600);
+        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o1777))
+            .unwrap();
+        let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
+        assert!(e.contains("directory mode 1777"), "{e}");
     }
 
     #[test]

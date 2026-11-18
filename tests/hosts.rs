@@ -240,4 +240,11 @@ fn world_writable_hosts_json_policy_is_ignored() {
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     assert!(load_policy_from(&path, uid, Some(root.path())).unwrap().unattended_eligible);
+
+    // Walking all the way to `/` (config not under $HOME) passes through
+    // /tmp (root-owned, 1777, sticky): that ancestor must be accepted.
+    assert!(
+        load_policy_from(&path, uid, None).unwrap().unattended_eligible,
+        "a root-owned sticky ancestor must not cause a rejection"
+    );
 }

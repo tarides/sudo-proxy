@@ -17,11 +17,14 @@ file the way OpenSSH StrictModes does:
 - The file must be a regular file owned by the daemon's UID and not group- or
   world-writable.
 - Every directory up to `$HOME` must be owned by that UID or root and not
-  group- or world-writable.
+  group- or world-writable. A root-owned sticky directory such as `/tmp` is
+  allowed: others can add entries to it but can't rename or remove ours.
 
 If the check fails, the daemon prints a warning on stderr and is not eligible
 (fail closed). An explicit `--unattended-eligible` flag still wins. The host
-inventory is unaffected. Rung: G7 barrier 1 (C8).
+inventory is unaffected. The pty harness (#68) confirmed the end-to-end
+behaviour: an eligible 0666 file gives `[y/N]` and a warning, and a 0600 file
+gives `[y/N/a]`. Rung: G7 barrier 1 (C8).
 
 ## 2026-09-15 — Glama quality score: from unscored to grade A
 
