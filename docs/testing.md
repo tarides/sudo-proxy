@@ -181,7 +181,7 @@ file and its original to the README, and run `cargo test --test manual_corpus`.
 ## Without a human (CI / headless)
 
 The human gate reads `/dev/tty`, so full execution needs either a person or a
-pseudo-terminal harness. Two headless-friendly paths:
+pseudo-terminal harness. Three headless-friendly paths:
 
 - **Pre-prompt rejection needs no keypress.** A structurally invalid plan (e.g. a
   `redirect` wrapping a `seq`/`alt`) is rejected *before* prompting, so a client
@@ -189,5 +189,17 @@ pseudo-terminal harness. Two headless-friendly paths:
   smoke-testing the client→daemon plumbing against a backgrounded daemon.
 - **Scripted approval** for real execution: the integration tests drive the
   daemon through a scripted prompter — see `tests/plan_exec.rs`
-  (`plan_request_end_to_end_through_daemon`) and `tests/validation.rs`. Prefer
-  adding a case there over automating the live TUI.
+  (`plan_request_end_to_end_through_daemon`) and `tests/validation.rs`. This is
+  the place for request semantics: validation, plan compilation, execution.
+- **The live prompt through a pty.** `tests/pty_e2e.rs` runs the real
+  `sudo-proxy` binary with a pseudo-terminal as its controlling terminal
+  (`tests/common/pty.rs`), reads the prompt it draws and types the answer.
+  It covers what the scripted prompter cannot: the rendered prompt, single-key
+  reads, termios restoration and the result display. Privileged steps reach
+  `tests/shims/sudo`, a stand-in that logs its argv and runs the command
+  unescalated, so the literal argv handed to `sudo` is checked end to end.
+  Send keys with `PtyDaemon::answer`, which waits for the tty to enter raw
+  mode first; the prompt discards input typed before that.
+
+What stays manual: how colours, the bell and the blink actually look in a
+terminal, real sudo passwords, the pkexec dialog, and the remote SSH tunnel.

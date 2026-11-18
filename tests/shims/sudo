@@ -1,0 +1,31 @@
+#!/bin/sh
+# Test stand-in for sudo (tests/pty_e2e.rs). The daemon spawns
+# `sudo [-u USER] K=V... -- argv`, finding `sudo` on its PATH, where the pty
+# harness puts this directory first. Log the argv exactly as received, then
+# run the command as the invoking user. Nothing is ever escalated.
+#
+# Log format: one record per invocation, each argument NUL-terminated, then a
+# newline. Argv cannot contain a newline (the daemon rejects one), so records
+# never split. Records come from sequential leaves; concurrent pipeline stages
+# could interleave the two writes below.
+set -eu
+{ printf '%s\000' "$@"; printf '\n'; } >>"${SUDO_SHIM_LOG:?}"
+
+if [ "${1-}" = "-u" ]; then
+    shift 2
+fi
+
+# Like sudo: the K=V words before the first `--` set the environment, and
+# everything after it is the command, taken literally (an argv[0] containing
+# `=` stays a command, which `env K=V cmd` would not guarantee). The daemon
+# only emits valid names here (HOME/USER/LOGNAME/PATH and the setenv
+# allowlist).
+while [ $# -gt 0 ]; do
+    a=$1
+    shift
+    if [ "$a" = "--" ]; then
+        break
+    fi
+    export "$a"
+done
+exec "$@"
