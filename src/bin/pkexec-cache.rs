@@ -150,16 +150,32 @@ fn main() {
     }
 }
 
-fn cmd_check() {
-    let path = Path::new(RULES_PATH);
-    if !path.exists() {
-        println!("not installed: {RULES_PATH} does not exist");
-        println!("run with --create to install the rule");
-        process::exit(1);
+/// Read the rule file in one step, so nothing can change between an
+/// existence check and the read. `Ok(None)` means the rule is absent,
+/// `Ok(Some(text))` means it is present, and `Err` means we could not tell
+/// (unlike `Path::exists`, which reports every error as "absent").
+fn read_rule(path: &Path) -> std::io::Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(c) => Ok(Some(c)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
+}
 
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
+fn cmd_check() {
+    let content = match read_rule(Path::new(RULES_PATH)) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            println!("not installed: {RULES_PATH} does not exist");
+            println!("run with --create to install the rule");
+            process::exit(1);
+        }
+        // e.g. rules.d shipped as root:polkitd 0750: we cannot tell whether
+        // the rule is there, so do not claim it is absent (#75).
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            println!("unknown: cannot read {RULES_PATH}: permission denied (run with sudo)");
+            process::exit(1);
+        }
         Err(e) => {
             eprintln!("error: cannot read {RULES_PATH}: {e}");
             process::exit(1);
@@ -465,5 +481,42 @@ polkit.addRule(function(action, subject) {
         assert!(resolve_user(INJECTION)
             .unwrap_err()
             .contains("invalid username"));
+    }
+
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn read_rule_missing_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("50-pkexec-cache.rules");
+        assert!(read_rule(&path).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_rule_present_returns_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("50-pkexec-cache.rules");
+        fs::write(&path, "rule text\n").unwrap();
+        assert_eq!(read_rule(&path).unwrap().as_deref(), Some("rule text\n"));
+    }
+
+    /// The #75 case: the rule exists but its directory is not searchable
+    /// (rules.d shipped as root:polkitd 0750, checked by a non-root user).
+    #[test]
+    fn read_rule_unreadable_dir_is_permission_denied() {
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root ignores directory mode bits");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("rules.d");
+        fs::create_dir(&sub).unwrap();
+        let path = sub.join("50-pkexec-cache.rules");
+        fs::write(&path, "rule text\n").unwrap();
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o000)).unwrap();
+        let result = read_rule(&path);
+        fs::set_permissions(&sub, fs::Permissions::from_mode(0o755)).unwrap();
+        let err = result.expect_err("unreadable directory must not read as absent");
+        assert_eq!(err.kind(), std::io::ErrorKind::PermissionDenied);
     }
 }

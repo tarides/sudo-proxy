@@ -63,6 +63,11 @@ It must name an existing non-root account in the passwd database and match the
 usual login-name charset (`^[a-z_][a-z0-9_-]*\$?$`, at most 32 characters);
 otherwise `--create` refuses to write the rule.
 
+Some distributions ship `/etc/polkit-1/rules.d` as `root:polkitd 0750`, so a
+non-root user can't look inside it. The check then prints
+`unknown: cannot read …: permission denied (run with sudo)` instead of guessing;
+run `sudo pkexec-cache` to see the real status.
+
 The rule is written to `/etc/polkit-1/rules.d/50-pkexec-cache.rules`
 and caches authentication for the calling user with these conditions:
 - `subject.active` — only the foreground session (not background terminals)
