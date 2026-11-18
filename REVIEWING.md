@@ -76,12 +76,15 @@ The G7 sub-claims (unprivileged surface):
 - **C8 — No unattended unprivileged exec except behind two human acts; the grant
   never persists.** No unprivileged command reaches `exec_direct` without a
   per-command keypress *unless* (a) its daemon is `unattended_eligible` (barrier
-  1, config-only) *and* (b) a human answered `a` this session (barrier 2). The
+  1, config-only, and the config is trusted only if no other principal could
+  have written it: `hosts::load_policy_from`) *and* (b) a human answered `a` this session (barrier 2). The
   grant lives only in memory, is never written to `hosts.json`, and dies with the
   daemon/tunnel. *Attack:* reach `exec_direct` unattended on a non-eligible
   daemon; make an `a` press grant a session without eligibility; make the grant
   survive a session/tunnel boundary or a restart; or make a stale
-  `confirm_unprivileged` key re-enable it. → `src/server.rs` (dispatch),
+  `confirm_unprivileged` key re-enable it; or make a `hosts.json` that another
+  user can write (foreign owner, group/world-writable, symlink, writable parent)
+  confer eligibility. → `src/server.rs` (dispatch),
   `src/hosts.rs` (`Policy`, migration), `tests/approval.rs`.
 - **C9 — Self/loopback can't dodge local policy.** A request naming any loopback
   alias of the daemon's own machine (`localhost`, `127.0.0.0/8`, `::1`,
