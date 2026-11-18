@@ -3,6 +3,26 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-18 — `hosts.json` policy trusted only when owner-private (GHSA-xx2m-j9f7-gcmr)
+
+The daemon read `policy.unattended_eligible` from `hosts.json` without checking
+who owned the file or its mode. So a file that someone else could write (a
+foreign owner, 0666, or a group- or world-writable parent directory) could make
+the daemon unattended-eligible. The threat model says attack 4.4 is "blocked by
+F4", but nothing enforced that. Now `hosts::load_trusted_policy` checks the
+file the way OpenSSH StrictModes does:
+
+- The file is opened with `O_NOFOLLOW` and checked with `fstat` on the open
+  descriptor, so the check and the read can't race.
+- The file must be a regular file owned by the daemon's UID and not group- or
+  world-writable.
+- Every directory up to `$HOME` must be owned by that UID or root and not
+  group- or world-writable.
+
+If the check fails, the daemon prints a warning on stderr and is not eligible
+(fail closed). An explicit `--unattended-eligible` flag still wins. The host
+inventory is unaffected. Rung: G7 barrier 1 (C8).
+
 ## 2026-09-15 — Glama quality score: from unscored to grade A
 
 Release/hygiene work, not an assurance-ladder rung.

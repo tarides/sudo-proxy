@@ -148,6 +148,99 @@ impl HostsConfig {
     }
 }
 
+/// Load the unattended-eligibility policy from the default `hosts.json`,
+/// trusting it only if the file and its directories pass a StrictModes-style
+/// check (see [`load_policy_from`]). This is the only path by which the
+/// persisted policy reaches the daemon; `HostsConfig::load` is for the host
+/// inventory and does not vet ownership.
+pub fn load_trusted_policy() -> Result<Policy, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    load_policy_from(&HostsConfig::config_path(), uid, home.as_deref())
+}
+
+/// Read the `policy` block of the `hosts.json` at `path`, refusing to trust
+/// it unless an attacker other than `uid` (or root) could not have written it
+/// (GHSA-xx2m-j9f7-gcmr, threat-model 4.4 / F4). The policy is barrier 1 of
+/// G7, an *operator's* out-of-band act, so a file another principal can write
+/// must not be able to make the daemon eligible.
+///
+/// - A missing file is `Ok(Policy::default())` (not eligible).
+/// - The file is opened with `O_NOFOLLOW` and checked via `fstat` on the open
+///   descriptor, so there is no check/read race: it must be a regular file
+///   owned by `uid` and not group- or world-writable.
+/// - Every directory from the file's parent up to `stop_at` (canonicalized;
+///   up to `/` if the file is not under it) must be owned by `uid` or root and
+///   not group- or world-writable.
+/// - Unparseable JSON is `Ok(Policy::default())`, as with `HostsConfig::load`.
+///
+/// `Err` carries a human-readable reason; callers fail closed (not eligible).
+pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result<Policy, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+
+    let shown = path.display();
+    let mut file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Policy::default()),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            return Err(format!("{shown}: is a symlink"));
+        }
+        Err(e) => return Err(format!("{shown}: {e}")),
+    };
+    let meta = file.metadata().map_err(|e| format!("{shown}: {e}"))?;
+    if !meta.file_type().is_file() {
+        return Err(format!("{shown}: not a regular file"));
+    }
+    if meta.uid() != uid {
+        return Err(format!("{shown}: owned by uid {}, expected {uid}", meta.uid()));
+    }
+    if meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{shown}: mode {:04o} is group/world-writable",
+            meta.mode() & 0o7777
+        ));
+    }
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|e| format!("{}: {e}", parent.display()))?;
+    let stop_at = stop_at.and_then(|p| std::fs::canonicalize(p).ok());
+    let stop_at = stop_at.filter(|s| parent.starts_with(s));
+    for dir in parent.ancestors() {
+        let m = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        if m.uid() != uid && m.uid() != 0 {
+            return Err(format!(
+                "{}: directory owned by uid {}, expected {uid} or root",
+                dir.display(),
+                m.uid()
+            ));
+        }
+        if m.mode() & 0o022 != 0 {
+            return Err(format!(
+                "{}: directory mode {:04o} is group/world-writable",
+                dir.display(),
+                m.mode() & 0o7777
+            ));
+        }
+        if stop_at.as_deref() == Some(dir) {
+            break;
+        }
+    }
+
+    let mut s = String::new();
+    file.read_to_string(&mut s)
+        .map_err(|e| format!("{shown}: {e}"))?;
+    Ok(serde_json::from_str::<HostsConfig>(&s)
+        .map(|c| c.policy)
+        .unwrap_or_default())
+}
+
 /// A uid is valid if it's a non-empty ASCII-digit string of at most
 /// 10 chars (u32::MAX is `4294967295`, ten digits). The length cap
 /// keeps a malicious peer from filling our config with an arbitrarily
@@ -285,6 +378,86 @@ mod tests {
         let back: HostsConfig = serde_json::from_str(&s).unwrap();
         assert!(back.policy.unattended_eligible);
 
+        // What `save_to` writes must pass the StrictModes check.
+        let p = load_policy_from(&path, my_uid(), Some(&dir)).unwrap();
+        assert!(p.unattended_eligible);
+
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- StrictModes check (GHSA-xx2m-j9f7-gcmr) ----
+
+    use std::os::unix::fs::PermissionsExt;
+
+    fn my_uid() -> u32 {
+        unsafe { libc::geteuid() }
+    }
+
+    /// A 0700 config dir (inside a tempdir used as `stop_at`) holding an
+    /// eligible `hosts.json` with the given file mode.
+    fn eligible_config(file_mode: u32) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let dir = root.path().join("sudo-proxy");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = dir.join("hosts.json");
+        std::fs::write(&path, r#"{"policy":{"unattended_eligible":true}}"#).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(file_mode)).unwrap();
+        (root, path)
+    }
+
+    #[test]
+    fn strict_accepts_owner_private_file() {
+        let (root, path) = eligible_config(0o600);
+        let p = load_policy_from(&path, my_uid(), Some(root.path())).unwrap();
+        assert!(p.unattended_eligible);
+    }
+
+    #[test]
+    fn strict_rejects_world_writable_file() {
+        let (root, path) = eligible_config(0o666);
+        let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
+        assert!(e.contains("group/world-writable"), "{e}");
+    }
+
+    #[test]
+    fn strict_rejects_group_writable_file() {
+        let (root, path) = eligible_config(0o620);
+        assert!(load_policy_from(&path, my_uid(), Some(root.path())).is_err());
+    }
+
+    #[test]
+    fn strict_rejects_foreign_owner() {
+        // Simulate a foreign owner without root: expect a different uid.
+        let (root, path) = eligible_config(0o600);
+        let e = load_policy_from(&path, my_uid().wrapping_add(1), Some(root.path())).unwrap_err();
+        assert!(e.contains("owned by uid"), "{e}");
+    }
+
+    #[test]
+    fn strict_rejects_group_writable_parent_dir() {
+        let (root, path) = eligible_config(0o600);
+        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o770))
+            .unwrap();
+        let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
+        assert!(e.contains("directory mode"), "{e}");
+    }
+
+    #[test]
+    fn strict_rejects_symlinked_file() {
+        let (root, real) = eligible_config(0o600);
+        let link = real.with_file_name("link.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let e = load_policy_from(&link, my_uid(), Some(root.path())).unwrap_err();
+        assert!(e.contains("symlink"), "{e}");
+    }
+
+    #[test]
+    fn strict_missing_file_is_not_eligible() {
+        let root = tempfile::tempdir().unwrap();
+        let p = load_policy_from(&root.path().join("hosts.json"), my_uid(), Some(root.path()))
+            .unwrap();
+        assert!(!p.unattended_eligible);
     }
 }

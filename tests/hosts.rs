@@ -220,3 +220,24 @@ mod instructions_format {
         );
     }
 }
+
+/// GHSA-xx2m-j9f7-gcmr reproduction: a world-writable (0666) hosts.json that
+/// sets `unattended_eligible` must not make the daemon eligible; once the
+/// file is owner-private (0600) the same policy is honoured.
+#[test]
+fn world_writable_hosts_json_policy_is_ignored() {
+    use std::os::unix::fs::PermissionsExt;
+    use sudo_proxy::hosts::load_policy_from;
+
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = root.path().join("hosts.json");
+    std::fs::write(&path, r#"{"policy":{"unattended_eligible":true}}"#).unwrap();
+    let uid = unsafe { libc::geteuid() };
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
+    assert!(load_policy_from(&path, uid, Some(root.path())).is_err());
+
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(load_policy_from(&path, uid, Some(root.path())).unwrap().unattended_eligible);
+}
