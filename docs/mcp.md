@@ -29,6 +29,12 @@ sudo-proxy as tools over stdio JSON-RPC. Any MCP-capable AI client
 - `description`: what this command does (shown in the TUI approval prompt).
 - `privileged`: whether to escalate privileges (default `true`).
 - `env`: environment variables to pass.
+- `requester`: optional self-identification of the calling model (e.g.
+  `claude-opus-5-5`). Every request from this server is tagged as coming from an
+  AI: the approval prompt shows a `[AI-AGENT REQUEST]` banner and
+  `Requester: ai:<value> (self-declared, not verified)`. The `ai:` prefix is
+  always added, so a client cannot drop the banner by declaring itself
+  `human`. Omit it and the value sent is plain `ai` (issue #25).
 
 > **Local unprivileged commands are refused.** A request with `privileged: false`
 > that targets the local machine (including loopback aliases such as `127.0.0.1`,

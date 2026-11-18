@@ -61,7 +61,8 @@ invariant at a given boundary are omitted.
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
 | Spoofing | A different-UID process connects. | `SO_PEERCRED` check + 0600 socket. | G2.3 |
-| Tampering | Direct client sets `host`/`session`/`id`/`version` to inject display content, bypassing client-side `validate_host`. | Display-field sanitization moved into daemon-side `validate_request`. | G4.1, G6.2 / F1 |
+| Tampering | Direct client sets `host`/`session`/`id`/`version`/`requester` to inject display content, bypassing client-side `validate_host`. | Display-field sanitization moved into daemon-side `validate_request`. | G4.1, G6.2 / F1 |
+| Spoofing | Client misdeclares its `requester` (e.g. an AI claiming `human`, or a script claiming `ai`) to change how the approver reads the prompt. | `requester` is display-only metadata, never a trust input: the prompt labels it "self-declared, not verified" and no gate or policy reads it. `sudo-proxy-mcp` always sends `ai` / `ai:<id>` (client-side enforcement; the daemon cannot verify it). Issue #25. | G4.1 |
 | DoS | Replay of a captured request; connection flooding. | UUID dedup; in-flight cap. | G2.1, G6.4 |
 | Elevation | Bypass the MCP layer's `validate_host`. | Daemon-side controls do not depend on it. | G6.2 |
 
@@ -129,7 +130,7 @@ A  A root command runs that the human did NOT approve
 │            [has_dangerous_chars → G3.3 · blocked]
 │
 ├─ 3  Deceive the human into approving the wrong thing           (defeat G4)
-│   ├─ 3.1 ANSI / control / bidi in reason/host/session/id/version
+│   ├─ 3.1 ANSI / control / bidi in reason/host/session/id/version/requester
 │   │        [daemon-side sanitization of all display fields → G4.1 / F1 · blocked]
 │   ├─ 3.2 Symlink redirection of argv[0] (/usr/local/bin/foo -> /tmp/evil)
 │   │        [resolved path + "-> target" shown → G4.2 · blocked]

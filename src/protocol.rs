@@ -485,6 +485,12 @@ pub struct Request {
     /// Sender's `CARGO_PKG_VERSION`. Empty when peer predates this field.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub version: String,
+    /// Self-declared identity of the requester (conventionally "human", "ai",
+    /// "ai:<model>", "automation"). NOT authenticated: the daemon shows it to
+    /// the approver as-is, like `reason`, and never uses it as a trust signal.
+    /// Empty when the peer predates this field (rendered as nothing).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub requester: String,
 }
 
 pub(crate) fn default_true() -> bool {
@@ -522,6 +528,7 @@ impl Request {
             privileged,
             forward_agent,
             version: VERSION.to_string(),
+            requester: String::new(),
         }
     }
 
@@ -551,6 +558,7 @@ impl Request {
             privileged,
             forward_agent,
             version: VERSION.to_string(),
+            requester: String::new(),
         }
     }
 
@@ -572,6 +580,7 @@ impl Request {
             privileged: false,
             forward_agent: false,
             version: VERSION.to_string(),
+            requester: String::new(),
         }
     }
 
@@ -598,6 +607,12 @@ impl Request {
     /// flag, or an explicit root `RunAs`. Drives the prompt's "as root" wording.
     pub fn runs_as_root(&self) -> bool {
         self.privileged || self.plan.as_ref().is_some_and(Plan::contains_root)
+    }
+
+    /// Whether the requester self-identifies as an AI agent (`"ai"` or
+    /// `"ai:<identity>"`). A display hint only: the value is client-asserted.
+    pub fn requester_is_ai(&self) -> bool {
+        self.requester == "ai" || self.requester.starts_with("ai:")
     }
 }
 
@@ -643,7 +658,8 @@ impl ValidatedRequest {
     /// Validate every attacker-controlled, prompt-rendered field of `req` and,
     /// on success, consume it into a `ValidatedRequest`. The checks: a non-empty
     /// pipeline of non-empty stages, and no dangerous character in any argv
-    /// element, env key/value, or in `reason`/`session`/`host`/`version`/`id`.
+    /// element, env key/value, or in `reason`/`session`/`host`/`version`/`id`/
+    /// `requester`.
     ///
     /// `reason` may arrive from the MCP `description`, and `host`/`session`/
     /// `id`/`version` from a direct same-UID socket client that bypasses the
@@ -705,6 +721,7 @@ impl ValidatedRequest {
             ("host", &req.host),
             ("version", &req.version),
             ("id", &req.id),
+            ("requester", &req.requester),
         ] {
             if has_dangerous_chars(value) {
                 return Err(format!("{field} contains forbidden control/bidi characters"));
@@ -902,6 +919,49 @@ mod tests {
         let mut req = Request::control(String::new(), "test".into(), Action::Ping);
         req.session.push('\u{1b}');
         assert!(ValidatedRequest::validate(req).is_err());
+    }
+
+    // === Requester self-identification (issue #25) ========================
+
+    /// Wire compat: an old client sends no `requester`; it must deserialize to
+    /// empty (rendered as nothing), and an empty one must not be serialized.
+    #[test]
+    fn requester_absent_defaults_to_empty_and_is_not_serialized() {
+        let json = r#"{"id":"a","session":"s","time":"2026-01-01T00:00:00Z","pipeline":[["ls"]]}"#;
+        let req: Request = serde_json::from_str(json).unwrap();
+        assert_eq!(req.requester, "");
+        let out = serde_json::to_string(&exec_request()).unwrap();
+        assert!(!out.contains("requester"), "empty requester must be omitted: {out}");
+    }
+
+    #[test]
+    fn requester_round_trips_and_is_sanitized() {
+        let mut req = exec_request();
+        req.requester = "ai:test".into();
+        let back: Request = serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back.requester, "ai:test");
+        req.requester.push('\u{1b}');
+        assert_eq!(
+            ValidatedRequest::validate(req).unwrap_err(),
+            "requester contains forbidden control/bidi characters"
+        );
+    }
+
+    #[test]
+    fn requester_is_ai_matches_ai_and_ai_prefix_only() {
+        let mut req = exec_request();
+        for (value, expected) in [
+            ("ai", true),
+            ("ai:claude", true),
+            ("", false),
+            ("human", false),
+            ("automation", false),
+            ("aix", false),
+            ("AI", false),
+        ] {
+            req.requester = value.into();
+            assert_eq!(req.requester_is_ai(), expected, "{value:?}");
+        }
     }
 
     // === Structured plan schema ===========================================

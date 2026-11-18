@@ -157,10 +157,10 @@ fn main() {
 /// way; this is only client-side assembly.
 fn build_request(opts: &Opts) -> Result<Request, String> {
     let reason = opts.reason.clone().unwrap_or_default();
-    if let Some(plan_json) = &opts.plan {
+    let mut req = if let Some(plan_json) = &opts.plan {
         let plan: Plan =
             serde_json::from_str(plan_json).map_err(|e| format!("invalid plan JSON: {e}"))?;
-        Ok(Request::new_plan(
+        Request::new_plan(
             hostname(),
             opts.session.clone(),
             plan,
@@ -168,9 +168,9 @@ fn build_request(opts: &Opts) -> Result<Request, String> {
             reason,
             opts.privileged,
             opts.forward_agent,
-        ))
+        )
     } else {
-        Ok(Request::new(
+        Request::new(
             hostname(),
             opts.session.clone(),
             opts.pipeline.clone(),
@@ -178,14 +178,19 @@ fn build_request(opts: &Opts) -> Result<Request, String> {
             reason,
             opts.privileged,
             opts.forward_agent,
-        ))
-    }
+        )
+    };
+    // Self-declared, display-only (issue #25): a person at a terminal by
+    // default; scripts can declare e.g. `--requester automation`.
+    req.requester = opts.requester.clone();
+    Ok(req)
 }
 
 struct Opts {
     socket: Option<PathBuf>,
     reason: Option<String>,
     session: String,
+    requester: String,
     print: bool,
     privileged: bool,
     forward_agent: bool,
@@ -200,6 +205,7 @@ fn parse_args() -> Result<Opts, String> {
     let mut socket = None;
     let mut reason = None;
     let mut session = String::from("sudo-request-cli");
+    let mut requester = String::from("human");
     let mut print = false;
     let mut privileged = true;
     let mut forward_agent = false;
@@ -220,6 +226,8 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --socket PATH    Unix socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
                 eprintln!("  --reason TEXT    Reason for the request");
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
+                eprintln!("  --requester WHO  Self-declared requester shown to the approver, e.g.");
+                eprintln!("                   human, automation, ai:<model> (default: human; not verified)");
                 eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
                 eprintln!("  --no-privilege   Run command without privilege escalation");
                 eprintln!("  --forward-agent  Forward the local SSH agent to the command (unprivileged only)");
@@ -254,6 +262,13 @@ fn parse_args() -> Result<Opts, String> {
                 session = args
                     .get(i)
                     .ok_or("--session requires a value")?
+                    .clone();
+            }
+            "--requester" => {
+                i += 1;
+                requester = args
+                    .get(i)
+                    .ok_or("--requester requires a value")?
                     .clone();
             }
             "--print" => {
@@ -315,6 +330,7 @@ fn parse_args() -> Result<Opts, String> {
         socket,
         reason,
         session,
+        requester,
         print,
         privileged,
         forward_agent,
@@ -376,6 +392,7 @@ mod tests {
             socket: None,
             reason: None,
             session: "sudo-request-cli".to_string(),
+            requester: "human".to_string(),
             print: false,
             privileged: false,
             forward_agent: false,
@@ -409,6 +426,17 @@ mod tests {
         let req = build_request(&opts).expect("build");
         assert!(req.plan.is_none());
         assert_eq!(req.pipeline, vec![vec!["id".to_string()]]);
+    }
+
+    /// The CLI declares a human requester by default; `--requester` overrides
+    /// it verbatim (issue #25).
+    #[test]
+    fn requester_defaults_to_human_and_is_overridable() {
+        let mut opts = opts_with_plan(None);
+        opts.pipeline = vec![vec!["id".to_string()]];
+        assert_eq!(build_request(&opts).unwrap().requester, "human");
+        opts.requester = "automation".to_string();
+        assert_eq!(build_request(&opts).unwrap().requester, "automation");
     }
 }
 

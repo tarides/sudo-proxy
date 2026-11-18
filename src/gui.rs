@@ -47,11 +47,18 @@ pub fn prompt_gui(req: &ValidatedRequest, eligible: bool) -> io::Result<PromptRe
 
 fn format_prompt_text(req: &ValidatedRequest) -> String {
     let mut lines = Vec::new();
+    // Same disclosure as the TUI header (issue #25); plain text, no styling.
+    if req.requester_is_ai() {
+        lines.push("[AI-AGENT REQUEST]".to_string());
+    }
     lines.push(format!(
         "From: {} @ {}",
         req.session,
         if req.host.is_empty() { "local" } else { &req.host }
     ));
+    if !req.requester.is_empty() {
+        lines.push(format!("Requester: {} (self-declared, not verified)", req.requester));
+    }
     if !req.reason.is_empty() {
         lines.push(format!("Reason: {}", req.reason));
     }
