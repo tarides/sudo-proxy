@@ -58,6 +58,11 @@ sudo pkexec-cache --create
 sudo pkexec-cache --delete
 ```
 
+The username comes from `SUDO_USER`, then `PKEXEC_UID`, then `LOGNAME`/`USER`.
+It must name an existing non-root account in the passwd database and match the
+usual login-name charset (`^[a-z_][a-z0-9_-]*\$?$`, at most 32 characters);
+otherwise `--create` refuses to write the rule.
+
 The rule is written to `/etc/polkit-1/rules.d/50-pkexec-cache.rules`
 and caches authentication for the calling user with these conditions:
 - `subject.active` — only the foreground session (not background terminals)
