@@ -1,0 +1,17 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-escalation-c-ambient-plus-boundary
+Reason:  ui golden escalation-c-ambient-plus-boundary
+Command: sudo id -un && sudo whoami
+Resolves:
+  id      <PATH>
+  whoami  <PATH>
+Steps:
+0  sudo id -un &&
+1  sudo whoami
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━

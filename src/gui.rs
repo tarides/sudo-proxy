@@ -2,7 +2,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::executor::which;
+use crate::executor::{plan_display, which};
 use crate::protocol::ValidatedRequest;
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
@@ -56,14 +56,17 @@ fn format_prompt_text(req: &ValidatedRequest) -> String {
         lines.push(format!("Reason: {}", req.reason));
     }
     lines.push(format!("Command: {}", pipeline_join(&req.pipeline)));
-    if let Some(first_argv) = req.pipeline.first() {
-        if let Some(cmd_name) = first_argv.first() {
-            if let Some(resolved) = which(cmd_name) {
-                let resolved_str = resolved.display().to_string();
-                if resolved_str != *cmd_name {
-                    lines.push(format!("Resolves: {}", resolved_str));
-                }
-            }
+    // Each stage's resolution comes from the same compiled plan the executor
+    // spawns from, so the dialog names the files that will run (issue #62).
+    let mut seen = std::collections::HashSet::new();
+    for view in plan_display(req).unwrap_or_default() {
+        let Some(cmd_name) = view.argv.first() else { continue };
+        let shown = match &view.resolved_bin {
+            Some(p) => p.display().to_string(),
+            None => "(not found in PATH)".to_string(),
+        };
+        if shown != *cmd_name && seen.insert((cmd_name.clone(), shown.clone())) {
+            lines.push(format!("Resolves: {cmd_name} → {shown}"));
         }
     }
     lines.push(String::new());

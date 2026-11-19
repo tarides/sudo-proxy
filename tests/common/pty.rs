@@ -49,6 +49,9 @@ pub struct PtyOpts {
     /// Write `config/sudo-proxy/hosts.json` with these contents and mode
     /// before the daemon starts.
     pub hosts_json: Option<(String, u32)>,
+    /// Directories put first on the daemon's own PATH (before the shims), as
+    /// a dev shell would. Requested commands must not be resolved on it.
+    pub extra_path: Vec<PathBuf>,
 }
 
 /// What the reader thread has seen on the master, and whether it hit EOF.
@@ -103,8 +106,12 @@ impl PtyDaemon {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_sudo-proxy"));
         cmd.arg("--socket").arg(&socket).arg("-v").args(&opts.args);
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
+        let mut daemon_path: Vec<String> =
+            opts.extra_path.iter().map(|p| p.display().to_string()).collect();
+        daemon_path.push(shims.display().to_string());
+        daemon_path.push(path);
         cmd.env_clear()
-            .env("PATH", format!("{}:{path}", shims.display()))
+            .env("PATH", daemon_path.join(":"))
             .env("HOME", dir.path().join("home"))
             .env("XDG_CONFIG_HOME", dir.path().join("config"))
             .env("XDG_RUNTIME_DIR", dir.path())

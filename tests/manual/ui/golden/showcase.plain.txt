@@ -1,0 +1,24 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-showcase
+Reason:  ui golden showcase
+Command: (export LANG=C && (echo 'a;b' && (echo 'hello world' | wc -w) && sudo id -un))
+Resolves:
+  echo  <PATH>
+  wc    <PATH>
+  id    <PATH>
+Steps:
+   (
+0    export LANG=C && (
+1      echo 'a;b' && (
+2        echo 'hello world' |
+3        wc -w ) &&
+4      sudo id -un
+     )
+   )
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━

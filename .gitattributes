@@ -1,0 +1,2 @@
+# Prompt goldens keep the space after the question line (the cursor rests there).
+tests/manual/ui/golden/*.txt -whitespace
