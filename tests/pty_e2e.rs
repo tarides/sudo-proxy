@@ -95,13 +95,67 @@ fn privileged_goes_through_sudo_with_literal_argv() {
     assert_eq!(common::decode_stdout(&resp), "as-nobody\n");
 
     // Assert only on the `-u` target and the argv after `--`: the `K=V`
-    // part carries the runner's HOME/USER.
+    // part carries the runner's HOME/USER. The command is the path the prompt
+    // resolved, so sudo's `secure_path` never gets a second lookup (#62).
+    let echo = sudo_proxy::executor::resolve_command("echo", "/").expect("echo on default PATH");
+    let echo = echo.to_str().unwrap();
     let log = d.shim_log();
     assert_eq!(log.len(), 2, "one sudo spawn per privileged step: {log:?}");
     let (u, argv) = split_sudo(&log[0]);
     assert_eq!(u, None);
-    assert_eq!(argv, ["echo", "as root", "", "$HOME;x"]);
+    assert_eq!(argv, [echo, "as root", "", "$HOME;x"]);
     let (u, argv) = split_sudo(&log[1]);
     assert_eq!(u, Some("nobody"));
-    assert_eq!(argv, ["echo", "as-nobody"]);
+    assert_eq!(argv, [echo, "as-nobody"]);
+}
+
+/// Issue #62: the prompt and the spawn resolve `argv[0]` once, on the child's
+/// PATH — never the daemon's. A daemon started from a shell whose PATH holds a
+/// fake `id` and a tool that exists only there must neither show those files
+/// nor be told to run something it then cannot find. A relative name resolves
+/// against the plan's `chdir`, where the child starts.
+#[test]
+fn resolves_line_names_the_binary_that_runs() {
+    let fake = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let bin = fake.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for (name, body) in [("id", "echo FAKE-id"), ("only-here", "echo hello")] {
+        let f = bin.join(name);
+        std::fs::write(&f, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+    let fake_bin = bin.to_str().unwrap();
+    let mut d = PtyDaemon::spawn(PtyOpts { extra_path: vec![bin.clone()], ..Default::default() });
+
+    // `id`: the prompt names the system binary, and that is what runs.
+    let real_id = sudo_proxy::executor::resolve_command("id", "/").expect("id on default PATH");
+    let h = d.request_async(&req("pty-62-id", &["id"], "issue 62"));
+    let prompt = d.answer(b'y');
+    assert!(prompt.contains(&format!("Resolves: {}", real_id.display())), "prompt: {prompt}");
+    assert!(!prompt.contains(fake_bin), "prompt shows the daemon's PATH: {prompt}");
+    let resp = h.join().unwrap();
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    let out = common::decode_stdout(&resp);
+    assert!(out.starts_with("uid="), "the fake ran: {out:?}");
+
+    // `only-here`: shown as not found, and refused without a second lookup.
+    let h = d.request_async(&req("pty-62-only", &["only-here"], "issue 62"));
+    let prompt = d.answer(b'y');
+    assert!(prompt.contains("Resolves: (not found in PATH)"), "prompt: {prompt}");
+    let resp = h.join().unwrap();
+    assert_ne!(resp.status, Status::Ok, "{resp:?}");
+    assert!(format!("{resp:?}").contains("command not found: only-here"), "{resp:?}");
+
+    // `./bin/only-here` under `chdir`: resolved in, and run from, that dir.
+    let mut rel = common::make_req("pty-62-rel", vec![]);
+    rel.plan = Some(Plan::Chdir {
+        dir: fake.path().to_str().unwrap().into(),
+        body: Box::new(Plan::Exec { argv: vec!["./bin/only-here".into()] }),
+    });
+    let h = d.request_async(&rel);
+    let prompt = d.answer(b'y');
+    assert!(prompt.contains(&format!("{}/./bin/only-here", fake.path().display())), "prompt: {prompt}");
+    let resp = h.join().unwrap();
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(common::decode_stdout(&resp), "hello\n");
 }
