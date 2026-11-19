@@ -21,6 +21,7 @@ byte-identical to before, so installed rules still check as `installed`.
 Tests: `pkexec-cache` unit tests `validate_username_*`, `expected_content_*`,
 `extract_username_*`, `injected_rule_does_not_check_as_installed` (the issue's
 repro) and `resolve_user_rejects_root_and_unknown_users`.
+
 ## Unreleased — the `Resolves:` line names the binary that actually runs (#62)
 
 The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
