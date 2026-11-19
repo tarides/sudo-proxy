@@ -18,28 +18,17 @@ real daemon under `script(1)` with keys fed through a FIFO, and a fake `sudo` on
 Plan, revised after a code review (full notes in the
 [issue comment](https://github.com/tarides/sudo-proxy/issues/68#issuecomment-6952577695)):
 
-1. **PR 1 — harness + 3 scenarios.** `tests/common/pty.rs`, hand-rolled on
-   `libc` (no new dependency): `openpty`, then `setsid` + `TIOCSCTTY` in
-   `pre_exec` around `CARGO_BIN_EXE_sudo-proxy`. The pty is the controlling
-   terminal only; stdin and stdout are null and stderr goes to a log file.
-   Helpers: `expect`, `answer` (waits for raw mode, then types), `shim_log`.
-   - **Key race:** before sending a key, poll `tcgetattr(master)` until `ICANON`
-     is cleared. Seeing `Execute?` is not enough: `TCSAFLUSH` at
-     `src/tui.rs:1106` runs after the question is flushed and discards early
-     input.
-   - **Environment:** `env_clear()` + allowlist. No `DISPLAY`/`WAYLAND_DISPLAY`;
-     a temp `XDG_CONFIG_HOME`/`HOME`; `NO_COLOR`/bell/blink set per scenario.
-   - **Fake `sudo`:** a committed script in `tests/shims/`, first on `PATH`.
-     Assert on the argv after `--` and on the `-u` prefix.
-   - **Scenarios:** approve, deny, privileged approve.
-   - **Cleanup:** `Drop` sends SIGTERM and waits.
-   - **Gating:** `#![cfg(target_os = "linux")]`.
-   - **Docs:** rewrite the last paragraph of `docs/testing.md`.
-2. **PR 2 — goldens** for `tests/manual/ui/*.json` (`NO_COLOR` and colour,
-   bell/blink off, escapes visible, `\r\n` normalised, `Time:`/`Resolves:`
-   masked, `UPDATE_GOLDEN=1`), plus a check that `run-as root` is bright red.
+1. **PR 1 — harness + 3 scenarios.** Done in #69: `tests/common/pty.rs`,
+   `tests/shims/sudo`, `tests/pty_e2e.rs` (approve, deny, privileged approve).
+   #72 reused it for the advisory regressions (`tests/pty_policy.rs`,
+   `tests/pty_future.rs`); `pty_policy.rs` already checks that `a` is
+   *offered* only with a trusted `hosts.json` policy.
+2. **PR 2 — goldens.** Done: `tests/pty_ui_golden.rs` snapshots the prompt for
+   `tests/manual/ui/*.json` (colour and `NO_COLOR`) into
+   `tests/manual/ui/golden/`, regenerated with `UPDATE_GOLDEN=1`, and asserts the
+   escalation colours directly.
 3. **PR 3 — remaining scenarios:**
-   - `a`, with and without `--unattended-eligible`;
+   - pressing `a`, with and without `--unattended-eligible`;
    - `--no-shell`, asserted by ordering rather than "no prompt seen";
    - timeout: `#[ignore]` it, or add a shorten-only, capped prompt-timeout env.
      The env would be a knob on the human gate, so decide it explicitly.
