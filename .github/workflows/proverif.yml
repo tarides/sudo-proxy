@@ -17,7 +17,7 @@ jobs:
     name: proverif (Rung 4 SSH channel, informational)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # ProVerif brings its own toolchain (installed via opam / OCaml),
       # independent of rust-toolchain.toml, so this does not affect the gating
       # Rust jobs. m4 expands the single .m4.pv template into the two
