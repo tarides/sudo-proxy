@@ -8,6 +8,7 @@
 //! types. Do not depend on this crate as a library.
 #![doc(hidden)]
 
+pub mod audit;
 pub mod cli;
 pub mod datetime;
 pub mod executor;

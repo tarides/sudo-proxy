@@ -443,6 +443,14 @@ fn burst_connections_above_cap_get_busy_response() {
     assert!(wait_until(Duration::from_secs(2), || {
         s.in_flight.load(Ordering::Relaxed) == 0
     }));
+    // Each busy rejection is audited (issue #65), each held request too.
+    let outcomes: Vec<String> = s
+        .audit_records()
+        .iter()
+        .map(|r| r["outcome"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(outcomes.iter().filter(|o| *o == "rejected:busy").count(), 3);
+    assert_eq!(outcomes.iter().filter(|o| *o == "denied").count(), 4);
     let mut req = make_req("after-drain", vec![vec!["true"]]);
     req.privileged = true;
     s.prompter

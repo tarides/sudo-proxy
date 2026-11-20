@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::audit::{AuditConfig, AuditLog, Event, Outcome, Reject};
 use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
 use crate::mode::Mode;
 use crate::protocol::{Request, Response, ValidatedRequest};
@@ -463,6 +464,9 @@ pub struct ServerConfig {
     /// `--allow-shell` at startup; immutable thereafter. Default `false`.
     pub no_shell: bool,
     pub max_in_flight: usize,
+    /// Persistent audit sinks (issue #65). The stderr audit line is always
+    /// written; `Default` turns the file and syslog sinks off.
+    pub audit: AuditConfig,
 }
 
 impl Default for ServerConfig {
@@ -475,6 +479,7 @@ impl Default for ServerConfig {
             unattended_eligible: false,
             no_shell: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
+            audit: AuditConfig::default(),
         }
     }
 }
@@ -492,6 +497,11 @@ pub fn run(
     // receive is dated earlier than a legitimate sender could have stamped it.
     let started_epoch = now_epoch()
         .ok_or_else(|| io::Error::other("system clock is before the Unix epoch"))?;
+    // Open the audit sinks before binding: an operator who expects an audit
+    // trail must not get a running daemon that silently records nothing.
+    let audit = Arc::new(AuditLog::open(&config.audit).map_err(|e| {
+        io::Error::new(e.kind(), format!("cannot open audit log: {e}"))
+    })?);
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
 
@@ -547,6 +557,11 @@ pub fn run(
         if in_flight.load(Ordering::Relaxed) >= config.max_in_flight {
             let _ = stream.set_write_timeout(Some(CONNECTION_IO_TIMEOUT));
             let resp = Response::error("", "server busy: too many in-flight requests");
+            audit.record(&Event {
+                outcome: Some(Outcome::Rejected(Reject::Busy)),
+                detail: resp.message.clone(),
+                ..Default::default()
+            });
             let _ = write_response(&mut stream, &resp);
             continue;
         }
@@ -567,6 +582,7 @@ pub fn run(
         let no_shell = config.no_shell;
         let unattended_grants = Arc::clone(&unattended_grants);
         let shutdown = Arc::clone(&shutdown);
+        let audit = Arc::clone(&audit);
         thread::spawn(move || {
             let _guard = guard;
             handle_connection(
@@ -585,6 +601,7 @@ pub fn run(
                 tty,
                 shutdown,
                 started_epoch,
+                &audit,
             );
         });
     }
@@ -656,17 +673,45 @@ fn handle_connection(
     tty_lock: Arc<Mutex<()>>,
     shutdown: Arc<AtomicBool>,
     started_epoch: u64,
+    audit: &AuditLog,
 ) {
+    // Audit context, filled in as the connection progresses. Every return
+    // below goes through `reject` or the final `record`, so each request
+    // leaves exactly one audit event (issue #65). The one exception is a peer
+    // that closes before sending a byte (e.g. a liveness probe): no request,
+    // nothing to record.
+    let mut ev = Event::default();
+    // The record is written *before* the reply, so the log never lags what a
+    // client has been told.
+    let reject = |stream: &mut UnixStream, ev: &Event, why: Reject, resp: Response| {
+        audit.record(&Event {
+            outcome: Some(Outcome::Rejected(why)),
+            detail: resp.message.clone(),
+            ..ev.clone()
+        });
+        let _ = write_response(stream, &resp);
+    };
+
     // Defense-in-depth: refuse connections from other UIDs even though the
     // socket file is 0600 inside a 0700 runtime dir.
+    // Nothing is written back to a rejected peer.
     match peer_uid(&stream) {
-        Ok(uid) if uid == our_uid => {}
+        Ok(uid) if uid == our_uid => ev.peer_uid = Some(uid),
         Ok(uid) => {
-            eprintln!("rejecting connection from uid {uid} (expected {our_uid})");
+            audit.record(&Event {
+                peer_uid: Some(uid),
+                outcome: Some(Outcome::Rejected(Reject::PeerUid)),
+                detail: Some(format!("expected uid {our_uid}")),
+                ..Default::default()
+            });
             return;
         }
         Err(e) => {
-            eprintln!("peer credential check failed: {e}");
+            audit.record(&Event {
+                outcome: Some(Outcome::Rejected(Reject::PeerCred)),
+                detail: Some(e.to_string()),
+                ..Default::default()
+            });
             return;
         }
     }
@@ -678,12 +723,12 @@ fn handle_connection(
         Ok(b) => b,
         Err(e) if e.kind() == ErrorKind::TimedOut => {
             let resp = Response::error("", "handshake deadline exceeded");
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::Handshake, resp);
             return;
         }
         Err(e) => {
             let resp = Response::error("", &format!("read error: {e}"));
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::Read, resp);
             return;
         }
     };
@@ -698,10 +743,15 @@ fn handle_connection(
         Ok(r) => r,
         Err(e) => {
             let resp = Response::error("", &format!("invalid JSON: {e}"));
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::InvalidJson, resp);
             return;
         }
     };
+    // Unvalidated until `validate` succeeds; `audit` escapes and clips them.
+    ev.id = req.id.clone();
+    ev.session = req.session.clone();
+    ev.host = req.host.clone();
+    ev.requester = req.requester.clone();
 
     // Validate before anything privileged can touch the request. `exec_*` and
     // `prompter.prompt` accept only `&ValidatedRequest`, so this conversion is
@@ -712,10 +762,11 @@ fn handle_connection(
         Ok(v) => v,
         Err(msg) => {
             let resp = Response::error(&req_id, &msg);
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::Invalid, resp);
             return;
         }
     };
+    ev.privileged = Some(req.effective_privileged());
 
     // Agent forwarding is unprivileged-only. A privileged child runs under
     // sudo (which env_resets) or pkexec (which we env_clear), so the socket
@@ -727,7 +778,7 @@ fn handle_connection(
             &req.id,
             "forward_agent is only allowed for unprivileged commands",
         );
-        let _ = write_response(&mut stream, &resp);
+        reject(&mut stream, &ev, Reject::ForwardAgent, resp);
         return;
     }
 
@@ -736,7 +787,7 @@ fn handle_connection(
     // behind another user's prompt.
     if let Err(msg) = check_freshness(&req) {
         let resp = Response::error(&req.id, &msg);
-        let _ = write_response(&mut stream, &resp);
+        reject(&mut stream, &ev, Reject::Time, resp);
         return;
     }
 
@@ -744,7 +795,7 @@ fn handle_connection(
         Ok(e) => e,
         Err(msg) => {
             let resp = Response::error(&req.id, &msg);
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::Env, resp);
             return;
         }
     };
@@ -762,7 +813,7 @@ fn handle_connection(
         if !ids.try_insert(req.id.clone()) {
             drop(ids);
             let resp = Response::error(&req.id, &format!("duplicate request id: {}", req.id));
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::DuplicateId, resp);
             return;
         }
     }
@@ -779,6 +830,8 @@ fn handle_connection(
             }
             let mut resp = Response::ok(&req.id, vec![], b"");
             resp.message = Some("pong".to_string());
+            ev.outcome = Some(Outcome::Ping);
+            audit.record(&ev);
             let _ = write_response(&mut stream, &resp);
             return;
         }
@@ -789,7 +842,7 @@ fn handle_connection(
                 .and_then(|t| check_not_before_start(t, started_epoch));
             if let Err(msg) = gate {
                 let resp = Response::error(&req.id, &msg);
-                let _ = write_response(&mut stream, &resp);
+                reject(&mut stream, &ev, Reject::StopBeforeStart, resp);
                 return;
             }
             // No approval prompt (by design): a same-UID peer can already
@@ -805,6 +858,8 @@ fn handle_connection(
             // Reply before flipping the flag so the client reliably reads
             // the Ok response before the process exits.
             let resp = Response::ok(&req.id, vec![], b"");
+            ev.outcome = Some(Outcome::Stop);
+            audit.record(&ev);
             let _ = write_response(&mut stream, &resp);
             shutdown.store(true, Ordering::Relaxed);
             return;
@@ -820,7 +875,7 @@ fn handle_connection(
         Ok(v) => v,
         Err(msg) => {
             let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::InvalidPlan, resp);
             return;
         }
     };
@@ -840,12 +895,13 @@ fn handle_connection(
                     v.stage_id
                 ),
             );
-            let _ = write_response(&mut stream, &resp);
+            reject(&mut stream, &ev, Reject::NoShell, resp);
             return;
         }
     }
 
     let effective_privileged = req.effective_privileged();
+    ev.command = Some(crate::tui::command_summary(&req));
 
     if verbose {
         let priv_label = if effective_privileged {
@@ -873,10 +929,10 @@ fn handle_connection(
     // prompt (and sudo) like any other privileged plan.
     let use_pkexec = pkexec_only && mode == Mode::Local && req.privileged;
 
-    let resp = if effective_privileged {
+    let (resp, outcome) = if effective_privileged {
         if use_pkexec {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
-            exec_pkexec(&req, &env, &tty_lock)
+            (exec_pkexec(&req, &env, &tty_lock), Outcome::Pkexec)
         } else {
             // The TTY lock is shared with `executor::ForegroundGuard`, so a
             // prompt blocks until any in-flight exec has released the
@@ -890,40 +946,39 @@ fn handle_connection(
                 prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
             };
             match prompt_result {
-                Ok(tui::PromptResult::Approved) => exec_sudo(&req, &env, &tty_lock),
+                Ok(tui::PromptResult::Approved) => {
+                    (exec_sudo(&req, &env, &tty_lock), Outcome::Approved)
+                }
                 // The TUI never emits ApprovedAlways for privileged
                 // requests; treat defensively as denial if it ever
                 // appears here so no policy can pre-grant root.
                 Ok(tui::PromptResult::ApprovedAlways)
-                | Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
-                Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+                | Ok(tui::PromptResult::Denied) => (Response::denied(&req.id), Outcome::Denied),
+                Ok(tui::PromptResult::Timeout) => (Response::timeout(&req.id), Outcome::Timeout),
                 Err(e) => {
                     log_prompt_io_error(verbose, &req.id, &e);
-                    Response::error(&req.id, &format!("prompt error: {e}"))
+                    (
+                        Response::error(&req.id, &format!("prompt error: {e}")),
+                        Outcome::PromptError,
+                    )
                 }
             }
         }
     } else if unattended_grants.is_granted(&req.session) {
         // This request's session holds a grant: this daemon is eligible AND a
         // human pressed `a` on an earlier request from the same `session`. Run
-        // unattended. Other sessions are unaffected (issue #8). The audit line
-        // is UNCONDITIONAL — in this no-prompt window it is the reliable record
-        // of what ran, and unlike the TTY banner it never depends on the
-        // tty_lock, so an unprivileged command is never blocked behind an
-        // in-flight privileged prompt. The TTY banner stays best-effort
-        // (try_lock) for on-screen visibility. The grant lives only in memory
-        // and dies with the daemon/tunnel; it is never persisted.
-        eprintln!(
-            "[{}] [unattended] [session {}]{} {}",
-            req.id,
-            req.session,
-            requester_tag(&req),
-            crate::tui::command_summary(&req)
-        );
+        // unattended. Other sessions are unaffected (issue #8). The audit
+        // record (written below, unconditionally, with session and requester)
+        // is the reliable record of what ran in this no-prompt window, and
+        // unlike the TTY banner it never depends on the tty_lock, so an
+        // unprivileged command is never blocked behind an in-flight privileged
+        // prompt. The TTY banner stays best-effort (try_lock) for on-screen
+        // visibility. The grant lives only in memory and dies with the
+        // daemon/tunnel; it is never persisted.
         if let Ok(_g) = tty_lock.try_lock() {
             let _ = tui::display_banner(&req);
         }
-        exec_direct(&req, &env)
+        (exec_direct(&req, &env), Outcome::Unattended)
     } else {
         // Default unprivileged path: prompt every command. `a` is offered only
         // when eligible; on an eligible daemon an `a` press approves this
@@ -934,20 +989,27 @@ fn handle_connection(
             prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
         };
         match prompt_result {
-            Ok(tui::PromptResult::Approved) => exec_direct(&req, &env),
+            Ok(tui::PromptResult::Approved) => (exec_direct(&req, &env), Outcome::Approved),
             Ok(tui::PromptResult::ApprovedAlways) => {
                 // Grant the session only when eligible — never persisted, no
                 // hosts.json write. Barrier 1 (eligibility) gates barrier 2.
-                if unattended_eligible {
+                // When not eligible, `a` degrades to approve-once.
+                let outcome = if unattended_eligible {
                     unattended_grants.grant(&req.session);
-                }
-                exec_direct(&req, &env)
+                    Outcome::ApprovedSession
+                } else {
+                    Outcome::Approved
+                };
+                (exec_direct(&req, &env), outcome)
             }
-            Ok(tui::PromptResult::Denied) => Response::denied(&req.id),
-            Ok(tui::PromptResult::Timeout) => Response::timeout(&req.id),
+            Ok(tui::PromptResult::Denied) => (Response::denied(&req.id), Outcome::Denied),
+            Ok(tui::PromptResult::Timeout) => (Response::timeout(&req.id), Outcome::Timeout),
             Err(e) => {
                 log_prompt_io_error(verbose, &req.id, &e);
-                Response::error(&req.id, &format!("prompt error: {e}"))
+                (
+                    Response::error(&req.id, &format!("prompt error: {e}")),
+                    Outcome::PromptError,
+                )
             }
         }
     };
@@ -965,6 +1027,9 @@ fn handle_connection(
             let _ = result_sink.display(&resp);
         }
     }
+
+    ev.outcome = Some(outcome);
+    audit.record(&ev.with_response(&resp));
 
     let _ = write_response(&mut stream, &resp);
 }

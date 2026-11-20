@@ -52,7 +52,7 @@ invariant at a given boundary are omitted.
 |--------|--------|---------|-----|
 | Spoofing | Caller identity is unauthenticated. | By design any caller is treated as adversarial; safety does not depend on caller identity — the human gate does. | G5, G6.1 |
 | Tampering | Crafted `argv`/`env`/`description` misrepresents intent. | argv/env validation; `description`→`reason` sanitized at the daemon. | G3.3, G4.1 / F1 |
-| Repudiation | No per-request record of what was approved. | Server `-v` request log (audit-log-to-file not yet implemented). | — (gap) |
+| Repudiation | No per-request record of what was approved, or of rejected probes (replays, malformed / stale requests). | Audit log, on by default: one record per connection outcome (approved, denied, timeout, unattended, every rejection reason) with an RFC 3339 timestamp, peer UID, id, session, host and, for validated requests, the command — to stderr, an append-only 0600 JSONL file, and syslog (`LOG_AUTHPRIV`). Env values and `reason` are never recorded. | #65 (residual below) |
 | DoS | Oversized / flooding requests block the gate. | 1 MiB request cap, 64 in-flight cap. | G6.4 |
 | Elevation | Obtain root without approval. | Unconditional human gate on `privileged:true`. | G5, G6.1 |
 
@@ -172,9 +172,12 @@ is unaccounted for. The residuals — already on record and accepted — are:
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no
   `StrictHostKeyChecking`; safety depends on the remote being in `known_hosts`
   first, or configuring `StrictHostKeyChecking=accept-new`.
-- **B1 Repudiation gap.** There is no audit-log-to-file yet (listed under "Not
-  yet implemented" in [architecture.md](architecture.md)); the `-v` server log
-  is the only record.
+- **B1 Repudiation (#65, narrowed).** Every outcome is now recorded, but the
+  JSONL file is owned by the daemon's UID — the same UID as the agent — so it
+  is append-only by convention only: a same-UID process can truncate or rewrite
+  it. It is tamper-evident against other users, not against the requester. The
+  syslog copy, held by the system logger, is the stronger record; ship it off
+  the host for a record the requester cannot reach.
 
 These residuals were the inputs to **Rung 4**, now discharged
 ([roadmap](formalisation-roadmap.md#the-rigor-ladder)): the policy-transition

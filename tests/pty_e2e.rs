@@ -47,6 +47,22 @@ fn approve_unprivileged_runs_and_shows_result() {
     assert!(d.shim_log().is_empty(), "unprivileged run must not go through sudo");
 }
 
+/// The real binary writes its audit log by default (issue #65), under the
+/// harness's `HOME` since `XDG_STATE_HOME` is unset.
+#[test]
+fn default_audit_log_records_the_outcome() {
+    let mut d = PtyDaemon::spawn(PtyOpts::default());
+    let h = d.request_async(&req("pty-audit-1", &["true"], "pty audit"));
+    d.answer(b'n');
+    assert_eq!(h.join().unwrap().status, Status::Denied);
+
+    let path = d.dir().join("home/.local/state/sudo-proxy/audit.jsonl");
+    let recs = common::read_audit(&path);
+    assert_eq!(recs.len(), 1, "{recs:?}");
+    assert_eq!(recs[0]["id"], "pty-audit-1");
+    assert_eq!(recs[0]["outcome"], "denied");
+}
+
 #[test]
 fn deny_with_n_and_with_enter() {
     let mut d = PtyDaemon::spawn(PtyOpts::default());
