@@ -1,0 +1,19 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-wrappers
+Reason:  ui golden wrappers
+Command: sudo env X=1 true; sudo timeout 5 sh -c true
+Resolves:
+  env      <PATH>
+  true     <PATH>
+  timeout  <PATH>
+  sh       <PATH>
+Steps:
+0  sudo env X=1 true ;
+1  sudo timeout 5 sh -c true
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━
