@@ -17,8 +17,9 @@ only through `run-as`) gets the TUI prompt and runs through sudo; a `--pkexec`
 user without sudo rights now gets a sudo failure after approving such a plan,
 as `run-as` plans already did, and these requests are audited as
 `approved`/`denied`/`timeout` instead of `pkexec`. Unchanged: the dialog still
-names `/usr/bin/env` and omits env and accepted exit codes (backlog items 6
-and 7). Tests: a unit table for the predicate, `tests/plan_exec.rs`
+names `/usr/bin/env` and omits env and accepted exit codes (backlog items
+"pkexec dialog names `/usr/bin/env`" and "Does a single-leaf plan's `setenv`
+reach the program under `--pkexec`?"). Tests: a unit table for the predicate, `tests/plan_exec.rs`
 `pkexec_mode_prompts_for_multi_leaf_privileged_plans` (run/seq/alt/pipe,
 redirect, with-stdin-from; one `denied` audit record each, none `pkexec`), and
 the pty test `pkexec_flag_multi_step_plan_gets_the_tui_prompt` through the real

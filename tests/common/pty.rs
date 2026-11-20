@@ -14,7 +14,8 @@
 //! `ICANON` cleared before writing the key.
 //!
 //! The daemon runs with a cleared environment: no `DISPLAY`/`WAYLAND_DISPLAY`
-//! unless `PtyOpts::env` sets one (so `Mode::Remote`: TUI prompt + sudo), a private `HOME`/`XDG_CONFIG_HOME`
+//! (so `Mode::Remote`: TUI prompt + sudo) unless `PtyOpts::env` sets one, a
+//! private `HOME`/`XDG_CONFIG_HOME`
 //! (no developer `hosts.json` policy leaks in), and `tests/shims` first on
 //! `PATH`, so privileged steps reach the logging `sudo` shim, not real sudo.
 

@@ -400,9 +400,12 @@ fn pkexec_mode_prompts_for_multi_leaf_privileged_plans() {
         pkexec_only: true,
         ..Default::default()
     });
-    server
-        .prompter
-        .set_response(|_| (std::time::Duration::ZERO, sudo_proxy::tui::PromptResult::Denied));
+    server.prompter.set_response(|_| {
+        (
+            std::time::Duration::ZERO,
+            sudo_proxy::tui::PromptResult::Denied,
+        )
+    });
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let target = dir.path().join("redirected");
     let leaf = |n: &str| exec(&[NO_SUCH, n]);
@@ -456,7 +459,10 @@ fn pkexec_mode_prompts_for_multi_leaf_privileged_plans() {
         assert_eq!(rec["outcome"], "denied", "{name}: {rec}");
         assert_eq!(server.audit_records().len(), i + 1, "{name}: record count");
     }
-    assert!(!target.exists(), "a redirect target was opened without approval");
+    assert!(
+        !target.exists(),
+        "a redirect target was opened without approval"
+    );
 
     let records = server.audit_records();
     assert_eq!(records.len(), shapes.len());
