@@ -18,6 +18,9 @@ struct Opts {
     /// `None` = take the default from `hosts.json` (`policy.unattended_eligible`).
     /// `Some(_)` = an explicit CLI flag was passed and overrides the file.
     unattended_eligible: Option<bool>,
+    /// `None` = take the default from `hosts.json` (`policy.no_shell`).
+    /// `Some(_)` = `--no-shell` / `--allow-shell` was passed and overrides it.
+    no_shell: Option<bool>,
     forward_agent: bool,
 }
 
@@ -37,7 +40,14 @@ fn main() {
             }
         }
         let target = sudo_proxy::hosts::ssh_target(host, opts.login.as_deref());
-        run_remote(&target, opts.verbose, opts.forward_agent);
+        // `--no-shell` only tightens, so it is forwarded to the remote daemon
+        // (an older remote rejects the unknown flag and fails closed).
+        // Loosening a remote's own `policy.no_shell` from here is refused.
+        if opts.no_shell == Some(false) {
+            eprintln!("error: --allow-shell is not forwarded with --host; edit policy.no_shell in the remote hosts.json");
+            process::exit(1);
+        }
+        run_remote(&target, opts.verbose, opts.forward_agent, opts.no_shell == Some(true));
         // run_remote execs into ssh, so we only get here on error
         return;
     }
@@ -79,23 +89,33 @@ fn main() {
     let in_flight = Arc::new(AtomicUsize::new(0));
     let tty_lock = Arc::new(Mutex::new(()));
 
-    // Resolve unattended eligibility: explicit CLI flag wins; otherwise the
-    // persisted `policy.unattended_eligible` in hosts.json; otherwise the
-    // built-in default (off, fail-closed). This is barrier 1 of G7 — an
-    // out-of-band operator opt-in; nothing on the wire can change it.
-    // The file's policy is trusted only if no other principal could have
-    // written it (StrictModes-style check); otherwise fail closed.
-    let unattended_eligible = opts.unattended_eligible.unwrap_or_else(|| {
-        match sudo_proxy::hosts::load_trusted_policy() {
-            Ok(p) => p.unattended_eligible,
-            Err(why) => {
-                eprintln!(
-                    "sudo-proxy: ignoring hosts.json policy (not unattended-eligible): {why}"
-                );
-                false
-            }
+    // Resolve both hosts.json policy settings: an explicit CLI flag wins;
+    // otherwise the file's `policy`; otherwise the built-in default. The file
+    // is read only if a flag is missing, and trusted only if no other
+    // principal could have written it (StrictModes-style check,
+    // GHSA-xx2m-j9f7-gcmr). An untrusted file fails closed for each setting:
+    // not unattended-eligible (barrier 1 of G7, an out-of-band operator
+    // opt-in that nothing on the wire can change), and strict no-shell mode
+    // on, so a writable file cannot quietly switch it off.
+    let policy = (opts.unattended_eligible.is_none() || opts.no_shell.is_none())
+        .then(sudo_proxy::hosts::load_trusted_policy);
+    if let Some(Err(why)) = &policy {
+        let mut effects = Vec::new();
+        if opts.unattended_eligible.is_none() {
+            effects.push("not unattended-eligible");
         }
-    });
+        if opts.no_shell.is_none() {
+            effects.push("no_shell on");
+        }
+        eprintln!("sudo-proxy: ignoring hosts.json policy ({}): {why}", effects.join(", "));
+    }
+    let policy = policy.and_then(Result::ok);
+    let unattended_eligible = opts
+        .unattended_eligible
+        .unwrap_or_else(|| policy.as_ref().is_some_and(|p| p.unattended_eligible));
+    let no_shell = opts
+        .no_shell
+        .unwrap_or_else(|| policy.as_ref().is_none_or(|p| p.no_shell));
 
     let config = server::ServerConfig {
         mode,
@@ -103,6 +123,7 @@ fn main() {
         verbose: opts.verbose,
         log_json: opts.log_json,
         unattended_eligible,
+        no_shell,
         ..Default::default()
     };
 
@@ -147,6 +168,7 @@ fn parse_args(args: &[String]) -> Opts {
     // Tri-state: None means "no CLI flag passed, use hosts.json policy",
     // Some(_) means an explicit flag overrides the file.
     let mut unattended_eligible: Option<bool> = None;
+    let mut no_shell: Option<bool> = None;
     let mut forward_agent = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
@@ -168,10 +190,12 @@ fn parse_args(args: &[String]) -> Opts {
             "--log-json" => log_json = true,
             "--unattended-eligible" => unattended_eligible = Some(true),
             "--no-unattended-eligible" => unattended_eligible = Some(false),
+            "--no-shell" => no_shell = Some(true),
+            "--allow-shell" => no_shell = Some(false),
             "--forward-agent" => forward_agent = true,
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--forward-agent]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -188,6 +212,11 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              the grant is in-memory only and never persisted)");
                 eprintln!("                              Without the flag, hosts.json's policy is used only if the file");
                 eprintln!("                              and its directories are yours and not group/world-writable");
+                eprintln!("  --no-shell                  Reject, before prompting, any request with an opaque stage:");
+                eprintln!("                              a `shell` op or an `exec` of a shell (sh -c, bash script.sh)");
+                eprintln!("                              (overrides hosts.json policy.no_shell; forwarded with --host)");
+                eprintln!("  --allow-shell               Allow opaque stages (flagged at the prompt) even if hosts.json");
+                eprintln!("                              sets policy.no_shell (local daemon only)");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 std::process::exit(0);
@@ -206,6 +235,7 @@ fn parse_args(args: &[String]) -> Opts {
         verbose,
         log_json,
         unattended_eligible,
+        no_shell,
         forward_agent,
     }
 }
@@ -254,7 +284,7 @@ unsafe fn signal_hook_cleanup(path: PathBuf) {
 }
 
 /// Connect to a remote host: resolve UID, set up SSH tunnel, exec into SSH.
-fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
+fn run_remote(host: &str, verbose: bool, forward_agent: bool, no_shell: bool) {
     use std::os::unix::process::CommandExt;
     use sudo_proxy::hosts::HostsConfig;
 
@@ -306,6 +336,9 @@ fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
     }
     ssh_args.push(host);
     ssh_args.push("sudo-proxy");
+    if no_shell {
+        ssh_args.push("--no-shell");
+    }
 
     if verbose {
         eprintln!("+ ssh {}", ssh_args.join(" "));

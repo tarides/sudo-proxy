@@ -163,7 +163,10 @@ pub struct ExecuteParams {
     /// {"op":"run-as","as":"root","do":{...}} or {"op":"run-as","as":"user","name":"alice","do":{...}};
     /// {"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{...}};
     /// {"op":"setenv","key":"LANG","value":"C","do":{...}}; {"op":"chdir","dir":"/srv","do":{...}};
-    /// {"op":"shell","shell":"bash","script":"..."} (explicit opaque escape hatch).
+    /// {"op":"shell","shell":"bash","script":"..."} (explicit opaque escape hatch;
+    /// an exec whose program is a shell, e.g. ["sh","-c",...], is flagged opaque
+    /// the same way, and a daemon in no_shell mode rejects both — prefer
+    /// run/seq/alt/pipe/redirect over a shell).
     /// Rules: paths in chdir / redirect / with-stdin-from must be absolute; a
     /// stream may be redirected at most once along any path; with-stdin-from is
     /// allowed only on the first stage of a pipe; env keys must be shell

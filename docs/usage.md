@@ -34,6 +34,25 @@ Pass `--unattended-eligible` when starting a daemon to make it eligible without
 editing the file (the session grant still needs the `a` keypress; it is never
 persisted).
 
+## Strict no-shell mode
+
+Every structured op exists so a shell feature need not be expressed by shelling
+out. A stage that *does* run a shell — an explicit `shell` op, or an `exec`
+whose program is a shell (`sh -c '…'`, `bash script.sh`, a renamed symlink to
+one) — hides its inner commands from the prompt, so it is flagged
+**opaque — resolves only the shell**.
+
+An operator who wants "structured or nothing" can reject such requests outright,
+before any prompt: set `"policy": {"no_shell": true}` in the host's
+`~/.config/sudo-proxy/hosts.json`, or start the daemon with `--no-shell`
+(`--allow-shell` overrides the file for a local daemon). `--no-shell` is
+forwarded to the remote daemon with `--host`; to *loosen* a remote's own
+policy, edit its hosts.json. As with `unattended_eligible`, the file's policy
+is trusted only if the file and its directories are yours and not group- or
+world-writable; otherwise the daemon warns and fails closed, here meaning strict
+mode **on**. Wrappers (`env sh -c`, `nice bash …`) and other
+interpreters (`python -c`) are not detected yet.
+
 ## Command-line
 
 ```bash
@@ -53,6 +72,10 @@ sudo-proxy --host remotehost -v     # prints the ssh command before connecting
 # which grants an in-memory, never-persisted session grant). Equivalent to
 # setting "unattended_eligible": true in this host's hosts.json.
 sudo-proxy --unattended-eligible
+
+# Reject opaque stages (shell op, exec of sh/bash/…) before prompting.
+# Equivalent to "policy": {"no_shell": true} in hosts.json.
+sudo-proxy --no-shell
 
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock

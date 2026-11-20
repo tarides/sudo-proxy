@@ -43,6 +43,14 @@ pub struct Policy {
     /// command until an operator deliberately edits the file.
     #[serde(default)]
     pub unattended_eligible: bool,
+    /// Strict "structured or nothing" mode. When `true`, this daemon rejects,
+    /// before prompting, any request with an opaque stage: an explicit `Shell`
+    /// node or an `exec` whose program is a shell (`sh -c '…'`,
+    /// `bash script.sh`). Default `false`: such stages are allowed but flagged
+    /// "opaque" at the prompt. A `--no-shell` / `--allow-shell` CLI flag
+    /// overrides it.
+    #[serde(default)]
+    pub no_shell: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]

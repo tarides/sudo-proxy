@@ -248,3 +248,18 @@ fn world_writable_hosts_json_policy_is_ignored() {
         "a root-owned sticky ancestor must not cause a rejection"
     );
 }
+
+/// `policy.no_shell` defaults to false when absent (existing configs keep
+/// working) and round-trips when set.
+#[test]
+fn policy_no_shell_defaults_off_and_roundtrips() {
+    let cfg: HostsConfig = serde_json::from_str(r#"{"policy":{"unattended_eligible":true}}"#)
+        .expect("parse");
+    assert!(!cfg.policy.no_shell);
+    let cfg: HostsConfig =
+        serde_json::from_str(r#"{"policy":{"no_shell":true}}"#).expect("parse");
+    assert!(cfg.policy.no_shell);
+    let back: HostsConfig =
+        serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).expect("reparse");
+    assert!(back.policy.no_shell);
+}

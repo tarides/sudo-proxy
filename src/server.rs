@@ -457,6 +457,11 @@ pub struct ServerConfig {
     /// thereafter — no wire field, MCP flag, or keypress changes it. Default
     /// `false` (fail-closed): every unprivileged command is prompted.
     pub unattended_eligible: bool,
+    /// Strict "structured or nothing" mode: reject, before prompting, any
+    /// request with an opaque stage (a `Shell` node, or an `Exec` of a shell).
+    /// Read from `policy.no_shell` in `hosts.json` or `--no-shell` /
+    /// `--allow-shell` at startup; immutable thereafter. Default `false`.
+    pub no_shell: bool,
     pub max_in_flight: usize,
 }
 
@@ -468,6 +473,7 @@ impl Default for ServerConfig {
             verbose: false,
             log_json: false,
             unattended_eligible: false,
+            no_shell: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
         }
     }
@@ -558,6 +564,7 @@ pub fn run(
         let pkexec_only = config.pkexec_only;
         let verbose = config.verbose;
         let log_json = config.log_json;
+        let no_shell = config.no_shell;
         let unattended_grants = Arc::clone(&unattended_grants);
         let shutdown = Arc::clone(&shutdown);
         thread::spawn(move || {
@@ -570,6 +577,7 @@ pub fn run(
                 verbose,
                 log_json,
                 unattended_eligible,
+                no_shell,
                 unattended_grants,
                 prompter,
                 sink,
@@ -640,6 +648,7 @@ fn handle_connection(
     verbose: bool,
     log_json: bool,
     unattended_eligible: bool,
+    no_shell: bool,
     unattended_grants: Arc<UnattendedGrants>,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
@@ -807,10 +816,33 @@ fn handle_connection(
     // disallowed setenv) before prompting — the human should never be asked to
     // approve something the executor cannot run. Cheap compile; the executor
     // compiles again at run time.
-    if let Err(msg) = crate::executor::plan_display(&req) {
-        let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
-        let _ = write_response(&mut stream, &resp);
-        return;
+    let views = match crate::executor::plan_display(&req) {
+        Ok(v) => v,
+        Err(msg) => {
+            let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
+    };
+
+    // Strict no-shell policy: reject any opaque stage (a `Shell` node or an
+    // `Exec` of a shell) before prompting and before the unattended grant or
+    // `--pkexec` paths. It reads the same `opaque` bit the prompt renders, so
+    // what the prompt would flag is exactly what is refused.
+    if no_shell {
+        if let Some(v) = views.iter().find(|v| v.opaque) {
+            let prog = v.argv.first().map(String::as_str).unwrap_or("");
+            let resp = Response::error(
+                &req.id,
+                &format!(
+                    "shell escape hatch rejected by policy (no_shell): stage {} runs {prog}; \
+                     express it with structured ops (run/seq/alt/pipe/redirect/setenv/chdir/run-as)",
+                    v.stage_id
+                ),
+            );
+            let _ = write_response(&mut stream, &resp);
+            return;
+        }
     }
 
     let effective_privileged = req.effective_privileged();

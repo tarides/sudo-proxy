@@ -110,6 +110,8 @@ pub struct TestServerOpts {
     /// answer. Default `false` (fail-closed) — every unprivileged command is
     /// prompted. Set `true` to exercise the granted (unattended) path.
     pub unattended_eligible: bool,
+    /// Strict `no_shell` policy: reject opaque stages before prompting.
+    pub no_shell: bool,
     pub pkexec_only: bool,
     pub mode: Mode,
     pub max_in_flight: usize,
@@ -119,6 +121,7 @@ impl Default for TestServerOpts {
     fn default() -> Self {
         Self {
             unattended_eligible: false,
+            no_shell: false,
             pkexec_only: false,
             mode: Mode::Local,
             max_in_flight: sudo_proxy::server::DEFAULT_MAX_IN_FLIGHT,
@@ -160,6 +163,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             verbose: false,
             log_json: false,
             unattended_eligible: opts.unattended_eligible,
+            no_shell: opts.no_shell,
             max_in_flight: opts.max_in_flight,
         };
         // Coercion to Arc<dyn Trait> happens here at the function-argument

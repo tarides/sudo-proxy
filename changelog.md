@@ -3,6 +3,39 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Close the `exec sh -c` loophole; strict `no_shell` policy (#67)
+
+**The gap.** Only an explicit `shell` op was flagged *opaque* at the prompt. A
+plain `exec` of `["sh","-c","…"]` (or a flat-pipeline stage) put a whole shell on
+the path but rendered as a tame exec stage resolving `/usr/bin/sh`, quietly
+defeating the "make `Shell` avoidable" goal. And the strict mode that
+`protocol.rs` promised did not exist.
+
+- **Opaque detection** (`src/executor.rs`, `push_leaf`). A step whose program is
+  a shell interpreter (`sh`, `bash`, `dash`, `zsh`, `ksh`, `mksh`, `ash`, `fish`,
+  `csh`, `tcsh`, `yash`, `posh`) is opaque. It is matched by name, by path, or by
+  the canonical resolved binary, with or without `-c`. Every step goes through
+  `push_leaf`, so the prompt and the policy read the same bit.
+- **Strict policy.** `"policy": {"no_shell": true}` in `hosts.json`, or
+  `--no-shell` / `--allow-shell` (same tri-state as `unattended_eligible`),
+  rejects any request with an opaque step before prompting, ahead of the TUI,
+  `--pkexec` and unattended paths. `--no-shell` is forwarded with `--host`;
+  `--allow-shell` is refused there. The file is read through the same
+  owner-private check as `unattended_eligible` (GHSA-xx2m-j9f7-gcmr); if it
+  fails, strict mode is **on** (fail closed), so a file another user can write
+  cannot switch it off.
+- **Tests.** `tests/no_shell.rs` checks six opaque shapes rejected without a
+  prompt, structured requests still running, and everything prompted when the
+  policy is off. There are unit tests for detection (including a renamed
+  symlink), the TUI render, and the serde default. Docs: `docs/usage.md`
+  "Strict no-shell mode".
+- **Not covered.** Shells behind wrappers (`env`, `nice`, `timeout`) and other
+  interpreters. Folded into the `env`-resolution follow-up in the backlog.
+
+Verified live by driving the real daemon through a pty (`script(1)`): the
+permissive daemon flagged `sh` as opaque and ran on `y`; `--no-shell` returned
+the policy error with no prompt. That probe became backlog item #1 / issue #68.
+
 ## Unreleased — a captured `stop` no longer stops a restarted daemon (#63)
 
 Replay protection (`SeenIds`) keeps the ids it has seen in memory, one set per
