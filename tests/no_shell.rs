@@ -53,6 +53,15 @@ fn opaque_requests() -> Vec<Request> {
             "pipe-env-bash",
             Plan::Pipe { stages: vec![exec(&["echo", "x"]), exec(&["env", "bash", "-c", "cat"])] },
         ),
+        // Review C2: `-printf` absorbs the first `-exec`; find runs the second.
+        plan_req(
+            "find-printf-exec",
+            exec(&["find", ".", "-maxdepth", "0", "-printf", "-exec", "-exec", "sh", "-c", "true", ";"]),
+        ),
+        // Review C3: uutils `timeout` skips the `--` and runs `sh`.
+        plan_req("timeout-dashdash-sh", exec(&["timeout", "5", "--", "sh", "-c", "true"])),
+        // Review C4: xargs takes its program from its input (stdin is empty).
+        plan_req("xargs-replace", exec(&["xargs", "-I{}", "{}"])),
     ];
     if sudo_proxy::executor::resolve_command("coreutils", "/").is_some() {
         reqs.push(plan_req("coreutils-env-sh", exec(&["coreutils", "env", "sh", "-c", "true"])));
@@ -66,6 +75,9 @@ fn opaque_requests() -> Vec<Request> {
 fn opaque_rejected_only() -> Vec<Request> {
     vec![
         plan_req("python3-c", exec(&["python3", "-c", "print(1)"])),
+        // Review C1: inline code attached after a switch cluster.
+        plan_req("python3-Bc-attached", exec(&["python3", "-Bcprint(1)", "foo"])),
+        plan_req("perl-le-attached", exec(&["perl", "-le'print 1'", "/dev/null"])),
         plan_req("sudo-true", exec(&["sudo", "true"])),
         plan_req("env-split", exec(&["env", "-S", "true"])),
         plan_req("env-path", exec(&["env", "PATH=/tmp", "true"])),

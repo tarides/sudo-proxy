@@ -880,15 +880,17 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
     let mut entries: Vec<(String, String)> = Vec::new();
     for view in views {
         for (i, prog) in view.programs.iter().enumerate() {
-            let suffix = match (&prog.via, prog.runtime_lookup) {
-                (Some(v), true) => format!(" {dim}(run by {v}; looked up at run time){reset}"),
-                (Some(v), false) => format!(" {dim}(run by {v}){reset}"),
-                (None, _) => String::new(),
+            let no_path = prog.runtime_lookup || prog.applet;
+            let suffix = match (&prog.via, prog.applet, prog.runtime_lookup) {
+                (Some(v), true, _) => format!(" {dim}(applet of {v}){reset}"),
+                (Some(v), false, true) => format!(" {dim}(run by {v}; looked up at run time){reset}"),
+                (Some(v), false, false) => format!(" {dim}(run by {v}){reset}"),
+                (None, ..) => String::new(),
             };
-            let path = prog.resolved.as_deref().filter(|_| !prog.runtime_lookup);
+            let path = prog.resolved.as_deref().filter(|_| !no_path);
             let detail = match view.opaque_reason.as_ref().filter(|o| o.at == i) {
                 Some(o) => {
-                    let text = if !o.names_program || prog.runtime_lookup {
+                    let text = if !o.names_program || no_path {
                         o.reason.clone()
                     } else {
                         match path {
@@ -899,7 +901,7 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                     };
                     format!("{bold}opaque — {text}{reset}{suffix}")
                 }
-                None if prog.runtime_lookup => suffix.trim_start().to_string(),
+                None if no_path => suffix.trim_start().to_string(),
                 None => format!("{}{suffix}", resolve_detail(path, style)),
             };
             if seen.insert(format!("{}\u{0}{detail}", prog.name)) {
@@ -1372,6 +1374,16 @@ mod tests {
         let line = out.lines().find(|l| l.trim_start().starts_with("true ")).unwrap_or_else(|| panic!("{out}"));
         assert!(line.contains("(run by env)") && line.contains('/'), "{out}");
         assert!(!out.contains("opaque"), "{out}");
+    }
+
+    /// Review C5: an applet of a multi-call dispatcher shows no path, since
+    /// the dispatcher runs its built-in applet.
+    #[test]
+    fn applet_renders_without_a_path() {
+        let out = render_plan(exec(&["busybox", "sh", "-c", "true"]));
+        let line = out.lines().find(|l| l.trim_start().starts_with("sh ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("opaque — resolves only the shell (applet of busybox)"), "{out}");
+        assert!(!line.contains('/'), "{out}");
     }
 
     /// For an escalated stage the wrapper looks its program up at run time, on

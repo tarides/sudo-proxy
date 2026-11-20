@@ -65,8 +65,9 @@ each one:
   each optionally followed by digits and dots only (`python3.12`, `perl5.38.2`;
   not `python3-config` or `perlcritic`), plus `pypy`, `pypy3`, `luajit`,
   `node`, `nodejs` and `Rscript`. Opaque with an inline-code flag (`-c`,
-  `-e`, `-E`, `-p`, `--eval`, `-r`, …) or with no script operand (the program
-  is read from stdin). A script or module (`python3 x.py`, `-m pip`) is not
+  `-e`, `-E`, `-p`, `--eval`, `-r`, …), also inside a switch cluster or with
+  the code attached (`python3 -Bcprint(1)`, `perl -le'…'`), or with no script
+  operand (the program is read from stdin). A script or module (`python3 x.py`, `-m pip`) is not
   flagged;
 - **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
   `unshare`, `nsenter`, `flock`, `watch`, `script`, `ssh`, `systemd-run`):
@@ -79,17 +80,25 @@ uutils accepts more spellings than GNU, and those are rejected too), a missing
 option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
 changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
 assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
-`BASH_ENV`, `ENV`, `IFS`), a `find -exec` program word containing `{}`, a
-dispatcher called with an option (`busybox --list`), a name whose resolved
-binary is a different wrapper, and a chain deeper than 8. As in GNU `env`,
-`--` ends `env`'s options only before the first assignment:
-`env X=1 -- true` runs a program named `--`.
+`BASH_ENV`, `ENV`, `IFS`), a `find -exec` program word containing `{}`, an
+action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
+command (a test such as `-printf` may have absorbed the one before it), an
+`xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
+word, a dispatcher called with an option (`busybox --list`), a name whose
+resolved binary is a different wrapper, and a chain deeper than 8. A `--`
+ends a wrapper's options only before its operands and assignments; a `--`
+where the program is expected (`timeout 5 -- sh`, `env X=1 -- true`) fails
+closed, since uutils `timeout` and util-linux `chrt` skip it and run the next
+word while GNU `env` runs a program named `--`.
 
 The `Resolves:` block lists every program, the wrapped ones with
 `(run by <wrapper>)`. For an escalated stage the wrapper looks its program up
 at run time on sudo's `secure_path` (or pkexec's environment), so that entry
 shows the name only, with `(run by <wrapper>; looked up at run time)`; shell
 and interpreter detection is by name first and does not depend on that lookup.
+An applet of a multi-call dispatcher (`busybox sh`) is shown with
+`(applet of busybox)` and no path: the dispatcher runs its built-in applet,
+not the binary of that name on PATH.
 The `no_shell` rejection gives the same reason as the prompt, e.g.
 `stage 0 runs sh via env: opaque — resolves only the shell`.
 

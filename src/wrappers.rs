@@ -19,9 +19,11 @@
 //! The walk fails closed: an option a wrapper's table does not list (including
 //! GNU long-option abbreviations), a missing option argument or operand, an
 //! `env` that changes how the wrapped program is looked up or sets a name the
-//! `setenv` policy rejects, a `find -exec` program word containing `{}`, a
-//! multi-call dispatcher option, an ambiguous name and a chain deeper than
-//! [`MAX_DEPTH`] all make the leaf opaque.
+//! `setenv` policy rejects, a `find -exec` program word containing `{}` or a
+//! `find -exec` command containing another action word, an `xargs -I`
+//! replacement string in the program word, a `--` where a program is
+//! expected, a multi-call dispatcher option, an ambiguous name and a chain
+//! deeper than [`MAX_DEPTH`] all make the leaf opaque.
 //!
 //! This module is pure: no filesystem access and no I/O. The only
 //! filesystem-dependent input, the canonical name of a hop's resolved binary,
@@ -433,6 +435,9 @@ pub struct Hop {
     /// The directory `env -C` moved to, accumulated along the chain
     /// (`env -C a env -C b ./x` runs `a/b/x`), relative to the leaf's cwd.
     pub chdir: Option<String>,
+    /// An applet of a multi-call dispatcher (`busybox sh`): the dispatcher
+    /// runs its built-in applet, not the binary the name resolves to on PATH.
+    pub applet: bool,
 }
 
 /// Why a leaf is opaque. `hop` indexes the hop list returned by [`unwrap`].
@@ -466,6 +471,12 @@ pub enum OpaqueReason {
     FindPlaceholder {
         hop: usize,
     },
+    /// `xargs -I R` / `-i` / `--replace` with `R` in the program word: the
+    /// program is chosen by xargs's input.
+    XargsReplace {
+        hop: usize,
+        replace: String,
+    },
     Ambiguous {
         hop: usize,
         canonical: String,
@@ -485,6 +496,7 @@ impl OpaqueReason {
             | OpaqueReason::PathChanged { hop }
             | OpaqueReason::EnvRejected { hop, .. }
             | OpaqueReason::FindPlaceholder { hop }
+            | OpaqueReason::XargsReplace { hop, .. }
             | OpaqueReason::Ambiguous { hop, .. } => *hop,
         }
     }
@@ -532,6 +544,9 @@ impl OpaqueReason {
             OpaqueReason::FindPlaceholder { .. } => {
                 format!("{name} runs the files it finds ({{}})")
             }
+            OpaqueReason::XargsReplace { replace, .. } => {
+                format!("{name} takes the program from its input ({replace})")
+            }
             OpaqueReason::Ambiguous { canonical, .. } => {
                 format!("ambiguous wrapper: {name} resolves to {canonical}")
             }
@@ -547,6 +562,7 @@ struct Region {
     via: Option<usize>,
     chdir: Option<String>,
     depth: usize,
+    applet: bool,
 }
 
 /// Unwrap a leaf's argv into the chain of programs that run, and say why the
@@ -572,19 +588,34 @@ pub fn unwrap(
         via: None,
         chdir: None,
         depth: 1,
+        applet: false,
     });
     while let Some(r) = queue.pop_front() {
         if r.depth > MAX_DEPTH {
             return (hops, Some(OpaqueReason::TooDeep));
+        }
+        // A `--` where a wrapper's program is expected: GNU `env` would run a
+        // program named `--`, but uutils `timeout` and util-linux `chrt` skip
+        // it and run the next word, so fail closed for every wrapper.
+        if let Some(via) = r.via.filter(|_| argv[r.start] == "--") {
+            let why = "-- where the program is expected".to_string();
+            return (hops, Some(OpaqueReason::Unparsable { hop: via, why }));
         }
         let hop = hops.len();
         hops.push(Hop {
             argv_index: r.start,
             via: r.via,
             chdir: r.chdir.clone(),
+            applet: r.applet,
         });
         let written = classify(&argv[r.start]);
-        let canonical = canonical_name(r.start, r.chdir.as_deref());
+        // An applet's PATH resolution says nothing about what the dispatcher
+        // runs, so only its written name classifies it.
+        let canonical = if r.applet {
+            None
+        } else {
+            canonical_name(r.start, r.chdir.as_deref())
+        };
         let canonical_class = canonical
             .as_deref()
             .filter(|c| !MULTI_CALL.contains(c))
@@ -609,6 +640,7 @@ pub fn unwrap(
         match next {
             Err(reason) => return (hops, Some(reason)),
             Ok(children) => {
+                let applet = matches!(class, Class::Wrapper(s) if s.kind == Kind::MultiCall);
                 for (start, end, chdir) in children {
                     queue.push_back(Region {
                         start,
@@ -616,6 +648,7 @@ pub fn unwrap(
                         via: Some(hop),
                         chdir,
                         depth: r.depth + 1,
+                        applet,
                     });
                 }
             }
@@ -639,9 +672,24 @@ fn inline_code(spec: &InterpSpec, args: &[String]) -> Option<String> {
         let Some(rest) = a.strip_prefix('-') else {
             continue;
         };
-        let cluster = !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphabetic());
-        let hit = |c: char| spec.short_flags.contains(c);
-        if (cluster && rest.chars().any(hit)) || rest.chars().next().is_some_and(hit) {
+        // The leading run of switch letters (digits too: `perl -0777e`,
+        // `-l0e`). Code may be attached after it (`-Bcprint(1)`,
+        // `-le'print 1'`). A letter that takes a separate argument takes the
+        // rest of the word when attached (`ruby -rset`), so the run ends there.
+        let mut hit = false;
+        for c in rest.chars() {
+            if !c.is_ascii_alphanumeric() {
+                break;
+            }
+            if spec.short_flags.contains(c) {
+                hit = true;
+                break;
+            }
+            if spec.sep_arg_short.contains(c) {
+                break;
+            }
+        }
+        if hit {
             let shown: String = a.chars().take(16).collect();
             return Some(shown);
         }
@@ -697,7 +745,16 @@ fn parse_wrapper(
         },
         Kind::FindExec => find_exec(argv, r, hop),
         Kind::Getopt | Kind::Nice => {
-            let Some(mut i) = getopt(spec, argv, r, hop, |_, _| Ok(()))? else {
+            // `xargs -I R` / `-i[R]` / `--replace[=R]` substitutes each input
+            // item for `R`, in the program word too (`xargs -I{} {}`).
+            let mut replace: Option<String> = None;
+            let parsed = getopt(spec, argv, r, hop, |opt, arg| {
+                if spec.name == "xargs" && matches!(opt, "I" | "i" | "replace") {
+                    replace = Some(arg.unwrap_or("{}").to_string());
+                }
+                Ok(())
+            })?;
+            let Some(mut i) = parsed else {
                 return Ok(Vec::new());
             };
             for _ in 0..spec.positionals {
@@ -710,6 +767,9 @@ fn parse_wrapper(
                     return Err(bad(format!("non-numeric priority {p}")));
                 }
                 i += 1;
+            }
+            if let Some(replace) = replace.filter(|p| i < r.end && argv[i].contains(p.as_str())) {
+                return Err(OpaqueReason::XargsReplace { hop, replace });
             }
             Ok(one(i, r.chdir.clone()))
         }
@@ -893,6 +953,15 @@ fn find_exec(argv: &[String], r: &Region, hop: usize) -> Result<Children, Opaque
         let Some(term) = term else {
             return Err(bad(format!("{action} without a terminating ; or +")));
         };
+        // A test that takes an argument (`-printf`, `-name`, …) can absorb an
+        // action word, and the real action after it then falls inside this
+        // command: `-printf -exec -exec sh -c x ;`. Tests are not parsed, so
+        // an action word inside a command fails closed.
+        if let Some(k) = (prog..term)
+            .find(|&k| matches!(argv[k].as_str(), "-exec" | "-execdir" | "-ok" | "-okdir"))
+        {
+            return Err(bad(format!("{} inside the command of {action}", argv[k])));
+        }
         out.push((prog, term, r.chdir.clone()));
         i = term + 1;
     }
@@ -973,11 +1042,112 @@ mod tests {
         }
     }
 
+    /// `--` ends `env`'s options only before the first assignment; after it,
+    /// `--` stands where the program is expected and fails closed.
     #[test]
-    fn env_double_dash_after_an_assignment_is_the_program() {
-        assert_eq!(names(&["env", "X=1", "--", "true"]), ["env", "--"]);
-        assert!(!opaque(&["env", "X=1", "--", "true"]));
+    fn env_double_dash_after_an_assignment_fails_closed() {
+        assert_eq!(
+            unparsable(&["env", "X=1", "--", "true"]),
+            "-- where the program is expected"
+        );
         assert_eq!(names(&["env", "--", "X=1", "true"]), ["env", "true"]);
+        assert!(!opaque(&["env", "--", "X=1", "true"]));
+    }
+
+    /// Review C3: uutils `timeout` and util-linux `chrt` skip a `--` placed
+    /// after their operand and run the next word; every wrapper fails closed.
+    #[test]
+    fn double_dash_after_an_operand_fails_closed() {
+        for argv in [
+            &["timeout", "5", "--", "sh", "-c", "evil"][..],
+            &["chrt", "-o", "0", "--", "sh", "-c", "evil"],
+            &["taskset", "1", "--", "sh"],
+            &["nice", "env", "X=1", "--", "sh"],
+            &["busybox", "--"],
+            &["find", ".", "-exec", "--", "sh", ";"],
+        ] {
+            let why = match run(argv).1 {
+                Some(OpaqueReason::Unparsable { why, .. }) => why,
+                other => panic!("{argv:?}: {other:?}"),
+            };
+            assert!(
+                why == "-- where the program is expected"
+                    || why == "unsupported dispatcher option --",
+                "{argv:?}: {why}"
+            );
+        }
+        // `--` before the operand still ends the options.
+        assert_eq!(names(&["timeout", "--", "5", "true"]), ["timeout", "true"]);
+        assert!(!opaque(&["timeout", "--", "5", "true"]));
+    }
+
+    /// Review C2: a find test that takes an argument can absorb an action
+    /// word; an action word inside a parsed command fails closed.
+    #[test]
+    fn find_action_inside_a_command_fails_closed() {
+        for argv in [
+            &[
+                "find",
+                ".",
+                "-maxdepth",
+                "0",
+                "-printf",
+                "-exec",
+                "-exec",
+                "sh",
+                "-c",
+                "evil",
+                ";",
+            ][..],
+            &["find", ".", "-fprintf", "f", "-exec", "-exec", "sh", ";"],
+            &["find", ".", "-name", "-exec", "-exec", "sh", ";"],
+            &["find", ".", "-name", "-ok", "-execdir", "sh", ";"],
+        ] {
+            let why = match run(argv).1 {
+                Some(OpaqueReason::Unparsable { why, .. }) => why,
+                other => panic!("{argv:?}: {other:?}"),
+            };
+            assert!(why.contains("inside the command of"), "{argv:?}: {why}");
+        }
+    }
+
+    /// Review C4: `xargs -I R` substitutes its input into the program word.
+    #[test]
+    fn xargs_replace_in_the_program_word_fails_closed() {
+        for (argv, r) in [
+            (&["xargs", "-I{}", "{}"][..], "{}"),
+            (&["xargs", "-I", "X", "X", "a"], "X"),
+            (&["xargs", "-i", "{}"], "{}"),
+            (&["xargs", "-iZ", "./Z"], "Z"),
+            (&["xargs", "--replace", "{}"], "{}"),
+            (&["xargs", "--replace=@", "@"], "@"),
+        ] {
+            assert_eq!(
+                run(argv).1,
+                Some(OpaqueReason::XargsReplace {
+                    hop: 0,
+                    replace: r.into()
+                }),
+                "{argv:?}"
+            );
+        }
+        // In an argument only: transparent.
+        assert_eq!(names(&["xargs", "-I{}", "rm", "{}"]), ["xargs", "rm"]);
+        assert!(!opaque(&["xargs", "-I{}", "rm", "{}"]));
+        assert!(!opaque(&["xargs", "-I", "X", "echo", "X"]));
+    }
+
+    /// Review C5: an applet hop is marked, and its PATH resolution is not
+    /// consulted for its class.
+    #[test]
+    fn multi_call_children_are_applets() {
+        let argv = v(&["busybox", "foo", "-c", "x"]);
+        // A PATH `foo` that is really bash does not make busybox's `foo` a shell.
+        let (hops, r) = unwrap(&argv, |i, _| (i == 1).then(|| "bash".to_string()));
+        assert_eq!(r, None);
+        assert!(!hops[0].applet && hops[1].applet);
+        let (hops, _) = run(&["busybox", "env", "sh"]);
+        assert!(hops[1].applet && !hops[2].applet);
     }
 
     #[test]
@@ -1167,6 +1337,12 @@ mod tests {
             &["lua", "-e"],
             &["Rscript", "-e", "1"],
             &["pypy3", "-c", "x"],
+            // Review C1: code attached after a switch cluster.
+            &["perl", "-le'print 1'", "/dev/null"],
+            &["python3", "-Bcprint(1)", "foo"],
+            &["perl", "-0e", "print 1", "x"],
+            &["perl", "-0777le", "print 1", "x"],
+            &["ruby", "-we", "p 1", "x.rb"],
         ] {
             assert!(
                 matches!(run(argv).1, Some(OpaqueReason::InlineCode { .. })),
@@ -1186,6 +1362,10 @@ mod tests {
             &["python3", "-m", "pip"],
             &["python3", "-W", "ignore", "x.py"],
             &["python3", "--", "x.py"],
+            // An attached argument of a separate-argument letter is not
+            // scanned for code letters.
+            &["ruby", "-rset", "x.rb"],
+            &["php", "-dmemory_limit=1G", "x.php"],
             &["rubocop"],
             &["phpunit"],
             &["php-fpm", "-t"],
@@ -1289,6 +1469,14 @@ mod tests {
         assert_eq!(
             d(&["sudo", "true"]),
             "runs a program the prompt does not unwrap"
+        );
+        assert_eq!(
+            d(&["xargs", "-I{}", "{}"]),
+            "xargs takes the program from its input ({})"
+        );
+        assert_eq!(
+            d(&["timeout", "5", "--", "sh"]),
+            "cannot unwrap timeout: -- where the program is expected"
         );
     }
 
