@@ -410,16 +410,118 @@ const MAX_DISPLAY_CMD_CHARS: usize = 1024;
 /// anti-flooding rationale as `MAX_DISPLAY_CMD_CHARS`, applied to stage count.
 const MAX_DISPLAY_STAGES: usize = 32;
 
+/// Upper bound, in characters, on one `Steps:` line (its text and trailing
+/// `# note`, not the gutter or indent), and on each name and path of the
+/// `Resolves:` block and line. Two 80-column rows. The same anti-flooding
+/// rationale as `MAX_DISPLAY_CMD_CHARS` (G4.3): one huge argument shown in full
+/// on the plan render path would push the `[y/N]` question off-screen just as
+/// it would on the `Command:` line.
+const MAX_DISPLAY_LINE_CHARS: usize = 160;
+
+/// Upper bound, in characters, on each request-derived metadata field shown at
+/// the prompt (`reason`, `session`, `host`, `requester`, `version`, `id`,
+/// `time`, each env `KEY=value`). They are validated for characters but not
+/// for length, so a long one would flood the prompt like a long command
+/// (G4.3). Matches the audit log's per-field bound.
+const MAX_DISPLAY_FIELD_CHARS: usize = 256;
+
+/// Upper bound on the number of entries of the `Resolves:` block, which could
+/// otherwise list up to `MAX_PLAN_NODES` distinct binaries and push the
+/// `[y/N]` question off-screen (G4.3).
+const MAX_DISPLAY_RESOLVES: usize = MAX_DISPLAY_STAGES;
+
+/// `Some((head, hidden))` when `s` has more than `max` chars: `head` is its
+/// first `max` chars (a UTF-8 sequence is never split) and `hidden` the number
+/// of chars cut. `None` when `s` fits. The one truncation rule behind
+/// `truncate_for_display` and `clip`, so the two cannot drift apart.
+fn split_at_chars(s: &str, max: usize) -> Option<(&str, usize)> {
+    let (cut, _) = s.char_indices().nth(max)?;
+    Some((&s[..cut], s[cut..].chars().count()))
+}
+
 /// Truncate an approval-prompt command string to a bounded number of
 /// characters, appending an explicit marker when it was shortened.
 pub fn truncate_for_display(s: &str) -> String {
-    let count = s.chars().count();
-    if count <= MAX_DISPLAY_CMD_CHARS {
-        return s.to_string();
+    match split_at_chars(s, MAX_DISPLAY_CMD_CHARS) {
+        None => s.to_string(),
+        Some((head, hidden)) => format!("{head}… [{hidden} more chars hidden — full command not shown]"),
     }
-    let head: String = s.chars().take(MAX_DISPLAY_CMD_CHARS).collect();
-    let hidden = count - MAX_DISPLAY_CMD_CHARS;
-    format!("{head}… [{hidden} more chars hidden — full command not shown]")
+}
+
+/// Clip plain (uncoloured) prompt text to `max` chars, appending the explicit
+/// marker `… [N more chars hidden]` (`N` in chars) when it was shortened. The
+/// same policy as `truncate_for_display`, for the other prompt lines.
+fn clip(s: &str, max: usize) -> String {
+    match split_at_chars(s, max) {
+        None => s.to_string(),
+        Some((head, hidden)) => format!("{head}… [{hidden} more chars hidden]"),
+    }
+}
+
+/// Byte length of the CSI escape sequence (`ESC [`, parameter bytes, then a
+/// final byte in `0x40..=0x7E`) starting at `s[i..]`, if one starts there.
+fn csi_len(s: &[u8], i: usize) -> Option<usize> {
+    if s.get(i) != Some(&0x1b) || s.get(i + 1) != Some(&b'[') {
+        return None;
+    }
+    let end = s[i + 2..]
+        .iter()
+        .position(|b| (0x40..=0x7e).contains(b))
+        .map_or(s.len(), |p| i + 2 + p + 1);
+    Some(end - i)
+}
+
+/// [`clip`] for a line that already carries the daemon's own colour escapes.
+/// A CSI sequence is copied through and counts as zero width, so `max` and the
+/// hidden count `N` are both in *visible* chars (escapes excluded). When the
+/// line is cut, its visible tail is dropped together with the escapes inside
+/// it, `style.reset` is written so a colour span cut in the middle does not
+/// bleed, and the marker is `{bold}… [N more chars hidden]{reset}`. A line that
+/// fits is returned byte-identical.
+///
+/// Precondition: request-derived text contains no ESC (0x1B).
+/// `has_dangerous_chars` (G4.1) rejects every control char below 0x20 except
+/// tab (0x09), so every ESC in the line comes from `Style`. Tabs may appear in
+/// request text; each counts as one char here, although a terminal may expand
+/// it to up to 8 columns (see the Sn4.3 residual in `docs/assurance-case.md`).
+///
+/// On a `Steps:` line the clipped tail may hold the chain operator (`&&`, `||`,
+/// `|`, `;`) or a group's `(` opener; the `Command:` line still shows them as
+/// long as it stays under `MAX_DISPLAY_CMD_CHARS`.
+fn clip_styled(s: &str, max: usize, style: &Style) -> String {
+    let bytes = s.as_bytes();
+    let mut visible = 0usize;
+    let mut i = 0usize;
+    while i < s.len() {
+        if let Some(n) = csi_len(bytes, i) {
+            i += n;
+            continue;
+        }
+        if visible == max {
+            let Style { bold, reset, .. } = *style;
+            let hidden = visible_chars(&s[i..]);
+            return format!("{}{reset}{bold}… [{hidden} more chars hidden]{reset}", &s[..i]);
+        }
+        visible += 1;
+        i += s[i..].chars().next().map_or(1, char::len_utf8);
+    }
+    s.to_string()
+}
+
+/// Number of visible chars of `s`: the chars outside CSI escape sequences.
+fn visible_chars(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let (mut n, mut i) = (0usize, 0usize);
+    while i < s.len() {
+        match csi_len(bytes, i) {
+            Some(len) => i += len,
+            None => {
+                n += 1;
+                i += s[i..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+    }
+    n
 }
 
 #[derive(Debug, PartialEq)]
@@ -514,25 +616,7 @@ pub fn prompt_tty(
     let Style { bold, dim, reset, .. } = st;
 
     write_request_header(&mut tty_w, req, &st)?;
-    let client_ver = if req.version.is_empty() { "(unknown)" } else { req.version.as_str() };
-    writeln!(tty_w, "Client:  sudo-proxy {client_ver}")?;
-    if !req.time.is_empty() {
-        writeln!(tty_w, "Time:    {}", req.time)?;
-    }
-    writeln!(tty_w, "ID:      {}", req.id)?;
-    if !req.reason.is_empty() {
-        writeln!(tty_w, "Reason:  {bold}{}{reset}", req.reason)?;
-    }
-    let agent_tag = if req.forward_agent {
-        format!(" {dim}(agent forwarded){reset}")
-    } else {
-        String::new()
-    };
-    writeln!(
-        tty_w,
-        "Command: {bold}{}{reset}{agent_tag}",
-        truncate_for_display(&command_summary(req))
-    )?;
+    write_request_meta(&mut tty_w, req, &st)?;
 
     // Render every stage the executor will run, each with its run-as context
     // and its resolved real binary. This is the structural guarantee the plan
@@ -545,10 +629,7 @@ pub fn prompt_tty(
         Err(e) => writeln!(tty_w, "{bold}⚠ invalid plan: {e}{reset}")?,
     }
 
-    if !req.env.is_empty() {
-        let env_display: Vec<String> = req.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-        writeln!(tty_w, "Env:     {}", env_display.join(" "))?;
-    }
+    write_env_line(&mut tty_w, req)?;
 
     // Effective privilege, not the raw `privileged` flag: a plan that smuggles
     // a `RunAs` node is gated exactly like a top-level privileged request, so
@@ -569,7 +650,7 @@ pub fn prompt_tty(
             tty_w,
             "{dim}a = approve, and run later unprivileged requests from session \
              '{}' on this host without asking until the daemon exits (not saved){reset}",
-            req.session
+            clip(&req.session, MAX_DISPLAY_FIELD_CHARS)
         )?;
         ("Execute?", "[y/N/a]")
     } else {
@@ -650,13 +731,54 @@ fn write_request_header<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style)
     writeln!(
         w,
         "From:    {} @ {}",
-        req.session,
-        if req.host.is_empty() { "local" } else { &req.host }
+        clip(&req.session, MAX_DISPLAY_FIELD_CHARS),
+        if req.host.is_empty() { "local".to_string() } else { clip(&req.host, MAX_DISPLAY_FIELD_CHARS) }
     )?;
     if !req.requester.is_empty() {
-        writeln!(w, "Requester: {} (self-declared, not verified)", req.requester)?;
+        writeln!(
+            w,
+            "Requester: {} (self-declared, not verified)",
+            clip(&req.requester, MAX_DISPLAY_FIELD_CHARS)
+        )?;
     }
     Ok(())
+}
+
+/// Write the request metadata below the header, from `Client:` through the
+/// `Command:` line. Every request-derived field is clipped (G4.3): the fields to
+/// `MAX_DISPLAY_FIELD_CHARS`, the command to `MAX_DISPLAY_CMD_CHARS`.
+/// Writer-generic so the bytes are unit-testable without /dev/tty.
+fn write_request_meta<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -> io::Result<()> {
+    let Style { bold, dim, reset, .. } = *st;
+    let field = |s: &str| clip(s, MAX_DISPLAY_FIELD_CHARS);
+    let client_ver = if req.version.is_empty() { "(unknown)".to_string() } else { field(&req.version) };
+    writeln!(w, "Client:  sudo-proxy {client_ver}")?;
+    if !req.time.is_empty() {
+        writeln!(w, "Time:    {}", field(&req.time))?;
+    }
+    writeln!(w, "ID:      {}", field(&req.id))?;
+    if !req.reason.is_empty() {
+        writeln!(w, "Reason:  {bold}{}{reset}", field(&req.reason))?;
+    }
+    let agent_tag = if req.forward_agent {
+        format!(" {dim}(agent forwarded){reset}")
+    } else {
+        String::new()
+    };
+    writeln!(w, "Command: {bold}{}{reset}{agent_tag}", truncate_for_display(&command_summary(req)))
+}
+
+/// Write the `Env:` line, if the request sets any variable. Each `KEY=value` is
+/// clipped to `MAX_DISPLAY_FIELD_CHARS` and the joined line to
+/// `MAX_DISPLAY_CMD_CHARS`, which bounds both the entry length and the entry
+/// count (G4.3).
+fn write_env_line<W: Write>(w: &mut W, req: &ValidatedRequest) -> io::Result<()> {
+    if req.env.is_empty() {
+        return Ok(());
+    }
+    let env_display: Vec<String> =
+        req.env.iter().map(|(k, v)| clip(&format!("{k}={v}"), MAX_DISPLAY_FIELD_CHARS)).collect();
+    writeln!(w, "Env:     {}", clip(&env_display.join(" "), MAX_DISPLAY_CMD_CHARS))
 }
 
 /// Write the `Execute?` question line, wrapped with the attention cues. The BEL
@@ -804,11 +926,14 @@ fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> 
     let mut n = 0usize;
     for ln in &lines[..shown] {
         let indent = "  ".repeat(ln.depth + 1);
+        // The gutter and indent are bounded already (32 lines, plan depth);
+        // the text and note carry request data, so they are clipped (G4.3).
+        let body = clip_styled(&format!("{}{}", ln.text, ln.comment(style)), MAX_DISPLAY_LINE_CHARS, style);
         if ln.numbered {
-            writeln!(w, "{dim}{n:<width$}{reset}{indent}{}{}", ln.text, ln.comment(style))?;
+            writeln!(w, "{dim}{n:<width$}{reset}{indent}{body}")?;
             n += 1;
         } else {
-            writeln!(w, "{:width$}{indent}{}{}", "", ln.text, ln.comment(style))?;
+            writeln!(w, "{:width$}{indent}{body}", "")?;
         }
     }
     if lines.len() > shown {
@@ -905,12 +1030,14 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
     let mut seen = std::collections::HashSet::new();
     let mut entries: Vec<(String, String)> = Vec::new();
     for view in views {
-        let name = view.argv.first().cloned().unwrap_or_default();
+        // Clipped before the dedup key and the width, so one long name cannot
+        // widen every row (G4.3).
+        let name = clip(view.argv.first().map_or("", String::as_str), MAX_DISPLAY_LINE_CHARS);
         let detail = if view.opaque {
             match &view.resolved_bin {
                 Some(p) => format!(
                     "{bold}opaque — resolves only the shell: {}{reset}",
-                    p.display()
+                    clip(&p.display().to_string(), MAX_DISPLAY_LINE_CHARS)
                 ),
                 None => format!("{bold}opaque — shell not found in PATH{reset}"),
             }
@@ -924,10 +1051,15 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
     if entries.is_empty() {
         return Ok(());
     }
-    let width = entries.iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let shown = entries.len().min(MAX_DISPLAY_RESOLVES);
+    let width = entries[..shown].iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
     writeln!(w, "Resolves:")?;
-    for (name, detail) in &entries {
+    for (name, detail) in &entries[..shown] {
         writeln!(w, "  {name:<width$}  {detail}")?;
+    }
+    if entries.len() > shown {
+        let hidden = entries.len() - shown;
+        writeln!(w, "{bold}… {hidden} more binaries hidden{reset}")?;
     }
     Ok(())
 }
@@ -946,13 +1078,18 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
     match std::fs::canonicalize(resolved) {
         Ok(canonical) => {
             let canonical_str = canonical.display().to_string();
+            // Compared unclipped, shown clipped (G4.3).
             if canonical_str != resolved_str {
-                format!("{resolved_str} {bold}->{reset} {canonical_str}")
+                format!(
+                    "{} {bold}->{reset} {}",
+                    clip(&resolved_str, MAX_DISPLAY_LINE_CHARS),
+                    clip(&canonical_str, MAX_DISPLAY_LINE_CHARS)
+                )
             } else {
-                resolved_str
+                clip(&resolved_str, MAX_DISPLAY_LINE_CHARS)
             }
         }
-        Err(_) => format!("{resolved_str} {dim}(canonicalize failed){reset}"),
+        Err(_) => format!("{} {dim}(canonicalize failed){reset}", clip(&resolved_str, MAX_DISPLAY_LINE_CHARS)),
     }
 }
 
@@ -984,13 +1121,17 @@ fn write_resolves_line<W: Write>(
             return writeln!(w, "Resolves: {bold}(not found in PATH){reset}");
         }
     };
-    let resolved_str = resolved.display().to_string();
-    let resolved_differs = resolved_str != *cmd_name;
+    let resolved_full = resolved.display().to_string();
+    // Branch on the unclipped strings, show them clipped (G4.3): clipping must
+    // never change which rule applies.
+    let resolved_differs = resolved_full != *cmd_name;
+    let resolved_str = clip(&resolved_full, MAX_DISPLAY_LINE_CHARS);
 
     match std::fs::canonicalize(resolved) {
         Ok(canonical) => {
-            let canonical_str = canonical.display().to_string();
-            let canonical_differs = canonical_str != resolved_str;
+            let canonical_full = canonical.display().to_string();
+            let canonical_differs = canonical_full != resolved_full;
+            let canonical_str = clip(&canonical_full, MAX_DISPLAY_LINE_CHARS);
             match (resolved_differs, canonical_differs) {
                 (false, false) => Ok(()),
                 (true, false) => writeln!(w, "Resolves: {resolved_str}"),
@@ -2160,6 +2301,333 @@ mod tests {
             let steps = steps_shell_text(&req);
             assert_eq!(run_sh(&cmd), via_plan, "Command: {cmd}");
             assert_eq!(run_sh(&steps), via_plan, "Steps:\n{steps}");
+        }
+    }
+
+    // === Property: every approval-prompt line is length-bounded (G4.3, #85)
+    //
+    // Whatever the size of the request, every line the prompt writes has a
+    // visible length (daemon escapes removed) bounded by a constant per line
+    // kind, and the number of lines is bounded too. Clipping only cuts a
+    // line's tail: what is shown is a prefix of the unclipped text.
+
+    /// Maximum visible length of the `clip`/`clip_styled` marker
+    /// `… [N more chars hidden]`: `… [` + at most 7 digits (`N` is under
+    /// the 1 MiB request cap) + ` more chars hidden]` = 29, rounded up.
+    const MARKER_MAX: usize = 32;
+    /// Maximum visible length of `truncate_for_display`'s marker
+    /// `… [N more chars hidden — full command not shown]` (≤ 54), rounded up.
+    const CMD_MARKER_MAX: usize = 64;
+    /// Any metadata line, `Command:` and `Env:` included: label and fixed text
+    /// (≤ 64, with the agent tag) + the longest clipped value and its marker.
+    const META_BOUND: usize = MAX_DISPLAY_CMD_CHARS + CMD_MARKER_MAX + 64;
+    /// A `Steps:` line: gutter (≤ 2 digits + separator) + indent (each plan
+    /// level adds at most two parenthesis levels, a `cd`/`export` scope) + the
+    /// clipped text and its marker.
+    const STEPS_BOUND: usize =
+        6 + 2 * (2 * crate::protocol::MAX_PLAN_DEPTH + 3) + MAX_DISPLAY_LINE_CHARS + MARKER_MAX;
+    /// A `Resolves:` row or line: up to three clipped strings (name, resolved,
+    /// canonical) and fixed separators.
+    const RESOLVES_BOUND: usize = 3 * (MAX_DISPLAY_LINE_CHARS + MARKER_MAX) + 64;
+    const PLAN_BOUND: usize = if STEPS_BOUND > RESOLVES_BOUND { STEPS_BOUND } else { RESOLVES_BOUND };
+
+    /// `s` with every CSI escape removed: what the terminal shows.
+    fn strip_csi(s: &str) -> String {
+        let bytes = s.as_bytes();
+        let mut out = String::new();
+        let mut i = 0;
+        while i < s.len() {
+            match csi_len(bytes, i) {
+                Some(n) => i += n,
+                None => {
+                    let c = s[i..].chars().next().unwrap();
+                    out.push(c);
+                    i += c.len_utf8();
+                }
+            }
+        }
+        out
+    }
+
+    fn plan_output(req: &ValidatedRequest, style: &Style) -> String {
+        let views = plan_display(req).expect("compiles");
+        let mut buf = Vec::new();
+        write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, style).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// The `Steps:` lines and the `Resolves:` lines (block rows included) of a
+    /// rendered plan, escapes stripped.
+    fn split_plan_output(out: &str) -> (Vec<String>, Vec<String>) {
+        let (mut steps, mut resolves) = (Vec::new(), Vec::new());
+        let mut in_steps = false;
+        for line in out.lines().map(strip_csi) {
+            if line == "Steps:" {
+                in_steps = true;
+            } else if in_steps {
+                steps.push(line);
+            } else {
+                resolves.push(line);
+            }
+        }
+        (steps, resolves)
+    }
+
+    /// An absolute path to `echo`, 2 009 bytes long: under PATH_MAX, so it is
+    /// found and canonicalizes to the real binary.
+    fn long_echo_path(reps: usize) -> String {
+        format!("/{}bin/echo", "./".repeat(reps))
+    }
+
+    #[test]
+    fn clip_bounds_and_marks() {
+        assert_eq!(clip("abc", 4), "abc");
+        assert_eq!(clip("abcd", 4), "abcd");
+        assert_eq!(clip("abcde", 4), "abcd… [1 more chars hidden]");
+        // Multi-byte chars are never split, and the count is in chars.
+        assert_eq!(clip("éé漢漢漢", 2), "éé… [3 more chars hidden]");
+        let big = clip(&"x".repeat(1_048_576), 10);
+        assert!(big.chars().count() - 10 <= MARKER_MAX, "{big}");
+        // `truncate_for_display` keeps its own wording.
+        let cmd = truncate_for_display(&"y".repeat(MAX_DISPLAY_CMD_CHARS + 1_048_576));
+        assert!(cmd.ends_with("… [1048576 more chars hidden — full command not shown]"), "{cmd}");
+        assert!(cmd.chars().count() - MAX_DISPLAY_CMD_CHARS <= CMD_MARKER_MAX);
+    }
+
+    #[test]
+    fn clip_styled_ignores_escapes_and_resets() {
+        let st = style_for(false);
+        let line = format!("\x1b[38;5;210m{}\x1b[0m", "A".repeat(300));
+        let out = clip_styled(&line, MAX_DISPLAY_LINE_CHARS, &st);
+        let marker = format!("{}… [140 more chars hidden]{}", st.bold, st.reset);
+        assert!(out.ends_with(&format!("{}{marker}", st.reset)), "reset before the marker: {out:?}");
+        let head = out.strip_suffix(&marker).unwrap();
+        assert_eq!(strip_csi(head), "A".repeat(MAX_DISPLAY_LINE_CHARS));
+        // A line that fits passes through byte-identical, escapes and all.
+        let short = format!("\x1b[38;5;210m{}\x1b[0m", "A".repeat(MAX_DISPLAY_LINE_CHARS));
+        assert_eq!(clip_styled(&short, MAX_DISPLAY_LINE_CHARS, &st), short);
+        // Without colour, no escape at all.
+        let plain = clip_styled(&"A".repeat(300), MAX_DISPLAY_LINE_CHARS, &style_for(true));
+        assert!(!plain.contains('\x1b'), "{plain:?}");
+        assert_eq!(plain, clip(&"A".repeat(300), MAX_DISPLAY_LINE_CHARS));
+        // A tab counts as one char and is passed through unchanged.
+        let tabs = format!("a\tb{}", "\t".repeat(200));
+        let out = clip_styled(&tabs, 10, &style_for(true));
+        assert_eq!(out, format!("a\tb{}… [193 more chars hidden]", "\t".repeat(7)));
+    }
+
+    #[test]
+    fn steps_line_is_bounded_for_huge_argument() {
+        let req = mk_req(ex(&["echo", &"A".repeat(200_000)]), true);
+        for st in [style_for(false), style_for(true)] {
+            let out = plan_output(&req, &st);
+            assert!(out.len() < 4096, "{} bytes", out.len());
+            let (steps, resolves) = split_plan_output(&out);
+            for l in &steps {
+                assert!(l.chars().count() <= STEPS_BOUND, "Steps line of {} chars", l.chars().count());
+            }
+            for l in &resolves {
+                assert!(l.chars().count() <= RESOLVES_BOUND, "Resolves line of {} chars", l.chars().count());
+            }
+            // Line 0, escapes (dim gutter, root colour) stripped, gutter removed.
+            let line0 = steps[0].strip_prefix("0  ").expect("gutter");
+            assert!(line0.starts_with("sudo echo AAAA"), "{line0}");
+            assert!(line0.contains("more chars hidden"), "{line0}");
+        }
+    }
+
+    #[test]
+    fn resolves_block_bounds_long_names_and_count() {
+        // (a) A long, resolvable absolute argv[0] in a multi-leaf plan.
+        let long = long_echo_path(1_000);
+        assert_eq!(long.len(), 2_009);
+        let req = mk_req(Plan::Run { steps: vec![ex(&[&long, "x"]), ex(&["id"])] }, true);
+        let out = plan_output(&req, &style_for(true));
+        let (_, resolves) = split_plan_output(&out);
+        let row = resolves.iter().find(|l| l.starts_with("  /./")).expect("long row");
+        assert!(row.contains("->"), "{row}");
+        assert_eq!(row.matches("more chars hidden").count(), 2, "name and resolved path clipped: {row}");
+        for l in &resolves {
+            assert!(l.chars().count() <= RESOLVES_BOUND, "Resolves row of {} chars", l.chars().count());
+        }
+        // The short entry's padding follows the clipped name, not the 2 009-char one.
+        let id_row = resolves.iter().find(|l| l.starts_with("  id ")).expect("id row");
+        assert!(
+            id_row.chars().count() <= MAX_DISPLAY_LINE_CHARS + MARKER_MAX + 64,
+            "id row of {} chars",
+            id_row.chars().count()
+        );
+
+        // (b) 40 distinct binaries: 32 rows, then the marker.
+        let steps = (0..40).map(|i| ex(&[&format!("sudo-proxy-no-such-binary-{i}")])).collect();
+        let out = plan_output(&mk_req(Plan::Seq { steps }, false), &style_for(true));
+        let (_, resolves) = split_plan_output(&out);
+        assert_eq!(resolves.iter().filter(|l| l.starts_with("  ")).count(), MAX_DISPLAY_RESOLVES, "{out}");
+        assert_eq!(resolves.last().map(String::as_str), Some("… 8 more binaries hidden"), "{out}");
+    }
+
+    #[test]
+    fn resolves_line_bounds_long_absolute_path() {
+        let req = mk_req(ex(&[&long_echo_path(1_000), "x"]), false);
+        let out = plan_output(&req, &style_for(true));
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 1, "{out}");
+        assert!(lines[0].starts_with("Resolves: "), "{out}");
+        assert!(lines[0].contains("->") && lines[0].contains("more chars hidden"), "{out}");
+        assert!(lines[0].chars().count() <= RESOLVES_BOUND, "{} chars", lines[0].chars().count());
+    }
+
+    #[test]
+    fn meta_and_env_lines_are_bounded() {
+        let render = |req: &ValidatedRequest, st: &Style| {
+            let mut buf = Vec::new();
+            write_request_header(&mut buf, req, st).expect("write");
+            write_request_meta(&mut buf, req, st).expect("write");
+            write_env_line(&mut buf, req).expect("write");
+            String::from_utf8(buf).expect("utf8")
+        };
+
+        let long = "r".repeat(10_000);
+        let env = (0..5_000).map(|i| (format!("K{i}"), "v".repeat(300))).collect();
+        let mut raw = Request::new(
+            long.clone(),
+            long.clone(),
+            vec![vec!["echo".into(), "A".repeat(900_000)]],
+            env,
+            long.clone(),
+            false,
+            true,
+        );
+        raw.requester = long.clone();
+        raw.version = long.clone();
+        let req = ValidatedRequest::validate(raw).expect("valid");
+        for st in [style_for(false), style_for(true)] {
+            let out = render(&req, &st);
+            for line in out.lines().map(strip_csi) {
+                assert!(line.chars().count() <= META_BOUND, "line of {} chars", line.chars().count());
+            }
+            assert!(out.contains("Command: ") && out.contains("full command not shown"));
+            assert!(out.contains("Env:     ") && out.contains("(agent forwarded)"));
+        }
+
+        // Short values: the same bytes as before the bound.
+        let mut raw = Request::new(
+            "h".into(),
+            "s".into(),
+            vec![vec!["id".into()]],
+            [("K".to_string(), "v".to_string())].into(),
+            "why".into(),
+            false,
+            false,
+        );
+        raw.requester = "human".into();
+        raw.version = "1.0".into();
+        raw.id = "id1".into();
+        raw.time = "2026-01-01T00:00:00Z".into();
+        let req = ValidatedRequest::validate(raw).expect("valid");
+        assert_eq!(
+            render(&req, &style_for(true)),
+            "\n━━━ Privilege Request ━━━\n\
+             From:    s @ h\n\
+             Requester: human (self-declared, not verified)\n\
+             Client:  sudo-proxy 1.0\n\
+             Time:    2026-01-01T00:00:00Z\n\
+             ID:      id1\n\
+             Reason:  why\n\
+             Command: id\n\
+             Env:     K=v\n"
+        );
+    }
+
+    /// Make some strings of a plan long: an argv element or a path of up to
+    /// 3 000 chars (1 in 4), or a resolvable long absolute `argv[0]` (1 in 8),
+    /// so that every clip, including the three-string `Resolves:` row, runs.
+    fn lengthen(plan: &mut Plan, rng: &mut crate::prop::Rng) {
+        const ALPHA: &[u8] = b"ab z;'$()&|-*";
+        match plan {
+            Plan::Exec { argv } => {
+                if rng.below(8) == 0 {
+                    argv[0] = long_echo_path(rng.below(1_500));
+                }
+                for a in argv.iter_mut() {
+                    if rng.below(4) == 0 {
+                        *a = rng.string(ALPHA, 3_000);
+                    }
+                }
+            }
+            Plan::Shell { .. } => {}
+            Plan::Chdir { dir, body } => {
+                if rng.below(4) == 0 {
+                    *dir = format!("/{}", rng.string(ALPHA, 3_000));
+                }
+                lengthen(body, rng);
+            }
+            Plan::Redirect { target, body, .. } => {
+                if let RedirTarget::File { path, .. } = target {
+                    if rng.below(4) == 0 {
+                        *path = format!("/{}", rng.string(ALPHA, 3_000));
+                    }
+                }
+                lengthen(body, rng);
+            }
+            Plan::WithStdinFrom { path, body } => {
+                if rng.below(4) == 0 {
+                    *path = format!("/{}", rng.string(ALPHA, 3_000));
+                }
+                lengthen(body, rng);
+            }
+            Plan::Setenv { body, .. } | Plan::RunAs { body, .. } | Plan::WithAcceptedExitCodes { body, .. } => {
+                lengthen(body, rng)
+            }
+            Plan::Run { steps } | Plan::Alt { steps } | Plan::Seq { steps } => {
+                steps.iter_mut().for_each(|s| lengthen(s, rng))
+            }
+            Plan::Pipe { stages } => stages.iter_mut().for_each(|s| lengthen(s, rng)),
+        }
+    }
+
+    /// `line` without a trailing `clip` marker, if it has one.
+    fn unmark(line: &str) -> &str {
+        match line.rfind("… [") {
+            Some(i) if line.ends_with(" more chars hidden]") => &line[..i],
+            _ => line,
+        }
+    }
+
+    // Spec clause (Rung 2, G4.3 / Sn4.3): for every plan, every line of the
+    // plan block is bounded, the number of lines is bounded, and each `Steps:`
+    // line shows a prefix of its unclipped text.
+    #[test]
+    fn prop_prompt_lines_are_bounded_and_prefix_faithful() {
+        let mut rng = crate::prop::Rng::new(0xB0_0D_ED_85_u64);
+        for _ in 0..300 {
+            let mut plan = random_any(&mut rng, 4);
+            lengthen(&mut plan, &mut rng);
+            let req = mk_req(plan, rng.below(2) == 0);
+            let full = steps_lines(&layout(&req.exec_plan(), &ambient_ctx(req.privileged)), &style_for(true));
+            for st in [style_for(false), style_for(true)] {
+                let out = plan_output(&req, &st);
+                let lines: Vec<String> = out.lines().map(strip_csi).collect();
+                assert!(lines.len() <= 1 + MAX_DISPLAY_RESOLVES + 1 + 1 + MAX_DISPLAY_STAGES + 1, "{out}");
+                for l in &lines {
+                    assert!(l.chars().count() <= PLAN_BOUND, "line of {} chars", l.chars().count());
+                }
+                let (steps, _) = split_plan_output(&out);
+                let shown = full.len().min(MAX_DISPLAY_STAGES);
+                let numbered = full[..shown].iter().filter(|l| l.numbered).count();
+                let width = numbered.saturating_sub(1).to_string().len();
+                for (l, f) in steps.iter().zip(&full[..shown]) {
+                    assert!(l.chars().count() <= STEPS_BOUND, "Steps line of {} chars", l.chars().count());
+                    let shown_text: String = l.chars().skip(width).collect();
+                    let unclipped =
+                        format!("{}{}{}", "  ".repeat(f.depth + 1), f.text, f.comment(&style_for(true)));
+                    let head = unmark(&shown_text);
+                    assert!(unclipped.starts_with(head), "not a prefix:\n{head}\nof\n{unclipped}");
+                    if head.len() == shown_text.len() {
+                        assert_eq!(head, unclipped);
+                    }
+                }
+            }
         }
     }
 }
