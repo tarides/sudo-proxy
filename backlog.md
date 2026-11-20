@@ -73,7 +73,8 @@ shipped in PR #67 (see changelog).
    See *"Partial-`run` retry hazard and the sudo-credential-in-pipe caveat"* for
    the mitigation menu (auth-probe before stateful stages, surface the partial
    boundary so callers resume rather than replay, advisory non-idempotency flag).
-5. **`env` hides the real program from `Resolves:`.** A step written as
+5. **`env` hides the real program from `Resolves:`** (issue #87; also Phase 0 of
+   *"Display fidelity — Option A"* below). A step written as
    `env VAR=… opam exec … dune …` resolves only `env`; `opam`/`dune`, the
    programs that actually run, never appear in the resolve block. It arises
    because `setenv` only accepts allowlisted names (`TSAN_OPTIONS`,
@@ -85,7 +86,8 @@ shipped in PR #67 (see changelog).
    arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
    allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
    wrapper is unnecessary. Found live-testing case 22.
-6. **`--pkexec` with a multi-step `privileged: true` plan.** Each escalated
+6. **`--pkexec` with a multi-step `privileged: true` plan** (issue #88; also
+   Phase 0 of *"Display fidelity — Option A"* below). Each escalated
    step raises its own pkexec dialog, which shows only that step (and, since
    steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
    program). With the `pkexec-cache` polkit rule, steps after the first run with
@@ -135,37 +137,70 @@ Creusot / Verus / Prusti contracts on `validate_request`, the dispatch path, and
 the env-allowlist enforcement, proved against the Rung 2 properties. Scope to the
 smallest trusted core, not the whole tree.
 
-## Display fidelity (G4.5): climb past Rung 2
+## Display fidelity — Option A: daemon-owned syntax, runtime self-check, echo
 
-Invariant G4.5: the prompt's `Steps:` block and `Command:` line parse, as shell,
-to the same tree, and that tree means what the executor runs. Today the evidence
-is Rung 2 only (golden layouts, a bash parse-tree comparison, a differential run
-against `sh`). The rung-by-rung plan is in
-[docs/formalisation-roadmap.md](docs/formalisation-roadmap.md#display-fidelity-across-the-rungs);
-none of it was tracked here until now:
+Tracking issue #89. Decided 2026-11-20 after a display-fidelity review:
+callers send only the structured plan, never shell text; the daemon owns every
+byte of syntax at the prompt, checks its own rendering against the compiled plan
+before prompting, and echoes what was shown back to the caller. Rejected:
+caller-supplied bash (displayed or checked; it gives the attacker the syntax
+layer and adds a parser of attacker text to the TCB) and bash-as-authoritative
+(the daemon becomes a shell; G3.1 falls). The rung-by-rung background is in
+[docs/formalisation-roadmap.md](docs/formalisation-roadmap.md#display-fidelity-across-the-rungs).
+One PR per item; each moves its evidence status in `docs/assurance-case.md`;
+every prompt-touching PR gets the pty goldens plus a live manual run.
 
-- **Rung 2 gap.** The differential run covers only privilege-free, side-effect-free
-  plans. Extend it to `run-as` (for example, `run-as` the current user so no
-  escalation is needed) and to file redirections and `with-stdin-from` (inside a
-  temp dir).
-- **Failed-`cd` divergence (G4.5 residual, `docs/assurance-case.md`).** When a
-  `chdir` fails, the executor aborts the whole plan. A shell running the pasted
-  `Command:` line skips only that scope's body and goes on with any
-  `;`-sequenced steps after it. Either make the two agree (render so that a
-  failed `cd` stops everything, or make the executor fail only the scope) or
-  accept it and say why in the assurance case.
-- **Rung 1.** A review-checklist item: changes to `src/tui.rs` rendering, the plan
-  ops, or the executor's composition semantics must keep the G4.5 properties
-  green. Add a lint or Semgrep rule against rendering a `Plan` anywhere but
-  through the shared layout.
-- **Rung 3.** A Kani harness over bounded plans proving the layout is total and
-  that rendering then re-parsing (with an in-crate parser for the shell subset
-  the renderer emits) gives back the plan's structure. This removes `bash` as
-  the oracle for the syntax half.
-- **Rung 5.** A deductive proof (Creusot / Verus) that the renderer and the
-  executor both refine one shell-semantics model of that subset. Extends the
-  Rung 5 item above, which covers only validation, dispatch and the env
-  allowlist.
+**Phase 0 — close the current gaps** (independent; patch releases 1.2.x):
+#86 `has_dangerous_chars` gaps (DEL/C1, U+00AD, U+061C, U+2028/2029,
+U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 bound
+each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
+above) · #87 wrapper-aware `runs_shell` (item 5 above).
+
+**Phase 1 — state the invariant, make it literally true** (release 1.3.0):
+1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim
+   in the command slot); split Sn4.5 into a syntactic half (render ⇒ shell
+   tree) and a semantic half (shell tree ⇒ executor); threat-model rows
+   "caller supplies syntax" (blocked by design) and "unknown plan key silently
+   dropped"; roadmap gains the self-check and echo rungs.
+2. Render `Steps:`/`Command:` from `Compiled`, not a second walk of `Plan`
+   (`src/tui.rs` `layout(&req.exec_plan())`). Pure refactor: goldens and audit
+   output byte-identical.
+3. `deny_unknown_fields` on `Plan` only. `run-as` uses `#[serde(flatten)]`,
+   which serde cannot combine with it, so un-flatten via a custom impl that
+   keeps the wire form. `Request` stays lenient (documented forward-compat).
+4. Echo: optional `shown` + `shown_truncated` in `Response`, the exact
+   `Command:` text written to the TTY, for `ok`/`denied`/`timeout` and
+   post-validation errors (never pre-validation; omit `Resolves:`). Surfaced by
+   `format_response`; MCP tolerates its absence. Property:
+   `response.shown == audit.command == TTY text`.
+5. Rung-1 lint (Semgrep/grep): request-derived strings reach the TTY only via
+   `shquote` or the fixed label lines; review-checklist item for rendering /
+   plan-op / composition changes.
+
+**Phase 2 — runtime self-check** (release 1.4.0):
+1. `src/shellgram.rs`: in-crate parser for the shell subset the renderer
+   emits, test-only at first — `parse(render(P))` = layout tree over
+   `random_any`, cross-checked against bash on that subset. Removes bash as the
+   oracle for the syntax half.
+2. Before prompting, re-parse the text to be shown and compare to the compiled
+   plan; fail closed (no bypass flag). Enable only after 2.1 has been green in CI
+   for a while.
+
+**Phase 3 — proofs** (no release coupling):
+1. Mock spawner → trace-equality differential test (leaf, uid, cwd, env, stdio,
+   exit status), covering `run-as` and file redirections / `with-stdin-from` —
+   closes the Rung 2 gap. Settle the **failed-`cd` divergence** here (G4.5
+   residual: the executor aborts the whole plan, a pasted `Command:` goes on
+   past `;`): make them agree or justify it in the assurance case.
+2. Kani: validation domain restrictions (no double redirect, stdin only on the
+   first pipe stage, absolute paths).
+3. Kani (Rung 3): render total and `parse(render(P)) = P` on bounded plans;
+   `shquote` round-trip.
+4. Rung 5: Creusot/Verus proof that the renderer and the executor refine one
+   shell-semantics model (extends the Rung 5 item above). After 3.1–3.3.
+
+Not doing unless evidence changes: a byte-equality "conformance" field for
+caller-sent bash (revisit only if the echo shows frequent model-side mismatches).
 
 ## Write the CC-structured Security Target document
 
