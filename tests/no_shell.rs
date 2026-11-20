@@ -60,6 +60,11 @@ fn opaque_requests() -> Vec<Request> {
         ),
         // Review C3: uutils `timeout` skips the `--` and runs `sh`.
         plan_req("timeout-dashdash-sh", exec(&["timeout", "5", "--", "sh", "-c", "true"])),
+        // Review C8: uutils `timeout` parses options after the duration.
+        plan_req(
+            "timeout-opt-after-operand",
+            exec(&["timeout", "5", "-v", "sh", "-c", "true"]),
+        ),
         // Review C4: xargs takes its program from its input (stdin is empty).
         plan_req("xargs-replace", exec(&["xargs", "-I{}", "{}"])),
     ];

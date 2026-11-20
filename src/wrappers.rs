@@ -21,8 +21,8 @@
 //! `env` that changes how the wrapped program is looked up or sets a name the
 //! `setenv` policy rejects, a `find -exec` program word containing `{}` or a
 //! `find -exec` command containing another action word, an `xargs -I`
-//! replacement string in the program word, a `--` where a program is
-//! expected, a multi-call dispatcher option, an ambiguous name and a chain
+//! replacement string in the program word, a `--` or any other option word
+//! where a program is expected, a multi-call dispatcher option, an ambiguous name and a chain
 //! deeper than [`MAX_DEPTH`] all make the leaf opaque.
 //!
 //! This module is pure: no filesystem access and no I/O. The only
@@ -594,11 +594,19 @@ pub fn unwrap(
         if r.depth > MAX_DEPTH {
             return (hops, Some(OpaqueReason::TooDeep));
         }
-        // A `--` where a wrapper's program is expected: GNU `env` would run a
-        // program named `--`, but uutils `timeout` and util-linux `chrt` skip
-        // it and run the next word, so fail closed for every wrapper.
-        if let Some(via) = r.via.filter(|_| argv[r.start] == "--") {
-            let why = "-- where the program is expected".to_string();
+        // An option word (`--`, `-v`, `--verbose`, `-s`…) where a wrapper's
+        // program is expected: GNU `env` would run a program named `--`, but
+        // uutils `timeout` keeps parsing options after its duration (review
+        // C8) and uutils `timeout` / util-linux `chrt` skip a `--`, then run
+        // the next word. What runs depends on the implementation, so fail
+        // closed for every wrapper.
+        if let Some(via) = r.via.filter(|_| argv[r.start].starts_with('-')) {
+            let word = &argv[r.start];
+            let why = if word == "--" {
+                "-- where the program is expected".to_string()
+            } else {
+                format!("option {word} where the program is expected")
+            };
             return (hops, Some(OpaqueReason::Unparsable { hop: via, why }));
         }
         let hop = hops.len();
@@ -1079,6 +1087,38 @@ mod tests {
         // `--` before the operand still ends the options.
         assert_eq!(names(&["timeout", "--", "5", "true"]), ["timeout", "true"]);
         assert!(!opaque(&["timeout", "--", "5", "true"]));
+    }
+
+    /// Review C8: uutils `timeout` keeps parsing options after its duration,
+    /// so `timeout 5 -v sh -c evil` runs `sh`. Any option word where a
+    /// wrapper's program is expected fails closed.
+    #[test]
+    fn option_word_where_the_program_is_expected_fails_closed() {
+        for (argv, word) in [
+            (&["timeout", "5", "-v", "sh", "-c", "evil"][..], "-v"),
+            (&["timeout", "5", "--verbose", "sh"], "--verbose"),
+            (&["timeout", "5", "-s", "KILL", "sh"], "-s"),
+            (&["timeout", "-k", "1", "5", "-v", "sh"], "-v"),
+            (&["chrt", "-o", "0", "-v", "sh"], "-v"),
+            (&["env", "X=1", "-i", "sh"], "-i"),
+            (&["timeout", "5", "-"], "-"),
+        ] {
+            let why = match run(argv).1 {
+                Some(OpaqueReason::Unparsable { why, .. }) => why,
+                other => panic!("{argv:?}: {other:?}"),
+            };
+            assert_eq!(
+                why,
+                format!("option {word} where the program is expected"),
+                "{argv:?}"
+            );
+        }
+        // Options before the operand are still parsed as options.
+        assert_eq!(
+            names(&["timeout", "-s", "KILL", "5", "true"]),
+            ["timeout", "true"]
+        );
+        assert!(!opaque(&["timeout", "-s", "KILL", "5", "true"]));
     }
 
     /// Review C2: a find test that takes an argument can absorb an action
