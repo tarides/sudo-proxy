@@ -24,12 +24,15 @@ There is no middle ground in polkit. The TUI mode solves this by always
 prompting for approval (one keypress, no password) while letting the OS
 handle password authentication separately.
 
-Only requests sent with `privileged: true` go to pkexec. In those, every step
-escalates, so each one raises its own dialog. A structured plan that escalates
-only some steps (through `run-as` nodes) still gets the TUI prompt and runs
-through sudo, even in `--pkexec` mode. A pkexec dialog shows a single step, so
-the unescalated steps of such a plan would otherwise run with no approval at
-all.
+Only a request sent with `privileged: true` that is a single step without
+redirection goes to pkexec. Any other privileged request (a multi-step plan, a
+step with a redirection or `with-stdin-from`, or a plan escalating only through
+`run-as` nodes) gets the TUI prompt and runs through sudo, even in `--pkexec`
+mode. A pkexec dialog shows one argv and no redirection: the daemon opens
+redirected files itself, so the dialog never names them, and with
+`pkexec-cache` the later steps of a plan would run with no dialog at all. Even
+for a single step, the dialog does not show plan `setenv`, request env or
+accepted exit codes, and shows the working directory only as `env -C`.
 
 Each escalated step runs as `pkexec env -C <dir> -- <argv>`, so it starts in
 the plan's working directory rather than the target user's home, which is
