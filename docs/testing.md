@@ -120,6 +120,7 @@ compare the prompt with the expected column:
 | `escalation-b-boundary.json` | `--no-privilege` | Only `whoami` is bright red; `echo hi` / `echo bye` uncoloured. |
 | `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
 | `escalation-d-named-user.json` | `--no-privilege` | `id -un` bright yellow (`run-as` a named non-root user). |
+| `long-argument.json` | (privileged) | `Command:` shows the whole 600-char argument (under 1024); `Steps:` line 0 is cut at 160 chars and ends with `… [450 more chars hidden]` (#85). |
 
 Run once more with `NO_COLOR=1` set in the daemon's environment: the structure
 must stay readable with no escape codes, and every escalated step still shows
