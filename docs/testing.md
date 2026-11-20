@@ -120,6 +120,7 @@ compare the prompt with the expected column:
 | `escalation-b-boundary.json` | `--no-privilege` | Only `whoami` is bright red; `echo hi` / `echo bye` uncoloured. |
 | `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
 | `escalation-d-named-user.json` | `--no-privilege` | `id -un` bright yellow (`run-as` a named non-root user). |
+| `wrappers.json` | (privileged) | `Resolves:` takes the block form and lists `env`, `true (run by env; looked up at run time)`, `timeout`, and `sh` marked `opaque — resolves only the shell (run by timeout; looked up at run time)`. |
 
 Run once more with `NO_COLOR=1` set in the daemon's environment: the structure
 must stay readable with no escape codes, and every escalated step still shows

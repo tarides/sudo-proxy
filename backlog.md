@@ -73,19 +73,13 @@ shipped in PR #67 (see changelog).
    See *"Partial-`run` retry hazard and the sudo-credential-in-pipe caveat"* for
    the mitigation menu (auth-probe before stateful stages, surface the partial
    boundary so callers resume rather than replay, advisory non-idempotency flag).
-5. **`env` hides the real program from `Resolves:`** (issue #87; also Phase 0 of
-   *"Display fidelity — Option A"* below). A step written as
-   `env VAR=… opam exec … dune …` resolves only `env`; `opam`/`dune`, the
-   programs that actually run, never appear in the resolve block. It arises
-   because `setenv` only accepts allowlisted names (`TSAN_OPTIONS`,
-   `OCAMLRUNPARAM`, … are rejected), so callers fall back to `env` (corpus cases
-   06, 22). The same blind spot lets `env sh -c …` / `nice bash …` /
-   `timeout 5 sh -c …` (and other interpreters: `python -c`, `perl -e`) escape
-   the PR #67 opaque flag and the `no_shell` policy, which only inspect the
-   program itself. Fix options: resolve the program after `env`'s `VAR=…` / option
-   arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
-   allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
-   wrapper is unnecessary. Found live-testing case 22.
+5. **`env` wrapper: what remains after #87.** The wrapper-aware unwrap shipped
+   (#87): `env VAR=… opam …` now lists `opam`, and wrapped shells /
+   interpreters are opaque. Remaining: allow non-allowlisted names in `setenv`
+   for non-root subtrees, so callers need no `env` wrapper (corpus cases 06,
+   22); and the residuals — `awk`/`sed` `e`/`system()`, `git -c`, `make`,
+   `opam exec`, `dune exec` and other open-ended runners, interpreters running
+   a script file, env names only some programs interpret (`PYTHONSTARTUP`, …).
 6. **`--pkexec` with a multi-step `privileged: true` plan** (issue #88; also
    Phase 0 of *"Display fidelity — Option A"* below). Each escalated
    step raises its own pkexec dialog, which shows only that step (and, since
@@ -154,7 +148,7 @@ every prompt-touching PR gets the pty goldens plus a live manual run.
 #86 `has_dangerous_chars` gaps (DEL/C1, U+00AD, U+061C, U+2028/2029,
 U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 bound
 each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
-above) · #87 wrapper-aware `runs_shell` (item 5 above).
+above) · #87 wrapper-aware `runs_shell` (item 5 above; done).
 
 **Phase 1 — state the invariant, make it literally true** (release 1.3.0):
 1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim
@@ -321,8 +315,8 @@ harnesses") for the framing.
 **Remaining levers** (rough payoff order):
 
 Levers 1 (flag `exec` of a shell as opaque) and 2 (the strict `no_shell`
-policy) shipped in PR #67; wrapper-hidden shells remain (see item 5 of the
-plan-model follow-ups).
+policy) shipped in PR #67; wrapper-hidden shells: see #87 (shipped); residuals
+in item 5 of the plan-model follow-ups.
 
 - **Catalogue the shell tail as first-class op proposals.** The two most common
    forces in the log.1 trail that still require the hatch: a `detach` op
