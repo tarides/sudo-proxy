@@ -71,7 +71,7 @@ invariant at a given boundary are omitted.
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
 | Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control/zero-width/bidi on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks. | G4.1, G4.2 / F1 |
-| Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Displayed command length bounded with a hidden-bytes marker. | G4.3 / F3 |
+| Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Every prompt line and block length-bounded (`Command:`, `Steps:`, `Resolves:`, metadata) with a hidden-chars marker. | G4.3 / F3 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
 
@@ -135,7 +135,7 @@ A  A root command runs that the human did NOT approve
 │   ├─ 3.2 Symlink redirection of argv[0] (/usr/local/bin/foo -> /tmp/evil)
 │   │        [resolved path + "-> target" shown → G4.2 · blocked]
 │   ├─ 3.3 Push the real command / [y/N] off-screen with a huge arg
-│   │        [length bound + hidden-bytes marker → G4.3 / F3 · blocked]
+│   │        [every prompt line and block length-bounded (`Command:`, `Steps:`, `Resolves:`, metadata) → G4.3 / F3 · blocked]
 │   └─ 3.4 Printable-range Unicode look-alike / NBSP in reason
 │            [cannot hide the real command → G4.4 · residual (accepted)]
 │

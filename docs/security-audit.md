@@ -166,6 +166,8 @@ off-screen. Same display-integrity theme as F1. The codebase already truncates c
 Recommendation: cap the displayed command length (with an explicit `… (N bytes
 hidden)` marker) and/or reject individual arguments above a sane size for display.
 
+Re-opened on the plan render path (`Steps:`/`Resolves:` lines) and closed in #85.
+
 ---
 
 ### F4 — `hosts.json` world-readable (Low, info disclosure)
