@@ -62,10 +62,10 @@ fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String
     let env = params.env.clone().unwrap_or_default();
     let reason = params.description.clone().unwrap_or_default();
 
-    if let Some(plan_json) = &params.plan {
+    let mut req = if let Some(plan_json) = &params.plan {
         let plan: protocol::Plan = serde_json::from_value(plan_json.clone())
             .map_err(|e| format!("invalid plan: {e}"))?;
-        Ok(Request::new_plan(
+        Request::new_plan(
             host,
             session,
             plan,
@@ -73,14 +73,14 @@ fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String
             reason,
             params.privileged,
             params.forward_agent,
-        ))
+        )
     } else {
         let pipeline = match (&params.pipeline, &params.argv) {
             (Some(p), _) if !p.is_empty() => p.clone(),
             (_, Some(argv)) if !argv.is_empty() => vec![argv.clone()],
             _ => return Err("Either `argv`, `pipeline`, or `plan` must be provided.".to_string()),
         };
-        Ok(Request::new(
+        Request::new(
             host,
             session,
             pipeline,
@@ -88,7 +88,26 @@ fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String
             reason,
             params.privileged,
             params.forward_agent,
-        ))
+        )
+    };
+    req.requester = mcp_requester(params.requester.as_deref());
+    Ok(req)
+}
+
+/// The `requester` value this server puts on the wire (issue #25). Everything
+/// arriving through MCP is AI-originated, so the value is forced into the `ai`
+/// namespace: absent/blank -> `"ai"`, an already-prefixed value is kept, and
+/// anything else becomes `"ai:<value>"` — a client cannot declare itself
+/// `"human"` to suppress the approver's AI banner. Still client-side only: the
+/// daemon treats the field as untrusted display metadata.
+fn mcp_requester(declared: Option<&str>) -> String {
+    let v = declared.map(str::trim).unwrap_or("");
+    if v.is_empty() || v == "ai" || v == "ai:" {
+        "ai".to_string()
+    } else if v.starts_with("ai:") {
+        v.to_string()
+    } else {
+        format!("ai:{v}")
     }
 }
 /// Total timeout for control requests (stop/ping). They never wait on a
@@ -193,6 +212,12 @@ pub struct ExecuteParams {
     /// Useful for `git clone` of private repos via SSH on a remote host.
     #[serde(default)]
     pub forward_agent: bool,
+
+    /// Optional self-identification of the AI requester (e.g. your model
+    /// name), shown to the human approver. It is always shown as `ai:<value>`,
+    /// so a request through this server is always disclosed as AI-originated.
+    #[serde(default)]
+    pub requester: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1236,6 +1261,19 @@ mod tests {
             read_timeout_for(false, Some(u64::MAX)),
             Some(Duration::from_millis(MAX_TIMEOUT_MS))
         );
+    }
+
+    #[test]
+    fn mcp_requester_is_always_in_the_ai_namespace() {
+        assert_eq!(mcp_requester(None), "ai");
+        assert_eq!(mcp_requester(Some("")), "ai");
+        assert_eq!(mcp_requester(Some("  ")), "ai");
+        assert_eq!(mcp_requester(Some("ai")), "ai");
+        assert_eq!(mcp_requester(Some("ai:")), "ai");
+        assert_eq!(mcp_requester(Some("claude-opus-5-5")), "ai:claude-opus-5-5");
+        assert_eq!(mcp_requester(Some("ai:claude")), "ai:claude");
+        assert_eq!(mcp_requester(Some("human")), "ai:human");
+        assert_eq!(mcp_requester(Some("aix")), "ai:aix");
     }
 
     #[test]

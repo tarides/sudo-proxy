@@ -109,7 +109,7 @@ a sanitized environment.*
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
 | **G4.1** | No request field rendered to `/dev/tty` can inject ANSI / control / bidi sequences. | — | |
-| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id` in `validate_request`, covering both MCP and direct-socket paths; regression test. | 2 | [discharged] |
+| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id`, `requester` in `validate_request`, covering both MCP and direct-socket paths; regression test. | 2 | [discharged] |
 | **G4.2** | The resolved absolute path of argv[0] is shown, with `-> target` when it is a symlink, so redirection cannot be hidden. | — | |
 | **Sn4.2** | `src/tui.rs` path canonicalisation + explicit failure message. | 1 | [discharged] |
 | **G4.3** | A large command cannot push the real command or the `[y/N]` line off-screen. | — | |

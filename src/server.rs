@@ -123,6 +123,17 @@ fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// ` [req <requester>]` for the daemon's stderr log lines, or empty when the
+/// peer declared none — so "approved, requested by an AI" is greppable until
+/// the append-only audit log (#6) persists the field. Self-declared, unverified.
+fn requester_tag(req: &Request) -> String {
+    if req.requester.is_empty() {
+        String::new()
+    } else {
+        format!(" [req {}]", req.requester)
+    }
+}
+
 /// Log the underlying `io::Error` from a failed `Prompter::prompt`.
 ///
 /// Verbose-only because a healthy daemon never hits this branch; when
@@ -812,7 +823,14 @@ fn handle_connection(
         };
         let cmd_display = crate::tui::command_summary(&req);
         let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
-        eprintln!("[{}] [{}] [client {}] {}", req.id, priv_label, client_ver, cmd_display);
+        eprintln!(
+            "[{}] [{}] [client {}]{} {}",
+            req.id,
+            priv_label,
+            client_ver,
+            requester_tag(&req),
+            cmd_display
+        );
     }
 
     // --pkexec hands approval to pkexec's own dialog, which shows only one
@@ -864,9 +882,10 @@ fn handle_connection(
         // (try_lock) for on-screen visibility. The grant lives only in memory
         // and dies with the daemon/tunnel; it is never persisted.
         eprintln!(
-            "[{}] [unattended] [session {}] {}",
+            "[{}] [unattended] [session {}]{} {}",
             req.id,
             req.session,
+            requester_tag(&req),
             crate::tui::command_summary(&req)
         );
         if let Ok(_g) = tty_lock.try_lock() {
@@ -1423,7 +1442,8 @@ mod tests {
             .env
             .iter()
             .all(|(k, v)| !has_dangerous_chars(k) && !has_dangerous_chars(v));
-        let fields_clean = [&req.reason, &req.session, &req.host, &req.version, &req.id]
+        let fields_clean =
+            [&req.reason, &req.session, &req.host, &req.version, &req.id, &req.requester]
             .iter()
             .all(|f| !has_dangerous_chars(f));
         argv_clean && env_clean && fields_clean
@@ -1473,17 +1493,19 @@ mod tests {
             privileged: rng.next_u64() & 1 == 0,
             forward_agent: false,
             version: rand_chars(rng, 5),
+            requester: rand_chars(rng, 6),
         };
 
         if rng.next_u64() & 1 == 0 {
             let danger = DANGEROUS[rng.below(DANGEROUS.len())];
-            match rng.below(7) {
+            match rng.below(8) {
                 0 => req.reason.push(danger),
                 1 => req.host.push(danger),
                 2 => req.session.push(danger),
                 3 => req.version.push(danger),
                 4 => req.id.push(danger),
-                5 => req.pipeline[0][0].push(danger),
+                5 => req.requester.push(danger),
+                6 => req.pipeline[0][0].push(danger),
                 _ => {
                     // Corrupt an env value (rebuild the one entry we know exists).
                     let key = req.env.keys().next().cloned().unwrap();

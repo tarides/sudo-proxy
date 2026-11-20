@@ -285,6 +285,7 @@ pub fn make_req(id: &str, pipeline: Vec<Vec<&str>>) -> Request {
         privileged: false,
         forward_agent: false,
         version: sudo_proxy::protocol::VERSION.to_string(),
+        requester: String::new(),
     }
 }
 

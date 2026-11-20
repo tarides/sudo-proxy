@@ -513,13 +513,7 @@ pub fn prompt_tty(
     let st = style();
     let Style { bold, dim, reset, .. } = st;
 
-    writeln!(tty_w, "\n{bold}━━━ Privilege Request ━━━{reset}")?;
-    writeln!(
-        tty_w,
-        "From:    {} @ {}",
-        req.session,
-        if req.host.is_empty() { "local" } else { &req.host }
-    )?;
+    write_request_header(&mut tty_w, req, &st)?;
     let client_ver = if req.version.is_empty() { "(unknown)" } else { req.version.as_str() };
     writeln!(tty_w, "Client:  sudo-proxy {client_ver}")?;
     if !req.time.is_empty() {
@@ -606,6 +600,32 @@ pub fn prompt_tty(
     writeln!(tty_w, "{bold}━━━━━━━━━━━━━━━━━━━━━━━━━{reset}")?;
 
     Ok(result)
+}
+
+/// Write the prompt header: the `━━━ Privilege Request ━━━` title, the `From:`
+/// line and, when the requester declared one, its self-identification (issue
+/// #25). A requester declaring itself an AI (`ai` / `ai:<id>`) gets a single
+/// bold yellow `[AI-AGENT REQUEST]` banner above the title — one eye-catcher,
+/// the rest of the prompt stays uncolored. The value is client-asserted, so the
+/// line says so; an empty one (legacy peer) renders nothing. Writer-generic so
+/// the bytes are unit-testable without /dev/tty.
+fn write_request_header<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -> io::Result<()> {
+    let Style { bold, reset, user, .. } = *st;
+    writeln!(w)?;
+    if req.requester_is_ai() {
+        writeln!(w, "{bold}{user}[AI-AGENT REQUEST]{reset}")?;
+    }
+    writeln!(w, "{bold}━━━ Privilege Request ━━━{reset}")?;
+    writeln!(
+        w,
+        "From:    {} @ {}",
+        req.session,
+        if req.host.is_empty() { "local" } else { &req.host }
+    )?;
+    if !req.requester.is_empty() {
+        writeln!(w, "Requester: {} (self-declared, not verified)", req.requester)?;
+    }
+    Ok(())
 }
 
 /// Write the `Execute?` question line, wrapped with the attention cues. The BEL
@@ -1531,6 +1551,46 @@ mod tests {
         assert!(!off.contains("\x1b[25m"), "blink-off leaked: {off:?}");
         assert!(off.contains("Execute as root? [y/N]"), "question text missing: {off:?}");
         assert_eq!(off, "Execute as root? [y/N] (60s timeout, default=N) ");
+    }
+
+    fn render_header(requester: &str, style: &Style) -> String {
+        use crate::protocol::{Request, ValidatedRequest};
+        let mut req = Request::new(
+            String::new(),
+            "s".into(),
+            vec![vec!["id".into()]],
+            Default::default(),
+            String::new(),
+            false,
+            false,
+        );
+        req.requester = requester.into();
+        let req = ValidatedRequest::validate(req).expect("valid");
+        let mut buf: Vec<u8> = Vec::new();
+        write_request_header(&mut buf, &req, style).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    /// Issue #25: an AI requester gets the banner above the title plus the
+    /// self-declared line; a human one only the line; a legacy (empty) one
+    /// neither. Under NO_COLOR the banner text stays, its escapes go.
+    #[test]
+    fn request_header_discloses_self_declared_requester() {
+        let ai = render_header("ai:claude", &style_for(false));
+        let banner = ai.find("[AI-AGENT REQUEST]").expect("banner missing");
+        assert!(banner < ai.find("Privilege Request").unwrap(), "banner must lead: {ai:?}");
+        assert!(ai.contains("\x1b[38;5;226m[AI-AGENT REQUEST]"), "banner not yellow: {ai:?}");
+        assert!(ai.contains("Requester: ai:claude (self-declared, not verified)"), "{ai:?}");
+
+        let human = render_header("human", &style_for(false));
+        assert!(!human.contains("AI-AGENT"), "{human:?}");
+        assert!(human.contains("Requester: human (self-declared, not verified)"), "{human:?}");
+
+        let legacy = render_header("", &style_for(false));
+        assert!(!legacy.contains("AI-AGENT") && !legacy.contains("Requester"), "{legacy:?}");
+
+        let plain = render_header("ai", &style_for(true));
+        assert!(plain.contains("[AI-AGENT REQUEST]") && !plain.contains('\x1b'), "{plain:?}");
     }
 
     /// After the answer (or timeout) the blinking question is redrawn plain, in

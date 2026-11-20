@@ -30,6 +30,7 @@ fn make_req(pipeline: Vec<Vec<&str>>) -> ValidatedRequest {
         privileged: false,
         forward_agent: false,
         version: sudo_proxy::protocol::VERSION.to_string(),
+        requester: String::new(),
     };
     ValidatedRequest::validate(req).expect("make_req builds a valid request")
 }

@@ -67,6 +67,11 @@ sudo-request --no-privilege ls /etc
 # Tag the request with a session name (default: sudo-request-cli)
 sudo-request --session my-project apt update
 
+# Declare who is asking (shown as "Requester: … (self-declared, not verified)";
+# default: human). Use e.g. "automation" from cron/CI wrappers. A value of "ai"
+# or "ai:<id>" also raises the [AI-AGENT REQUEST] banner.
+sudo-request --requester automation apt update
+
 # Send a structured plan (assembled like the MCP execute tool). Drives the full
 # plan surface — exec / run(&&) / seq(;) / alt(||) / pipe / redirect / run-as /
 # setenv / chdir / shell.
