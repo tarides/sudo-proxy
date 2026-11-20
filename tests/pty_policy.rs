@@ -17,7 +17,7 @@ fn run(mode: u32) -> (String, String) {
     // Deny so nothing is granted; we only care what was offered.
     d.answer_raw(b'n');
     assert_eq!(h.join().unwrap().status, Status::Denied);
-    let log = std::fs::read_to_string(d.dir().join("daemon.log")).unwrap_or_default();
+    let log = d.daemon_log();
     (q, log)
 }
 

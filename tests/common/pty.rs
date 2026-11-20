@@ -174,7 +174,13 @@ impl PtyDaemon {
     /// Wait for `needle` to appear after the cursor; return the text from
     /// the cursor up to and including it, and move the cursor past it.
     pub fn expect(&mut self, needle: &str) -> String {
-        let deadline = Instant::now() + STEP;
+        self.expect_within(needle, STEP)
+    }
+
+    /// [`Self::expect`] with a caller-chosen deadline, for waits longer than
+    /// [`STEP`] (the 60 s prompt timeout).
+    pub fn expect_within(&mut self, needle: &str, within: Duration) -> String {
+        let deadline = Instant::now() + within;
         let (lock, cv) = &*self.capture;
         let mut g = lock.lock().unwrap();
         loop {
@@ -245,6 +251,11 @@ impl PtyDaemon {
         self.dir.path()
     }
 
+    /// The daemon's stderr so far (`-v` output, `[unattended]` audit lines).
+    pub fn daemon_log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("daemon.log")).unwrap_or_default()
+    }
+
     /// Everything the daemon drew so far, `\r\n` folded to `\n`.
     pub fn capture(&self) -> String {
         normalize(&self.capture.0.lock().unwrap().0)
@@ -270,7 +281,7 @@ impl PtyDaemon {
     }
 
     fn fail(&self, what: &str) -> ! {
-        let log = std::fs::read_to_string(self.dir.path().join("daemon.log")).unwrap_or_default();
+        let log = self.daemon_log();
         panic!(
             "{what}\n--- pty capture (escapes visible) ---\n{}\n--- daemon stderr ---\n{log}",
             visible(&self.capture.0.lock().unwrap().0)

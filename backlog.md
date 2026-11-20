@@ -27,11 +27,11 @@ Plan, revised after a code review (full notes in the
    `tests/manual/ui/*.json` (colour and `NO_COLOR`) into
    `tests/manual/ui/golden/`, regenerated with `UPDATE_GOLDEN=1`, and asserts the
    escalation colours directly.
-3. **PR 3 — remaining scenarios:**
-   - pressing `a`, with and without `--unattended-eligible`;
-   - `--no-shell`, asserted by ordering rather than "no prompt seen";
-   - timeout: `#[ignore]` it, or add a shorten-only, capped prompt-timeout env.
-     The env would be a knob on the human gate, so decide it explicitly.
+3. **PR 3 — remaining scenarios:** done in `tests/pty_unattended.rs`: `a`, with
+   and without `--unattended-eligible` (grant keyed by session), and the
+   timeout, `#[ignore]`d (a real 60 s wait; no prompt-timeout knob on the human
+   gate). The `--no-shell` scenario (asserted by ordering) goes with the feature
+   in PR #67.
 4. **Extras:** stray input before the prompt is flushed; termios is restored;
    two prompts on one tty are shown one at a time; the foreground handoff
    doesn't hang; SIGTERM removes the socket; control/bidi characters never
