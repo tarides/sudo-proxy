@@ -9,7 +9,7 @@ for the assurance-ladder context behind the security-formalisation entries.
 only. DEL and C1 (NEL, CSI, OSC), soft hyphen, ALM, line/paragraph
 separators, word joiner and invisible operators, BOM, tag characters and
 variation selectors all reached the approval prompt. The class is now one
-rule, `c != TAB && c in Cc u Cf u Zl u Zp u Default_Ignorable_Code_Point`,
+rule, `c ≠ TAB ∧ c ∈ Cc ∪ Cf ∪ Zl ∪ Zp ∪ Default_Ignorable_Code_Point`,
 held as a table built from the Unicode 16.0.0 UCD
 (`protocol::DANGEROUS_RANGES`) and reused by the audit-record and
 `--log-json` escapers.
