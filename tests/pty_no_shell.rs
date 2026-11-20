@@ -17,6 +17,14 @@ fn check(mut d: PtyDaemon) {
     let r = common::send_request(&d.socket, &opaque);
     assert_eq!(r.status, Status::Error, "{r:?}");
     assert!(r.message.as_deref().unwrap_or("").contains("no_shell"), "{r:?}");
+    // A shell behind a wrapper is rejected the same way (#87).
+    for (id, argv) in [("ns-env", &["env", "sh", "-c", "true"][..]), ("ns-timeout", &["timeout", "5", "sh", "-c", "true"])] {
+        let mut req = common::make_req(id, vec![]);
+        req.plan = Some(Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() });
+        let r = common::send_request(&d.socket, &req);
+        assert_eq!(r.status, Status::Error, "{id}: {r:?}");
+        assert!(r.message.as_deref().unwrap_or("").contains("no_shell"), "{id}: {r:?}");
+    }
 
     let h = d.request_async(&common::make_req("ns-structured", vec![vec!["echo", "structured-ok"]]));
     let prompt = d.answer(b'y');
@@ -24,7 +32,10 @@ fn check(mut d: PtyDaemon) {
     let r = h.join().unwrap();
     assert_eq!(r.status, Status::Ok, "{r:?}");
     assert_eq!(common::decode_stdout(&r), "structured-ok\n");
-    assert!(!d.capture().contains("ns-opaque"), "the opaque request reached the tty");
+    let tty = d.capture();
+    for id in ["ns-opaque", "ns-env", "ns-timeout"] {
+        assert!(!tty.contains(id), "the opaque request {id} reached the tty");
+    }
 }
 
 #[test]

@@ -1,0 +1,6 @@
+{"op": "run-as", "as": "root", "do":
+  {"op": "seq", "steps": [
+    {"op": "exec", "argv": ["env", "X=1", "true"]},
+    {"op": "exec", "argv": ["timeout", "5", "sh", "-c", "true"]}
+  ]}
+}

@@ -35,6 +35,7 @@ const CASES: &[(&str, bool)] = &[
     ("escalation-b-boundary", false),
     ("escalation-c-ambient-plus-boundary", true),
     ("escalation-d-named-user", false),
+    ("wrappers", true),
 ];
 
 const AMBIENT_ROOT: &str = "\x1b[38;5;210m";
@@ -214,6 +215,12 @@ fn ui_prompts_no_color() {
     assert!(!step_line(get(&blocks, "escalation-b-boundary"), "echo hi").contains("sudo"));
     assert!(step_line(get(&blocks, "escalation-c-ambient-plus-boundary"), "whoami").contains("sudo whoami"));
     assert!(step_line(get(&blocks, "escalation-d-named-user"), "id -un").contains("sudo -u nobody id -un"));
+
+    // `mask` replaces the whole detail column, so the wrapper suffixes are
+    // checked on the raw block.
+    let w = get(&blocks, "wrappers");
+    assert!(w.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"), "{w}");
+    assert!(w.contains("(run by env; looked up at run time)"), "{w}");
 
     check_goldens(&blocks, "plain");
 }
