@@ -50,8 +50,53 @@ forwarded to the remote daemon with `--host`; to *loosen* a remote's own
 policy, edit its hosts.json. As with `unattended_eligible`, the file's policy
 is trusted only if the file and its directories are yours and not group- or
 world-writable; otherwise the daemon warns and fails closed, here meaning strict
-mode **on**. Wrappers (`env sh -c`, `nice bash …`) and other
-interpreters (`python -c`) are not detected yet.
+mode **on**.
+
+**Wrappers are looked through** (issue #87). The daemon unwraps each stage's
+argv through known wrappers to the programs that actually run, and classifies
+each one:
+
+- **shell** (`sh`, `bash`, `dash`, `zsh`, …): opaque, *resolves only the shell*;
+- **wrapper**, unwrapped: `env`, `nice`, `nohup`, `setsid`, `stdbuf`,
+  `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`, the multi-call
+  dispatchers `busybox`, `toybox` and `coreutils` (their `argv[1]` is the
+  applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`);
+- **inline-code interpreter**: `python`, `perl`, `ruby`, `php` and `lua`,
+  each optionally followed by digits and dots only (`python3.12`, `perl5.38.2`;
+  not `python3-config` or `perlcritic`), plus `pypy`, `pypy3`, `luajit`,
+  `node`, `nodejs` and `Rscript`. Opaque with an inline-code flag (`-c`,
+  `-e`, `-E`, `-p`, `--eval`, `-r`, …) or with no script operand (the program
+  is read from stdin). A script or module (`python3 x.py`, `-m pip`) is not
+  flagged;
+- **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
+  `unshare`, `nsenter`, `flock`, `watch`, `script`, `ssh`, `systemd-run`):
+  always opaque, *runs a program the prompt does not unwrap*;
+- anything else is transparent.
+
+The unwrap **fails closed**: the stage is opaque on a wrapper option its table
+does not list (GNU long-option abbreviations such as `--sig=KILL` included;
+uutils accepts more spellings than GNU, and those are rejected too), a missing
+option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
+changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
+assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
+`BASH_ENV`, `ENV`, `IFS`), a `find -exec` program word containing `{}`, a
+dispatcher called with an option (`busybox --list`), a name whose resolved
+binary is a different wrapper, and a chain deeper than 8. As in GNU `env`,
+`--` ends `env`'s options only before the first assignment:
+`env X=1 -- true` runs a program named `--`.
+
+The `Resolves:` block lists every program, the wrapped ones with
+`(run by <wrapper>)`. For an escalated stage the wrapper looks its program up
+at run time on sudo's `secure_path` (or pkexec's environment), so that entry
+shows the name only, with `(run by <wrapper>; looked up at run time)`; shell
+and interpreter detection is by name first and does not depend on that lookup.
+The `no_shell` rejection gives the same reason as the prompt, e.g.
+`stage 0 runs sh via env: opaque — resolves only the shell`.
+
+Not detected (residuals): `awk`/`sed` `e`/`system()`, `git -c`/aliases,
+`make`, `opam exec`, `dune exec`, `nix-shell --run`, `docker run` and other
+open-ended command runners; interpreters running a script file; env names
+that some program interprets (`PYTHONSTARTUP`, `PERL5OPT`, …).
 
 ## Command-line
 

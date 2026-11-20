@@ -75,6 +75,7 @@ invariant at a given boundary are omitted.
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
 | Spoofing | A same-UID process **types the answer itself**: synthetic keystrokes into the approval terminal (`tmux send-keys`, `screen -X stuff`, kitty/wezterm remote control, Konsole D-Bus, X11 XTEST, `TIOCSTI`). The typical requester (an agent) has a same-UID shell, so A1 reaches this as A2. | The daemon refuses to start in a terminal that accepts such input (`ttyguard`: multiplexer `TERM`/`$TMUX`/`$STY`/`$ZELLIJ`, remote-control emulators, VS Code, Emacs, X11 without Wayland) unless started with `--allow-injectable-tty`, which puts a warning line in every prompt. There is deliberately no `hosts.json` equivalent, since an agent can write that file and restart the daemon through MCP. Unprivileged children run in their own session, with no controlling terminal, so they cannot `TIOCSTI` into the prompt. Legacy `TIOCSTI` is reported at startup. `sudo-proxy-mcp` scrubs the launcher's terminal variables from the window it spawns. | A1 (assumption, now checked) / GHSA-cpmp-67wf-gwmx |
+| Elevation | Wrapper (`env`, `nice`, `timeout`, `coreutils`…) or inline interpreter hides a shell from the opaque flag and `no_shell`; `env LD_PRELOAD=…` injects code into a vouched program. | Wrapper-aware unwrap; unparsable wrapper, PATH change, rejected env name or unknown runner → opaque. | G4.7 |
 
 ### B4 — daemon → exec → root (A1)
 
@@ -139,10 +140,12 @@ A  A root command runs that the human did NOT approve
 │   │        [length bound + hidden-bytes marker → G4.3 / F3 · blocked]
 │   ├─ 3.4 Printable-range Unicode look-alike / NBSP in reason
 │   │        [cannot hide the real command → G4.4 · residual (accepted)]
-│   └─ 3.5 Answer the prompt without the human: inject `y` into the TTY
-│            [startup refusal of injectable terminals; children without a
-│             controlling tty → A1 / GHSA-cpmp-67wf-gwmx
-│             · blocked for detected terminals (residual: undetected ones)]
+│   ├─ 3.5 Answer the prompt without the human: inject `y` into the TTY
+│   │        [startup refusal of injectable terminals; children without a
+│   │         controlling tty → A1 / GHSA-cpmp-67wf-gwmx
+│   │         · blocked for detected terminals (residual: undetected ones)]
+│   └─ 3.6 Shell or inline code behind a wrapper (env sh -c, python3 -c)
+│            [wrapper-aware unwrap → G4.7 · mitigated; residual: awk/sed/script interpreters]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
