@@ -380,3 +380,94 @@ fn pkexec_mode_still_prompts_for_run_as_plans() {
     assert_eq!(resp.status, Status::Denied, "got {resp:?}");
     assert!(!marker.exists(), "an unescalated step ran without approval");
 }
+
+/// `--pkexec` delegates to pkexec's dialog only a `privileged: true` request
+/// that compiles to one leaf with no redirection: the dialog shows one argv
+/// and never the files the daemon opens for a redirect. Every other privileged
+/// shape — several leaves, or a redirected single leaf — must reach the TUI
+/// prompt (#88).
+///
+/// Safety: every argv[0] is a nonexistent program. If the gate regresses and a
+/// request reaches `exec_pkexec`, `check_pkexec_leaves` spawns its harmless
+/// `env -C / -- true` probe once, then `build_command` fails with "command not
+/// found" before any real pkexec runs the test argv: the response is an error,
+/// the audit outcome is `pkexec`, the prompt count does not move, and no
+/// polkit dialog ever names the test program.
+#[test]
+fn pkexec_mode_prompts_for_multi_leaf_privileged_plans() {
+    const NO_SUCH: &str = "sudo-proxy-test-88-no-such-cmd";
+    let server = common::start_test_server(common::TestServerOpts {
+        pkexec_only: true,
+        ..Default::default()
+    });
+    server.prompter.set_response(|_| {
+        (
+            std::time::Duration::ZERO,
+            sudo_proxy::tui::PromptResult::Denied,
+        )
+    });
+    let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let target = dir.path().join("redirected");
+    let leaf = |n: &str| exec(&[NO_SUCH, n]);
+    let two = || vec![leaf("1"), leaf("2")];
+
+    let shapes: Vec<(&str, Plan)> = vec![
+        ("run", Plan::Run { steps: two() }),
+        ("seq", Plan::Seq { steps: two() }),
+        ("alt", Plan::Alt { steps: two() }),
+        ("pipe", Plan::Pipe { stages: two() }),
+        (
+            "redirect",
+            Plan::Redirect {
+                stream: Stream::Stdout,
+                target: RedirTarget::File {
+                    path: target.to_string_lossy().into_owned(),
+                    mode: WriteMode::Truncate,
+                },
+                body: Box::new(leaf("1")),
+            },
+        ),
+        (
+            "with-stdin-from",
+            Plan::WithStdinFrom {
+                path: "/dev/null".into(),
+                body: Box::new(leaf("1")),
+            },
+        ),
+    ];
+
+    for (i, (name, plan)) in shapes.iter().enumerate() {
+        let mut req = Request::new_plan(
+            String::new(),
+            "test".into(),
+            plan.clone(),
+            HashMap::new(),
+            String::new(),
+            true,
+            false,
+        );
+        req.id = format!("pkexec-88-{name}");
+        let before = server.prompter.call_count();
+        let resp = server.send(&req);
+        assert_eq!(
+            server.prompter.call_count(),
+            before + 1,
+            "{name}: the TUI prompt was skipped"
+        );
+        assert_eq!(resp.status, Status::Denied, "{name}: got {resp:?}");
+        let rec = server.audit_for(&req.id);
+        assert_eq!(rec["outcome"], "denied", "{name}: {rec}");
+        assert_eq!(server.audit_records().len(), i + 1, "{name}: record count");
+    }
+    assert!(
+        !target.exists(),
+        "a redirect target was opened without approval"
+    );
+
+    let records = server.audit_records();
+    assert_eq!(records.len(), shapes.len());
+    assert!(
+        records.iter().all(|r| r["outcome"] != "pkexec"),
+        "a request was delegated to pkexec: {records:?}"
+    );
+}

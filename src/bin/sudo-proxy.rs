@@ -252,7 +252,7 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("Options:");
                 eprintln!("  --socket PATH               Socket path (default: $XDG_RUNTIME_DIR/sudo-proxy.sock)");
                 eprintln!("  --host HOST                 Connect to remote host via SSH tunnel");
-                eprintln!("  --pkexec                    Use pkexec directly (no TUI prompt, pkexec handles both auth and approval)");
+                eprintln!("  --pkexec                    Delegate approval of single-step, unredirected privileged requests to pkexec's dialog (no TUI prompt); other privileged plans still get the TUI prompt and sudo");
                 eprintln!("  --verbose, -v               Print startup info and log each request to stderr");
                 eprintln!("  --log-json                  Log each request's plan as pretty-printed JSON to stderr");
                 eprintln!("  --unattended-eligible       Allow a human to grant unattended unprivileged execution");

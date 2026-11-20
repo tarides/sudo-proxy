@@ -86,15 +86,14 @@ shipped in PR #67 (see changelog).
    arguments (like a wrapper-aware resolver, and flag an unresolvable one), or
    allow non-allowlisted names in `setenv` for non-root subtrees so the `env`
    wrapper is unnecessary. Found live-testing case 22.
-6. **`--pkexec` with a multi-step `privileged: true` plan** (issue #88; also
-   Phase 0 of *"Display fidelity — Option A"* below). Each escalated
-   step raises its own pkexec dialog, which shows only that step (and, since
-   steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
-   program). With the `pkexec-cache` polkit rule, steps after the first run with
-   no dialog at all. Options: reject multi-leaf plans in `--pkexec` mode, or
-   show the whole plan in the TUI and use pkexec only to authenticate. Plans
-   that escalate only via `run-as` already take the TUI prompt (PR #59 review
-   fix). Found in the PR #59 review.
+6. **pkexec dialog names `/usr/bin/env`** (left over from #88). Use
+   `pkexec --keep-cwd` when polkit ≥ 121 (probe once, like
+   `env_supports_chdir`), or skip `env -C` when the cwd is the target user's
+   home.
+7. **Does a single-leaf plan's `setenv` reach the program under `--pkexec`?**
+   pkexec resets the environment. If it does not, either pass it as `env K=V`
+   arguments (so the dialog shows it) or route `setenv` plans to the TUI and
+   sudo. Found in the #88 plan review.
 
 ## Cap far-future request timestamps, then re-climb the ladder to Rung 4
 
@@ -155,6 +154,8 @@ every prompt-touching PR gets the pty goldens plus a live manual run.
 U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 bound
 each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
 above) · #87 wrapper-aware `runs_shell` (item 5 above).
+
+Done: #88.
 
 **Phase 1 — state the invariant, make it literally true** (release 1.3.0):
 1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim

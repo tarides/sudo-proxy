@@ -3,6 +3,28 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — `--pkexec` delegates only single-step privileged requests to pkexec (#88)
+
+Under `--pkexec`, every `privileged: true` request went to pkexec, one dialog
+per escalated step. A dialog shows a single argv (named `/usr/bin/env`, since
+steps run as `pkexec env -C DIR -- argv`) and never the files the daemon opens
+for a redirection, so no dialog showed the whole plan, and with `pkexec-cache`
+the later steps ran with no dialog at all. Now only a `privileged: true`
+request that compiles to one step with no redirection is delegated to pkexec
+(`delegate_to_pkexec` in `src/server.rs`, reading the same views the prompt
+renders). Every other privileged request (multi-step, redirected, or escalating
+only through `run-as`) gets the TUI prompt and runs through sudo; a `--pkexec`
+user without sudo rights now gets a sudo failure after approving such a plan,
+as `run-as` plans already did, and these requests are audited as
+`approved`/`denied`/`timeout` instead of `pkexec`. Unchanged: the dialog still
+names `/usr/bin/env` and omits env and accepted exit codes (backlog items
+"pkexec dialog names `/usr/bin/env`" and "Does a single-leaf plan's `setenv`
+reach the program under `--pkexec`?"). Tests: a unit table for the predicate, `tests/plan_exec.rs`
+`pkexec_mode_prompts_for_multi_leaf_privileged_plans` (run/seq/alt/pipe,
+redirect, with-stdin-from; one `denied` audit record each, none `pkexec`), and
+the pty test `pkexec_flag_multi_step_plan_gets_the_tui_prompt` through the real
+CLI with `DISPLAY` set. G5.4 / Sn5.4 and threat-model leaf 4.5 added.
+
 ## Unreleased — Audit log for every request outcome (#65)
 
 The daemon logged prompted requests and unattended runs, and only with `-v`. It
