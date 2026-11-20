@@ -22,9 +22,12 @@ runs with less scrutiny than the Bash tool"):
   requires (1) an operator to set `"unattended_eligible": true` in that host's
   `~/.config/sudo-proxy/hosts.json` (an out-of-band file edit — nothing on the
   wire can set it), and (2) a human to answer `a` at a prompt. Only then do
-  subsequent unprivileged commands run unattended, logged, **for that session
-  only** — the grant is in-memory and never persisted, so it is gone when the
-  daemon or SSH tunnel ends. On a non-eligible daemon, `a` approves just the one
+  subsequent unprivileged commands run unattended, logged, **only for requests
+  carrying the same `session` name** as the one approved (other clients of the
+  same daemon are still prompted) — the grant is in-memory and never persisted,
+  so it is gone when the daemon or SSH tunnel ends. `session` is chosen by the
+  client, so this keeps cooperating clients apart; it is not a boundary against
+  a same-user process that reuses another client's session name. On a non-eligible daemon, `a` approves just the one
   command. The **privileged** gate is never relaxed.
 
 Pass `--unattended-eligible` when starting a daemon to make it eligible without

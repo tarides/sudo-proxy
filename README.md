@@ -60,7 +60,7 @@ your permission rules), and loopback aliases like `127.0.0.1` cannot dodge that.
 sudo-proxy handles privilege escalation and commands on remote hosts; there,
 unprivileged commands are gated the same way, and the per-command gate is only
 relaxed if you deliberately mark a host eligible in `hosts.json` *and* confirm
-once per session (a grant that is never persisted). See
+once per session name (a grant that is never persisted). See
 [REVIEWING.md](REVIEWING.md) invariant **G7**.
 
 **Escalate vs. confine.** sudo-proxy's security model is the inverse of an agent
