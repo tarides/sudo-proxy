@@ -2328,7 +2328,7 @@ mod tests {
         6 + 2 * (2 * crate::protocol::MAX_PLAN_DEPTH + 3) + MAX_DISPLAY_LINE_CHARS + MARKER_MAX;
     /// A `Resolves:` row or line: up to three clipped strings (name, resolved,
     /// canonical) and fixed separators.
-    const RESOLVES_BOUND: usize = 3 * (MAX_DISPLAY_LINE_CHARS + MARKER_MAX) + 64;
+    const RESOLVES_BOUND: usize = 3 * (MAX_DISPLAY_LINE_CHARS + MARKER_MAX) + 32;
     const PLAN_BOUND: usize = if STEPS_BOUND > RESOLVES_BOUND { STEPS_BOUND } else { RESOLVES_BOUND };
 
     /// `s` with every CSI escape removed: what the terminal shows.
