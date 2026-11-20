@@ -94,6 +94,26 @@ fn check_age(age: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Reject a `stop` dated before this daemon instance started (issue #63).
+///
+/// Replay protection (`SeenIds`) is in memory, per instance, so on its own it
+/// would let a stop captured from a previous instance stop a freshly restarted
+/// one while still inside the freshness window. Any stop accepted by an
+/// earlier instance is dated before that instance exited, hence before this
+/// one started. The comparison is strict: `time` has one-second resolution and
+/// a legitimate request satisfies `floor(sent) >= floor(started)`, so `<` never
+/// rejects one (barring clock skew between client and daemon). The residual
+/// gap is a restart within the same wall-clock second as the original stop.
+fn check_not_before_start(req_epoch: u64, started_epoch: u64) -> Result<(), String> {
+    if req_epoch < started_epoch {
+        return Err(format!(
+            "stop request predates this daemon instance (request {}s before start)",
+            started_epoch - req_epoch
+        ));
+    }
+    Ok(())
+}
+
 /// Recover poisoned mutex guards. The two mutexes in this module guard
 /// `SeenIds` (whose only mutation is insert / evict — no broken
 /// invariant after a panic) and `()` (the TTY serializer — no state).
@@ -137,6 +157,24 @@ impl Drop for InFlightGuard {
 /// now, in seconds: positive for the past, negative for the future. A future
 /// timestamp is no longer clamped to 0 — `check_age` bounds it.
 fn parse_age(timestamp: &str) -> Option<i64> {
+    let ts_secs = parse_epoch(timestamp)?;
+    let now_secs = i64::try_from(now_epoch()?).ok()?;
+    let ts_secs = i64::try_from(ts_secs).ok()?;
+    now_secs.checked_sub(ts_secs)
+}
+
+/// Current wall-clock time in whole seconds since the Unix epoch.
+fn now_epoch() -> Option<u64> {
+    use std::time::SystemTime;
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Parse an ISO 8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) into seconds
+/// since the Unix epoch. Pure: no clock read.
+fn parse_epoch(timestamp: &str) -> Option<u64> {
     // Expect format: 2026-02-13T14:30:00Z or similar
     // Minimal parser for YYYY-MM-DDTHH:MM:SSZ
     let ts = timestamp.trim().trim_end_matches('Z');
@@ -144,11 +182,6 @@ fn parse_age(timestamp: &str) -> Option<i64> {
     if parts.len() != 2 {
         return None;
     }
-
-    use std::time::SystemTime;
-    let now = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .ok()?;
 
     let date_parts: Vec<u64> = parts[0].split('-').filter_map(|s| s.parse().ok()).collect();
     let time_parts: Vec<u64> = parts[1].split(':').filter_map(|s| s.parse().ok()).collect();
@@ -159,18 +192,14 @@ fn parse_age(timestamp: &str) -> Option<i64> {
     // The pure date-arithmetic core lives in `datetime::ymd_hms_to_epoch`
     // (the reverse of `epoch_to_iso`), where Kani proves it panic/overflow/
     // wrap-free over the whole u64 domain — see docs/formalisation-roadmap.md.
-    let ts_secs = crate::datetime::ymd_hms_to_epoch(
+    crate::datetime::ymd_hms_to_epoch(
         date_parts[0],
         date_parts[1],
         date_parts[2],
         time_parts[0],
         time_parts[1],
         time_parts[2],
-    )?;
-
-    let now_secs = i64::try_from(now.as_secs()).ok()?;
-    let ts_secs = i64::try_from(ts_secs).ok()?;
-    now_secs.checked_sub(ts_secs)
+    )
 }
 
 fn runtime_dir() -> PathBuf {
@@ -422,6 +451,10 @@ pub fn run(
     in_flight: Arc<AtomicUsize>,
     tty_lock: Arc<Mutex<()>>,
 ) -> std::io::Result<()> {
+    // Taken before the socket exists, so no request this instance can
+    // receive is dated earlier than a legitimate sender could have stamped it.
+    let started_epoch = now_epoch()
+        .ok_or_else(|| io::Error::other("system clock is before the Unix epoch"))?;
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
 
@@ -512,6 +545,7 @@ pub fn run(
                 seen,
                 tty,
                 shutdown,
+                started_epoch,
             );
         });
     }
@@ -581,6 +615,7 @@ fn handle_connection(
     seen_ids: Arc<Mutex<SeenIds>>,
     tty_lock: Arc<Mutex<()>>,
     shutdown: Arc<AtomicBool>,
+    started_epoch: u64,
 ) {
     // Defense-in-depth: refuse connections from other UIDs even though the
     // socket file is 0600 inside a 0700 runtime dir.
@@ -693,8 +728,9 @@ fn handle_connection(
     }
 
     // Control actions, dispatched only after every gate above (peer uid,
-    // validation, freshness, replay) — a captured stop request cannot be
-    // replayed later to take the daemon down.
+    // validation, freshness, replay). Replay protection is per instance; a
+    // stop additionally must not predate this instance (issue #63), so a
+    // captured stop can be replayed neither here nor against a restart.
     match req.action {
         crate::protocol::Action::Ping => {
             if verbose {
@@ -707,6 +743,15 @@ fn handle_connection(
             return;
         }
         crate::protocol::Action::Stop => {
+            // `time` already parsed in `check_freshness`; re-parse is total.
+            let gate = parse_epoch(&req.time)
+                .ok_or_else(|| "malformed time field".to_string())
+                .and_then(|t| check_not_before_start(t, started_epoch));
+            if let Err(msg) = gate {
+                let resp = Response::error(&req.id, &msg);
+                let _ = write_response(&mut stream, &resp);
+                return;
+            }
             // No approval prompt (by design): a same-UID peer can already
             // SIGTERM the daemon, so the gate would add friction without
             // adding a security boundary. The TTY notice keeps the human
@@ -938,6 +983,27 @@ mod tests {
         let e = escape_for_terminal(s);
         assert_eq!(e, "a\\u{1b}[2J\\u{9b}31m\\u{7f}\\u{202e}b\\u{d}c\n\td");
         assert!(!e.chars().any(|c| crate::protocol::has_dangerous_chars(&c.to_string()) && c != '\n'));
+    }
+
+    /// Issue #63: a stop dated before the daemon started is rejected; one
+    /// dated at or after the start second is accepted.
+    #[test]
+    fn check_not_before_start_boundaries() {
+        let start = 1_800_000_000;
+        assert!(check_not_before_start(start, start).is_ok(), "same second");
+        assert!(check_not_before_start(start + 1, start).is_ok(), "after");
+        let err = check_not_before_start(start - 1, start).unwrap_err();
+        assert!(err.contains("predates"), "{err}");
+        assert!(check_not_before_start(0, start).is_err(), "far past");
+    }
+
+    #[test]
+    fn parse_epoch_round_trips_epoch_to_iso() {
+        for secs in [0u64, 951_782_400, 1_800_000_000, 4_102_444_799] {
+            let iso = crate::datetime::epoch_to_iso(secs);
+            assert_eq!(parse_epoch(&iso), Some(secs), "{iso}");
+        }
+        assert_eq!(parse_epoch("not-a-time"), None);
     }
 
     fn fake_clock() -> (Arc<Mutex<Instant>>, impl Fn() -> Instant + Send + 'static) {

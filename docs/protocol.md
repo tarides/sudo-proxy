@@ -48,8 +48,13 @@ shut down cleanly — it prints a notice on its TTY (no approval prompt),
 replies `ok`, and exits; `"action": "ping"` replies `ok` with
 `"message": "pong"` without prompting. Both are sent with
 `"pipeline": []` and pass every gate an exec request does (same-UID
-check, field sanitization, freshness, replay protection), so a captured
-stop request cannot be replayed later. Compatibility: a pre-1.1 daemon
+check, field sanitization, freshness, replay protection). Replay
+protection remembers request ids in memory, per daemon instance; so that a
+captured stop cannot take down a *restarted* daemon either, a `stop` whose
+`time` is earlier than the daemon's own start (to the second) is also
+rejected (`"stop request predates this daemon instance"`). The one gap left
+is a restart within the same wall-clock second as the original stop.
+Compatibility: a pre-1.1 daemon
 ignores the unknown `action` key and rejects the empty pipeline at
 validation — before any prompt — with `"pipeline must not be empty"`;
 since every response carries the daemon's `version`, new clients use
