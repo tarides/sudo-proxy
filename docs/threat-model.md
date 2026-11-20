@@ -147,9 +147,13 @@ A  A root command runs that the human did NOT approve
     │         · blocked (residual: first-contact MITM, assumption A4)]
     ├─ 4.3 Exhaust resources to make the gate fail open
     │        [caps + default-deny timeout → G5.2 / G6.4 · blocked]
-    └─ 4.4 Tamper hosts.json to weaken the gate
-             [enforced owner/mode check / F4; privileged gate independent → G5.3 · blocked
-              (residual: unprivileged auto-approve, by design)]
+    ├─ 4.4 Tamper hosts.json to weaken the gate
+    │        [enforced owner/mode check / F4; privileged gate independent → G5.3 · blocked
+    │         (residual: unprivileged auto-approve, by design)]
+    └─ 4.5 Use `--pkexec` delegation to run a multi-step plan behind single-step
+             dialogs (or none, under `pkexec-cache`)
+             [single-leaf delegation → G5.4 / #88 · blocked (residual: dialog names
+              `/usr/bin/env` and omits env / exit codes; `pkexec-cache` documented as unsafe)]
 ```
 
 ## Coverage and residuals
@@ -178,6 +182,12 @@ is unaccounted for. The residuals — already on record and accepted — are:
   it. It is tamper-evident against other users, not against the requester. The
   syslog copy, held by the system logger, is the stronger record; ship it off
   the host for a record the requester cannot reach.
+- **4.5 — `--pkexec` delegation (#88, narrowed).** Only a `privileged: true`
+  request that is one step with no redirection is delegated to pkexec's dialog;
+  every other privileged plan gets the TUI prompt and sudo. The dialog still
+  names `/usr/bin/env`, shows the working directory only as `env -C`, and omits
+  plan `setenv`, request env and accepted exit codes; `pkexec-cache` (opt-in,
+  documented as unsafe) removes the dialog altogether.
 
 These residuals were the inputs to **Rung 4**, now discharged
 ([roadmap](formalisation-roadmap.md#the-rigor-ladder)): the policy-transition

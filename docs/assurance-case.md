@@ -126,12 +126,14 @@ keypress binds to the command shown.*
 
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
-| **G5.1** | `privileged:true` always reaches the Y/N gate regardless of any policy. | — | |
+| **G5.1** | `privileged:true` always reaches the Y/N gate regardless of any policy. Exception: under the opt-in `--pkexec` flag, polkit's dialog replaces the Y/N gate for a single unredirected escalated step; see G5.4. | — | |
 | **Sn5.1** | TLC-checked: the `PolicyFlipsOnlyOnKeypress` invariant of [`proofs/tla/`](../proofs/tla/) proves the policy flag flips only via an interactive `a` keypress on an unprivileged request — never a request field, replay, MCP flag, or timeout — over all attacker forgeries/replays and operator choices. `src/server.rs`. | 4 | [discharged] (model-checked) |
 | **G5.2** | The prompt reads a single keypress in non-canonical mode and times out after 60 s (default **deny**). | — | |
 | **Sn5.2** | `src/tui.rs` prompt; timeout test. | 1 | [discharged] |
 | **G5.3** | No policy value relaxes the **privileged** gate: `privileged:true` requires a `y` keypress regardless of `unattended_eligible` or the session grant. | — | |
 | **Sn5.3** | TLC-checked: `PrivilegedGateIndependentOfPolicy` ([`proofs/tla/`](../proofs/tla/)) proves the privileged gate requires a `y` keypress for *any* eligibility/grant state. The *unprivileged* side (eligibility + session grant) is the second invariant **G7** below. | 4 | [discharged] (model-checked) |
+| **G5.4** | Under `--pkexec`, approval is delegated to polkit only for a request whose dialog shows one escalated argv with no redirection (`privileged: true`, one leaf, no redirection); every other privileged request reaches the TUI Y/N gate. | — | |
+| **Sn5.4** | `src/server.rs` `delegate_to_pkexec` (unit table `delegate_to_pkexec_only_for_a_single_plain_leaf`; it reads the same `plan_display` views the prompt renders); `tests/plan_exec.rs` `pkexec_mode_prompts_for_multi_leaf_privileged_plans`, `pkexec_mode_still_prompts_for_run_as_plans`; `tests/pty_e2e.rs` `pkexec_flag_multi_step_plan_gets_the_tui_prompt`. Residuals: the dialog names `/usr/bin/env` and shows the working directory only as `env -C DIR`; it does not show plan `setenv`, request env or `with-accepted-exit-codes` (whether `setenv` reaches the program under pkexec at all is unverified; see backlog); `pkexec-cache` makes even a single-step request run with no dialog (documented as not recommended). | 1–2 | [discharged] |
 
 ### G6 — Adversary cannot bypass the gate
 
