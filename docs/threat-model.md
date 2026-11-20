@@ -70,7 +70,7 @@ invariant at a given boundary are omitted.
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
-| Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control/zero-width/bidi on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks. | G4.1, G4.2 / F1 |
+| Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks; filesystem-derived `Resolves:` paths escaped (#86). | G4.1, G4.2 / F1 |
 | Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Displayed command length bounded with a hidden-bytes marker. | G4.3 / F3 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
@@ -169,6 +169,10 @@ is unaccounted for. The residuals — already on record and accepted — are:
   remote daemon still gates unattended exec). See finding F5.
 - **3.4 — look-alike `reason` (F1 residual).** Printable Unicode can mislead but
   cannot conceal the real command line, which is printed separately.
+  Combining overlays (U+0334–0338), RTL letters and whitespace look-alikes
+  (U+00A0, U+2000–200A, U+3000) remain accepted after #86: they are printable,
+  and `shquote` single-quotes any non-ASCII token, so they cannot sit next to an
+  operator.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no
   `StrictHostKeyChecking`; safety depends on the remote being in `known_hosts`
   first, or configuring `StrictHostKeyChecking=accept-new`.
