@@ -152,7 +152,10 @@ every prompt-touching PR gets the pty goldens plus a live manual run.
 **Phase 0 — close the current gaps** (independent; patch releases 1.2.x):
 #86 `has_dangerous_chars` gaps (DEL/C1, U+00AD, U+061C, U+2028/2029,
 U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 bound
-each `Steps:` line like `Command:` · ~~#88 `--pkexec` multi-leaf plans~~ (done) · #87 wrapper-aware `runs_shell` (item 5 above).
+each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
+above) · #87 wrapper-aware `runs_shell` (item 5 above).
+
+Done: #88.
 
 **Phase 1 — state the invariant, make it literally true** (release 1.3.0):
 1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim

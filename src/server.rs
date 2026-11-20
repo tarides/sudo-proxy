@@ -1134,8 +1134,6 @@ mod tests {
     use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
 
-    /// `--log-json` prints request bytes before validation, on the approval
-    /// terminal: escape, C1, DEL and bidi characters must come out inert.
     fn leaf_view(privilege: LeafPrivilege, redirects: &str) -> LeafView {
         LeafView {
             stage_id: 0,
@@ -1178,6 +1176,8 @@ mod tests {
         assert!(!delegate_to_pkexec(true, Mode::Local, false, &[nobody()]));
     }
 
+    /// `--log-json` prints request bytes before validation, on the approval
+    /// terminal: escape, C1, DEL and bidi characters must come out inert.
     #[test]
     fn escape_for_terminal_neutralises_control_and_bidi() {
         let s = "a\x1b[2J\u{9b}31m\u{7f}\u{202e}b\rc\n\td";
