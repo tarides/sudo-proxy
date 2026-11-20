@@ -99,8 +99,8 @@ a sanitized environment.*
 | **Sn3.1** | `Command::new(argv[0]).args(…)`, never `sh -c` (`src/executor.rs`); the multi-stage `shell_escape` fuzzed with 5000 inputs, round-tripped through `/bin/sh` byte-for-byte. | 2 | [partial] → Flux boundary type (Rung 3) |
 | **G3.2** | The environment is a hard-reject allowlist; `LD_PRELOAD`/`LD_*`/`IFS`/`BASH_ENV`/`SSH_AUTH_SOCK` are rejected, not stripped. | — | |
 | **Sn3.2** | `src/executor.rs` env sanitization; login defaults from `getpwuid(geteuid())`, not the request. | 1–2 | [discharged] |
-| **G3.3** | Inputs carrying control / zero-width / bidi characters are rejected before use. | — | |
-| **Sn3.3** | `has_dangerous_chars()` over every `pipeline` arg and `env` key/value; `tests/validation.rs`. | 2 | [discharged] |
+| **G3.3** | Inputs carrying control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters are rejected before use. | — | |
+| **Sn3.3** | `has_dangerous_chars()` over every `pipeline` arg and `env` key/value; `tests/validation.rs` (widened in #86; class checked exhaustively against the UCD; Kani proves string/char agreement). | 2 | [discharged] |
 
 ### G4 — Faithful display at the gate
 
@@ -108,8 +108,8 @@ a sanitized environment.*
 
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
-| **G4.1** | No request field rendered to `/dev/tty` can inject ANSI / control / bidi sequences. | — | |
-| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id`, `requester` in `validate_request`, covering both MCP and direct-socket paths; regression test. | 2 | [discharged] |
+| **G4.1** | No request field rendered to `/dev/tty` can inject ANSI or control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters. | — | |
+| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id`, `requester` in `validate_request`, covering both MCP and direct-socket paths; regression test (widened in #86; class checked exhaustively against the UCD; Kani proves string/char agreement). | 2 | [discharged] |
 | **G4.2** | The resolved absolute path of argv[0] is shown, with `-> target` when it is a symlink, so redirection cannot be hidden. | — | |
 | **Sn4.2** | `src/tui.rs` path canonicalisation + explicit failure message. | 1 | [discharged] |
 | **G4.3** | A large command cannot push the real command or the `[y/N]` line off-screen. | — | |

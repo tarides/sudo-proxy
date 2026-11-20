@@ -24,10 +24,11 @@ in [usage.md](usage.md)).
 **No shell invocation:** commands are executed via `Command::new(argv[0]).args(…)`,
 never `sh -c`. This prevents `;`, `|`, `&&` injection.
 
-**Input validation:** argv and env strings are rejected if they contain control
-characters (0x00–0x1F except tab), zero-width characters (U+200B–U+200F), or
-bidi override characters (U+202A–U+202E, U+2066–U+2069) that could mislead
-the user during TUI approval.
+**Input validation:** argv and env strings are rejected if they contain control,
+format, separator or default-ignorable characters (Unicode Cc, Cf, Zl, Zp and
+Default_Ignorable_Code_Point, except tab: e.g. ESC, DEL, C1, soft hyphen,
+zero-width, bidi controls, BOM, tag characters, variation selectors) that could
+mislead the user during TUI approval.
 
 **Replay protection:** request UUIDs are tracked in a set that is cleared every
 1000 entries. Duplicate IDs are rejected. Requests must carry a non-empty

@@ -179,7 +179,8 @@ execute({"argv": ["apt", "install", "nginx"], "description": "Install nginx"})
 
 Each `execute` shows the exact command in the TUI; press `y` to approve,
 `N` (default) to deny. For remote hosts, pass `host` to `start_server` and
-`execute`.
+`execute`. Invisible/format characters (e.g. emoji variation selectors,
+zero-width or bidi controls) are removed from `description` before it is shown.
 
 When a prompt appears, the TUI rings the terminal bell and blinks the
 question line so a request is not missed while the daemon's terminal is

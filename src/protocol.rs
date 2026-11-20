@@ -623,27 +623,103 @@ fn default_session() -> String {
     "unknown".to_string()
 }
 
+/// Every code point forbidden in prompt-rendered text, as sorted,
+/// non-overlapping, inclusive `(lo, hi)` ranges. The rule is
+///
+/// > dangerous(c) ⇔ c ≠ TAB ∧ c ∈ Cc ∪ Cf ∪ Zl ∪ Zp ∪ Default_Ignorable_Code_Point
+///
+/// i.e. control (C0, DEL, C1 including NEL/CSI/OSC), format (soft hyphen,
+/// zero-width, bidi embeddings/overrides/isolates/marks, BOM, invisible
+/// operators, interlinear annotation, tag characters), line/paragraph
+/// separators, and every default-ignorable code point (variation selectors,
+/// Hangul fillers, reserved ignorables such as U+2065 and U+E0000–E0FFF), which
+/// render as nothing and so can hide text from the approver.
+///
+/// Built from the Unicode 16.0.0 UCD (General_Category, and
+/// `DerivedCoreProperties.txt` Default_Ignorable_Code_Point), merging adjacent
+/// ranges. TAB is in the table (it is Cc) and is exempted by
+/// [`is_dangerous_char`]. The table is not trusted by inspection: the unit test
+/// `dangerous_class_matches_unicode_oracle` checks it exhaustively, over every
+/// `char`, against a General_Category oracle of the same Unicode version plus
+/// a verbatim copy of the DICP list.
+pub(crate) const DANGEROUS_RANGES: &[(u32, u32)] = &[
+    (0x0000, 0x001F),
+    (0x007F, 0x009F),
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x0600, 0x0605),
+    (0x061C, 0x061C),
+    (0x06DD, 0x06DD),
+    (0x070F, 0x070F),
+    (0x0890, 0x0891),
+    (0x08E2, 0x08E2),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x2028, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFFB),
+    (0x110BD, 0x110BD),
+    (0x110CD, 0x110CD),
+    (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+];
+
+/// True if `c` is forbidden in any request-derived string rendered on the
+/// approval prompt: a control, format, separator or default-ignorable
+/// character other than TAB (see [`DANGEROUS_RANGES`]).
+///
+/// Also used by `mcp::sanitize_description` (same crate) to strip this class
+/// from the MCP `description` before it becomes `reason`.
+///
+/// The lookup is a binary search (`partition_point`) rather than a linear
+/// scan, so the Kani harnesses in `src/proofs.rs` need an unwind bound near
+/// log2(table length) rather than the table length + 1.
+pub(crate) fn is_dangerous_char(c: char) -> bool {
+    if c == '\t' {
+        return false;
+    }
+    let u = c as u32;
+    // First range whose upper bound is >= u; it holds u iff its lower bound
+    // is <= u.
+    let i = DANGEROUS_RANGES.partition_point(|&(_, hi)| hi < u);
+    i < DANGEROUS_RANGES.len() && DANGEROUS_RANGES[i].0 <= u
+}
+
 /// True if `s` contains a character forbidden in any request-derived string
-/// that is rendered on the approval prompt: control chars (except tab), and
-/// zero-width / bidi-override characters. The prompt is the security gate, so
-/// a field carrying raw ANSI/escape/newline or bidi bytes could redraw the
-/// terminal and misrepresent the command being approved.
+/// that is rendered on the approval prompt: control, format, separator and
+/// default-ignorable characters (Cc/Cf/Zl/Zp/DICP), except tab. The prompt is
+/// the security gate, so a field carrying raw ANSI/escape/newline, bidi or
+/// invisible characters could redraw the terminal or hide text, and so
+/// misrepresent the command being approved. See [`is_dangerous_char`].
 ///
 /// `pub(crate)` so the Rung 2 property test and the Rung 3 Kani harness can
 /// drive it directly; the only *enforcement* path is `ValidatedRequest::validate`.
 pub(crate) fn has_dangerous_chars(s: &str) -> bool {
+    s.chars().any(is_dangerous_char)
+}
+
+/// Make text that never went through `ValidatedRequest::validate` (e.g. a
+/// filesystem-derived path) safe to print on the approval prompt: every
+/// [`is_dangerous_char`] character is written as a `\u{…}` escape; tab and
+/// everything else are kept as is.
+pub(crate) fn escape_dangerous(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     for c in s.chars() {
-        // Control chars 0x00-0x1F except tab (0x09)
-        if c != '\t' && (c as u32) < 0x20 {
-            return true;
-        }
-        // Zero-width and bidi override characters
-        match c as u32 {
-            0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069 => return true,
-            _ => {}
+        if is_dangerous_char(c) {
+            out.push_str(&format!("\\u{{{:x}}}", c as u32));
+        } else {
+            out.push(c);
         }
     }
-    false
+    out
 }
 
 /// A `Request` that has passed `ValidatedRequest::validate`.
@@ -707,7 +783,8 @@ impl ValidatedRequest {
         }
         for key in req.env.keys() {
             if has_dangerous_chars(key) {
-                return Err(format!("env key '{key}' contains forbidden characters"));
+                // Do not echo the key: by construction it holds a forbidden char.
+                return Err("env key contains forbidden characters".to_string());
             }
             if !is_valid_env_name(key) {
                 return Err(format!("env key '{key}' is not a valid variable name"));
@@ -1269,5 +1346,128 @@ mod tests {
 
         let p = Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(exec(&["id"])) };
         assert!(!ValidatedRequest::validate(plan_req(p)).unwrap().runs_as_root());
+    }
+
+    /// Default_Ignorable_Code_Point, copied verbatim (one entry per line, not
+    /// merged) from `DerivedCoreProperties.txt` of Unicode 16.0.0 — the
+    /// version `unicode-general-category` 1.1.0 implements
+    /// (`UNICODE_VERSION`, checked below). Independent of `DANGEROUS_RANGES`:
+    /// it is not derived from the table. Bump both together.
+    const DICP_16_0: &[(u32, u32)] = &[
+        (0x00AD, 0x00AD),   // Cf SOFT HYPHEN
+        (0x034F, 0x034F),   // Mn COMBINING GRAPHEME JOINER
+        (0x061C, 0x061C),   // Cf ARABIC LETTER MARK
+        (0x115F, 0x1160),   // Lo HANGUL CHOSEONG FILLER..HANGUL JUNGSEONG FILLER
+        (0x17B4, 0x17B5),   // Mn KHMER VOWEL INHERENT AQ..KHMER VOWEL INHERENT AA
+        (0x180B, 0x180D),   // Mn MONGOLIAN FREE VARIATION SELECTOR ONE..THREE
+        (0x180E, 0x180E),   // Cf MONGOLIAN VOWEL SEPARATOR
+        (0x180F, 0x180F),   // Mn MONGOLIAN FREE VARIATION SELECTOR FOUR
+        (0x200B, 0x200F),   // Cf ZERO WIDTH SPACE..RIGHT-TO-LEFT MARK
+        (0x202A, 0x202E),   // Cf LEFT-TO-RIGHT EMBEDDING..RIGHT-TO-LEFT OVERRIDE
+        (0x2060, 0x2064),   // Cf WORD JOINER..INVISIBLE PLUS
+        (0x2065, 0x2065),   // Cn <reserved-2065>
+        (0x2066, 0x206F),   // Cf LEFT-TO-RIGHT ISOLATE..NOMINAL DIGIT SHAPES
+        (0x3164, 0x3164),   // Lo HANGUL FILLER
+        (0xFE00, 0xFE0F),   // Mn VARIATION SELECTOR-1..VARIATION SELECTOR-16
+        (0xFEFF, 0xFEFF),   // Cf ZERO WIDTH NO-BREAK SPACE
+        (0xFFA0, 0xFFA0),   // Lo HALFWIDTH HANGUL FILLER
+        (0xFFF0, 0xFFF8),   // Cn <reserved-FFF0>..<reserved-FFF8>
+        (0x1BCA0, 0x1BCA3), // Cf SHORTHAND FORMAT LETTER OVERLAP..SHORTHAND FORMAT UP STEP
+        (0x1D173, 0x1D17A), // Cf MUSICAL SYMBOL BEGIN BEAM..MUSICAL SYMBOL END PHRASE
+        (0xE0000, 0xE0000), // Cn <reserved-E0000>
+        (0xE0001, 0xE0001), // Cf LANGUAGE TAG
+        (0xE0002, 0xE001F), // Cn <reserved-E0002>..<reserved-E001F>
+        (0xE0020, 0xE007F), // Cf TAG SPACE..CANCEL TAG
+        (0xE0080, 0xE00FF), // Cn <reserved-E0080>..<reserved-E00FF>
+        (0xE0100, 0xE01EF), // Mn VARIATION SELECTOR-17..VARIATION SELECTOR-256
+        (0xE01F0, 0xE0FFF), // Cn <reserved-E01F0>..<reserved-E0FFF>
+    ];
+
+    /// Issue #86: `is_dangerous_char` is exactly
+    /// `c != TAB && (gc(c) ∈ {Cc, Cf, Zl, Zp} || DICP(c))`, checked over every
+    /// `char`. A Unicode bump of the oracle that adds Cf characters fails here.
+    #[test]
+    fn dangerous_class_matches_unicode_oracle() {
+        use unicode_general_category::{get_general_category, GeneralCategory as Gc};
+        assert_eq!(
+            unicode_general_category::UNICODE_VERSION,
+            (16, 0, 0),
+            "oracle bumped: refresh DICP_16_0 and DANGEROUS_RANGES from the same UCD"
+        );
+        let dicp = |u: u32| DICP_16_0.iter().any(|&(lo, hi)| lo <= u && u <= hi);
+        let mut mismatches = Vec::new();
+        for u in 0..=0x10FFFFu32 {
+            let Some(c) = char::from_u32(u) else { continue };
+            let expected = c != '\t'
+                && (matches!(
+                    get_general_category(c),
+                    Gc::Control | Gc::Format | Gc::LineSeparator | Gc::ParagraphSeparator
+                ) || dicp(u));
+            if is_dangerous_char(c) != expected {
+                mismatches.push(format!("U+{u:04X} expected {expected}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "class mismatches: {mismatches:?}");
+    }
+
+    #[test]
+    fn dangerous_ranges_sorted_and_disjoint() {
+        for &(lo, hi) in DANGEROUS_RANGES {
+            assert!(lo <= hi, "({lo:#x}, {hi:#x}) inverted");
+        }
+        for w in DANGEROUS_RANGES.windows(2) {
+            assert!(
+                w[0].1 < w[1].0,
+                "{:#x?} and {:#x?} overlap or are unsorted",
+                w[0],
+                w[1]
+            );
+        }
+    }
+
+    /// Issue #86 regression table: every code point the issue names, plus a
+    /// tag character, an emoji variation selector and reserved U+2065, is
+    /// forbidden; ordinary printable text (ASCII, accents, CJK, dashes,
+    /// arrows, NBSP, a bare emoji) and TAB are not.
+    #[test]
+    fn dangerous_char_regression_table() {
+        let must_reject = [
+            '\u{7f}',
+            '\u{85}',
+            '\u{9b}',
+            '\u{9d}',
+            '\u{ad}',
+            '\u{61c}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{2060}',
+            '\u{2061}',
+            '\u{2062}',
+            '\u{2063}',
+            '\u{2064}',
+            '\u{feff}',
+            '\u{e0041}',
+            '\u{fe0f}',
+            '\u{2065}',
+        ];
+        for c in must_reject {
+            assert!(is_dangerous_char(c), "U+{:04X} must be dangerous", c as u32);
+            assert!(has_dangerous_chars(&format!("ok{c}ok")));
+        }
+        let mut must_accept: Vec<char> = (0x20u8..=0x7E).map(char::from).collect();
+        must_accept.extend(['\t', 'é', '漢', '—', '→', '\u{a0}', '\u{1f642}']);
+        for c in must_accept {
+            assert!(!is_dangerous_char(c), "U+{:04X} must be accepted", c as u32);
+        }
+        assert!(!has_dangerous_chars("café 漢字 — → 🙂\tend"));
+    }
+
+    #[test]
+    fn escape_dangerous_escapes_class_keeps_rest() {
+        assert_eq!(
+            escape_dangerous("a\u{1b}[2J\nb\tc\u{2065}é"),
+            "a\\u{1b}[2J\\u{a}b\tc\\u{2065}é"
+        );
+        assert_eq!(escape_dangerous("/usr/bin/ls"), "/usr/bin/ls");
     }
 }
