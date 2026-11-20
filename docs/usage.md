@@ -86,10 +86,12 @@ command (a test such as `-printf` may have absorbed the one before it), an
 `xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
 word, a dispatcher called with an option (`busybox --list`), a name whose
 resolved binary is a different wrapper, and a chain deeper than 8. A `--`
-ends a wrapper's options only before its operands and assignments; a `--`
-where the program is expected (`timeout 5 -- sh`, `env X=1 -- true`) fails
-closed, since uutils `timeout` and util-linux `chrt` skip it and run the next
-word while GNU `env` runs a program named `--`.
+ends a wrapper's options only before its operands and assignments; a `--` or
+any other option word where the program is expected (`timeout 5 -- sh`,
+`timeout 5 -v sh`, `env X=1 -- true`) fails closed, since uutils `timeout`
+keeps parsing options after its duration, uutils `timeout` and util-linux
+`chrt` skip a `--` and run the next word, while GNU `env` runs a program named
+`--`.
 
 The `Resolves:` block lists every program, the wrapped ones with
 `(run by <wrapper>)`. For an escalated stage the wrapper looks its program up
