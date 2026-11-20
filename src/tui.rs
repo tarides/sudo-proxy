@@ -486,8 +486,10 @@ fn csi_len(s: &[u8], i: usize) -> Option<usize> {
 /// it to up to 8 columns (see the Sn4.3 residual in `docs/assurance-case.md`).
 ///
 /// On a `Steps:` line the clipped tail may hold the chain operator (`&&`, `||`,
-/// `|`, `;`) or a group's `(` opener; the `Command:` line still shows them as
-/// long as it stays under `MAX_DISPLAY_CMD_CHARS`.
+/// `|`, `;`), a group's `(` opener or `)` closer, or a redirection (`> path`,
+/// `2>&1`, `< path`); the `Command:` line still shows them as long as it stays
+/// under `MAX_DISPLAY_CMD_CHARS`, and past that they are hidden there too
+/// (the marker is shown). Keeping them out of the budget is #97.
 fn clip_styled(s: &str, max: usize, style: &Style) -> String {
     let bytes = s.as_bytes();
     let mut visible = 0usize;
