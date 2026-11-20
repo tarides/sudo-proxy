@@ -14,7 +14,7 @@
 //! `ICANON` cleared before writing the key.
 //!
 //! The daemon runs with a cleared environment: no `DISPLAY`/`WAYLAND_DISPLAY`
-//! (so `Mode::Remote`: TUI prompt + sudo), a private `HOME`/`XDG_CONFIG_HOME`
+//! unless `PtyOpts::env` sets one (so `Mode::Remote`: TUI prompt + sudo), a private `HOME`/`XDG_CONFIG_HOME`
 //! (no developer `hosts.json` policy leaks in), and `tests/shims` first on
 //! `PATH`, so privileged steps reach the logging `sudo` shim, not real sudo.
 
@@ -52,6 +52,9 @@ pub struct PtyOpts {
     /// Directories put first on the daemon's own PATH (before the shims), as
     /// a dev shell would. Requested commands must not be resolved on it.
     pub extra_path: Vec<PathBuf>,
+    /// Extra environment variables, set after `env_clear` and the harness's
+    /// own (e.g. `DISPLAY`, so `Mode::detect` returns `Local`).
+    pub env: Vec<(String, String)>,
 }
 
 /// What the reader thread has seen on the master, and whether it hit EOF.
@@ -125,6 +128,7 @@ impl PtyDaemon {
         if !opts.color {
             cmd.env("NO_COLOR", "1");
         }
+        cmd.envs(opts.env.iter().map(|(k, v)| (k, v)));
         let log = File::create(dir.path().join("daemon.log")).expect("daemon.log");
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);
         // SAFETY: only async-signal-safe calls (setsid, ioctl, errno read)
