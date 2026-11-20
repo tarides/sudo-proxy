@@ -3,6 +3,20 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — `pkexec-cache` check no longer says "not installed" when it cannot read rules.d (#75)
+
+The check mode began with `Path::exists()`, which returns `false` on any error,
+including `EACCES`. On distributions that ship `/etc/polkit-1/rules.d` as
+`root:polkitd 0750`, a non-root `pkexec-cache` (the documented way to check)
+reported `not installed: … does not exist` even when the rule was installed. The
+check now reads the file in one step (`read_rule`): only `NotFound` means
+"not installed". `PermissionDenied` prints
+`unknown: cannot read …: permission denied (run with sudo)` and exits 1, and any
+other error is reported as before. `docs/pkexec.md` mentions the `sudo` check.
+Tests: `pkexec-cache` unit tests `read_rule_missing_is_none`,
+`read_rule_present_returns_content` and
+`read_rule_unreadable_dir_is_permission_denied` (the issue's case).
+
 ## Unreleased — `pkexec-cache` validates the username it writes into the polkit rule (#64)
 
 `pkexec-cache --create` took the username from `SUDO_USER`, `PKEXEC_UID` or
