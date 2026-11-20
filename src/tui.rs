@@ -715,12 +715,13 @@ fn write_plan_stages<W: Write>(
     privileged: bool,
     style: &Style,
 ) -> io::Result<()> {
-    // Simple case: one stage, no escalation, not opaque, no redirections — keep
-    // the familiar single `Resolves:` line.
+    // Simple case: one stage running one program (no wrapper), no escalation,
+    // not opaque, no redirections — keep the familiar single `Resolves:` line.
     if !privileged
         && views.len() == 1
         && views[0].privilege == LeafPrivilege::Direct
         && !views[0].opaque
+        && views[0].programs.len() == 1
         && views[0].redirects.is_empty()
     {
         if let Some(name) = views[0].argv.first() {
@@ -898,27 +899,43 @@ fn lay_all_escalated(lay: &Lay) -> bool {
 /// runs, in first-seen order, so a binary used by several stages appears once.
 /// Entries with the same name *and* resolution collapse; distinct names stay
 /// apart even when they share a multi-call binary (`echo` vs `cat` on uutils).
-/// Opaque stages (a `Shell` node, or an `Exec` of a shell) render as the
-/// opaque-shell marker.
+/// Every program a stage runs is an entry: `argv[0]`, then each program a
+/// wrapper runs, suffixed `(run by <wrapper>)`. For an escalated stage the
+/// wrapper looks its program up at run time on the escalated PATH, so that
+/// entry shows no path and says `looked up at run time`. The entry an opaque
+/// stage's reason points at shows the reason in bold instead (a shell keeps
+/// the `opaque — resolves only the shell` marker).
 fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
-    let Style { bold, reset, .. } = *style;
+    let Style { bold, dim, reset, .. } = *style;
     let mut seen = std::collections::HashSet::new();
     let mut entries: Vec<(String, String)> = Vec::new();
     for view in views {
-        let name = view.argv.first().cloned().unwrap_or_default();
-        let detail = if view.opaque {
-            match &view.resolved_bin {
-                Some(p) => format!(
-                    "{bold}opaque — resolves only the shell: {}{reset}",
-                    p.display()
-                ),
-                None => format!("{bold}opaque — shell not found in PATH{reset}"),
+        for (i, prog) in view.programs.iter().enumerate() {
+            let suffix = match (&prog.via, prog.runtime_lookup) {
+                (Some(v), true) => format!(" {dim}(run by {v}; looked up at run time){reset}"),
+                (Some(v), false) => format!(" {dim}(run by {v}){reset}"),
+                (None, _) => String::new(),
+            };
+            let path = prog.resolved.as_deref().filter(|_| !prog.runtime_lookup);
+            let detail = match view.opaque_reason.as_ref().filter(|o| o.at == i) {
+                Some(o) => {
+                    let text = if !o.names_program || prog.runtime_lookup {
+                        o.reason.clone()
+                    } else {
+                        match path {
+                            Some(p) => format!("{}: {}", o.reason, p.display()),
+                            None if o.is_shell => "shell not found in PATH".to_string(),
+                            None => format!("{} (not found in PATH)", o.reason),
+                        }
+                    };
+                    format!("{bold}opaque — {text}{reset}{suffix}")
+                }
+                None if prog.runtime_lookup => suffix.trim_start().to_string(),
+                None => format!("{}{suffix}", resolve_detail(path, style)),
+            };
+            if seen.insert(format!("{}\u{0}{detail}", prog.name)) {
+                entries.push((prog.name.clone(), detail));
             }
-        } else {
-            resolve_detail(view.resolved_bin.as_deref(), style)
-        };
-        if seen.insert(format!("{name}\u{0}{detail}")) {
-            entries.push((name, detail));
         }
     }
     if entries.is_empty() {
@@ -1340,6 +1357,70 @@ mod tests {
         assert!(
             out.contains("opaque — resolves only the shell") || out.contains("opaque — shell not found"),
             "exec of a shell must be flagged opaque: {out}"
+        );
+    }
+
+    fn render_plan(plan: crate::protocol::Plan) -> String {
+        use crate::protocol::{Request, ValidatedRequest};
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            plan,
+            std::collections::HashMap::new(),
+            String::new(),
+            false,
+            false,
+        ))
+        .expect("valid");
+        let views = plan_display(&req).expect("compiles");
+        let mut buf: Vec<u8> = Vec::new();
+        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    fn exec(argv: &[&str]) -> crate::protocol::Plan {
+        crate::protocol::Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+    }
+
+    /// Issue #87: a shell behind a wrapper is flagged with the same marker,
+    /// on the shell's own entry, which names the wrapper that runs it.
+    #[test]
+    fn wrapped_shell_renders_opaque_run_by_wrapper() {
+        let out = render_plan(exec(&["env", "sh", "-c", "echo hi"]));
+        let line = out.lines().find(|l| l.trim_start().starts_with("sh ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("opaque — resolves only the shell"), "{out}");
+        assert!(line.contains("(run by env)"), "{out}");
+        assert!(out.lines().any(|l| l.trim_start().starts_with("env ")), "{out}");
+    }
+
+    /// A transparent wrapper takes the block form and lists the program it
+    /// runs, with its path.
+    #[test]
+    fn wrapped_program_takes_the_block_form() {
+        let out = render_plan(exec(&["env", "X=1", "true"]));
+        assert!(out.starts_with("Resolves:\n"), "block form, not the single line: {out}");
+        let line = out.lines().find(|l| l.trim_start().starts_with("true ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("(run by env)") && line.contains('/'), "{out}");
+        assert!(!out.contains("opaque"), "{out}");
+    }
+
+    /// For an escalated stage the wrapper looks its program up at run time, on
+    /// sudo's PATH, so the prompt shows no path for it.
+    #[test]
+    fn escalated_wrapped_program_is_looked_up_at_run_time() {
+        use crate::protocol::{Plan, RunAs};
+        let out = render_plan(Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["env", "X=1", "true"])) });
+        let line = out.lines().find(|l| l.trim_start().starts_with("true ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("(run by env; looked up at run time)"), "{out}");
+        assert!(!line.contains('/'), "no path for a run-time lookup: {out}");
+        let out = render_plan(Plan::RunAs {
+            who: RunAs::Root,
+            body: Box::new(exec(&["timeout", "5", "sh", "-c", "true"])),
+        });
+        assert!(
+            out.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"),
+            "{out}"
         );
     }
 
