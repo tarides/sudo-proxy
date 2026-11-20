@@ -2375,7 +2375,8 @@ mod tests {
         (steps, resolves)
     }
 
-    /// An absolute path to `echo`, 2 009 bytes long: under PATH_MAX, so it is
+    /// An absolute path to `echo`, `2 * reps + 9` bytes long (2 009 for
+    /// `reps = 1_000`): under PATH_MAX for every `reps` used here, so it is
     /// found and canonicalizes to the real binary.
     fn long_echo_path(reps: usize) -> String {
         format!("/{}bin/echo", "./".repeat(reps))
