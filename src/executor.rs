@@ -551,6 +551,10 @@ pub struct ProgramHop {
     /// time on the escalated PATH (sudo's `secure_path`, pkexec's environment),
     /// not the PATH the daemon resolves with, so no path is shown.
     pub runtime_lookup: bool,
+    /// An applet of a multi-call dispatcher (`busybox sh`): the dispatcher
+    /// runs its built-in applet, so its PATH resolution is not shown
+    /// (`resolved` is `None`).
+    pub applet: bool,
 }
 
 /// Why a leaf is opaque, described once for both the prompt and the
@@ -611,7 +615,7 @@ fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafP
             let inner = h.argv_index != 0;
             let resolved = if !inner {
                 resolved_bin.clone()
-            } else if escalated {
+            } else if escalated || h.applet {
                 None
             } else {
                 resolve_command(&name, &hop_cwd(&ctx.cwd, h.chdir.as_deref()))
@@ -620,7 +624,8 @@ fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafP
                 name,
                 resolved,
                 via: h.via.map(|p| argv[hops[p].argv_index].clone()),
-                runtime_lookup: inner && escalated,
+                runtime_lookup: inner && escalated && !h.applet,
+                applet: h.applet,
             }
         })
         .collect();
@@ -2193,6 +2198,19 @@ mod tests {
         let p = &views[0].programs;
         assert!(!p[0].runtime_lookup && p[0].resolved.is_some());
         assert!(p[1].runtime_lookup);
+        assert_eq!(p[1].resolved, None);
+    }
+
+    /// Review C5: a multi-call dispatcher runs its built-in applet, so the
+    /// applet's PATH resolution is not shown.
+    #[test]
+    fn plan_display_shows_no_path_for_an_applet() {
+        let ex = Plan::Exec { argv: vec!["busybox".into(), "true".into()] };
+        let views = plan_display(&mk_plan_req(ex, false)).unwrap();
+        let p = &views[0].programs;
+        assert_eq!(p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["busybox", "true"]);
+        assert!(!p[0].applet && p[1].applet);
+        assert!(!p[1].runtime_lookup);
         assert_eq!(p[1].resolved, None);
     }
 
