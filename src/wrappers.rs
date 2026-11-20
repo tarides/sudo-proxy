@@ -22,8 +22,8 @@
 //! `setenv` policy rejects, a `find -exec` program word containing `{}` or a
 //! `find -exec` command containing another action word, an `xargs -I`
 //! replacement string in the program word, a `--` or any other option word
-//! where a program is expected, a multi-call dispatcher option, an ambiguous name and a chain
-//! deeper than [`MAX_DEPTH`] all make the leaf opaque.
+//! where a program is expected, a multi-call dispatcher option, an ambiguous
+//! name and a chain deeper than [`MAX_DEPTH`] all make the leaf opaque.
 //!
 //! This module is pure: no filesystem access and no I/O. The only
 //! filesystem-dependent input, the canonical name of a hop's resolved binary,
@@ -602,8 +602,8 @@ pub fn unwrap(
         // closed for every wrapper.
         if let Some(via) = r.via.filter(|_| argv[r.start].starts_with('-')) {
             let word = &argv[r.start];
-            let why = if word == "--" {
-                "-- where the program is expected".to_string()
+            let why = if word == "--" || word == "-" {
+                format!("{word} where the program is expected")
             } else {
                 format!("option {word} where the program is expected")
             };
@@ -1101,7 +1101,6 @@ mod tests {
             (&["timeout", "-k", "1", "5", "-v", "sh"], "-v"),
             (&["chrt", "-o", "0", "-v", "sh"], "-v"),
             (&["env", "X=1", "-i", "sh"], "-i"),
-            (&["timeout", "5", "-"], "-"),
         ] {
             let why = match run(argv).1 {
                 Some(OpaqueReason::Unparsable { why, .. }) => why,
@@ -1113,6 +1112,10 @@ mod tests {
                 "{argv:?}"
             );
         }
+        assert!(matches!(
+            run(&["timeout", "5", "-"]).1,
+            Some(OpaqueReason::Unparsable { why, .. }) if why == "- where the program is expected"
+        ));
         // Options before the operand are still parsed as options.
         assert_eq!(
             names(&["timeout", "-s", "KILL", "5", "true"]),
