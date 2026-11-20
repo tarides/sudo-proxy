@@ -3,6 +3,27 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Bound every approval-prompt line, not only Command: (#85)
+
+**The gap.** Only the `Command:` line was length-bounded (G4.3 / F3). The
+`Steps:` block capped its number of lines but wrote each line whole, so a
+privileged `exec ["echo", <900 KB>]` printed the whole argument on `Steps:`
+line 0 and pushed the `[y/N]` question off-screen. The `Resolves:` block and
+line (a long absolute `argv[0]`, and up to 256 entries) and the metadata lines
+(`From:`, `Requester:`, `Client:`, `Time:`, `ID:`, `Reason:`, `Env:`, the
+session name of the `a` line) had no length bound either. **The fix**
+(`src/tui.rs`, display only): each `Steps:` line is clipped to 160 visible
+chars (`clip_styled`, which skips the daemon's own colour escapes and resets
+the colour before the marker), each `Resolves:` name and path to 160, each
+metadata field to 256, the `Env:` line to 1024, and the `Resolves:` block to 32
+entries, each with an explicit `… [N more chars hidden]` marker. The full texts
+the bash-oracle properties check (`steps_shell_text`, `command_summary`) are
+unchanged. **Tests:** unit tests for each clip, the property
+`prop_prompt_lines_are_bounded_and_prefix_faithful` (every line bounded, line
+count bounded, each `Steps:` line a prefix of its unclipped text), the pty test
+`huge_argument_prompt_is_bounded`, and a `long-argument` golden; the existing
+goldens are byte-identical.
+
 ## Unreleased — Audit log for every request outcome (#65)
 
 The daemon logged prompted requests and unattended runs, and only with `-v`. It

@@ -156,6 +156,8 @@ U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 boun
 each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
 above) · #87 wrapper-aware `runs_shell` (item 5 above).
 
+Done: #85.
+
 **Phase 1 — state the invariant, make it literally true** (release 1.3.0):
 1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim
    in the command slot); split Sn4.5 into a syntactic half (render ⇒ shell
