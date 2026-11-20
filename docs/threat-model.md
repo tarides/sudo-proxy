@@ -74,6 +74,7 @@ invariant at a given boundary are omitted.
 | Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Displayed command length bounded with a hidden-bytes marker. | G4.3 / F3 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
+| Elevation | Wrapper (`env`, `nice`, `timeout`, `coreutils`…) or inline interpreter hides a shell from the opaque flag and `no_shell`; `env LD_PRELOAD=…` injects code into a vouched program. | Wrapper-aware unwrap; unparsable wrapper, PATH change, rejected env name or unknown runner → opaque. | G4.7 |
 
 ### B4 — daemon → exec → root (A1)
 
@@ -136,8 +137,10 @@ A  A root command runs that the human did NOT approve
 │   │        [resolved path + "-> target" shown → G4.2 · blocked]
 │   ├─ 3.3 Push the real command / [y/N] off-screen with a huge arg
 │   │        [length bound + hidden-bytes marker → G4.3 / F3 · blocked]
-│   └─ 3.4 Printable-range Unicode look-alike / NBSP in reason
-│            [cannot hide the real command → G4.4 · residual (accepted)]
+│   ├─ 3.4 Printable-range Unicode look-alike / NBSP in reason
+│   │        [cannot hide the real command → G4.4 · residual (accepted)]
+│   └─ 3.5 Shell or inline code behind a wrapper (env sh -c, python3 -c)
+│            [wrapper-aware unwrap → G4.7 · mitigated; residual: awk/sed/script interpreters]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
