@@ -239,3 +239,22 @@ impl Drop for EnvRestore {
         }
     }
 }
+
+/// GHSA-cpmp-67wf-gwmx: an unprivileged child leads its own session, so it has
+/// no controlling terminal and cannot TIOCSTI keystrokes into the daemon's
+/// approval prompt. `/proc/self/stat` fields 6 and 7 are the session id and
+/// tty_nr; checked whether or not the test runner itself has a terminal.
+#[test]
+fn unprivileged_child_has_no_controlling_terminal() {
+    let mut env = std::collections::HashMap::new();
+    apply_login_env_defaults(&mut env);
+    let resp = exec_direct(&make_req(vec![vec!["cat", "/proc/self/stat"]]), &env);
+    assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
+    let out = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or(""))).to_string();
+    let pid: &str = out.split_whitespace().next().unwrap();
+    // comm (field 2) is parenthesized and may contain spaces; split after it.
+    let rest: Vec<&str> = out[out.rfind(')').unwrap() + 2..].split_whitespace().collect();
+    // rest[0]=state, [1]=ppid, [2]=pgrp, [3]=session, [4]=tty_nr
+    assert_eq!(rest[3], pid, "child must lead its own session: {out}");
+    assert_eq!(rest[4], "0", "child must have no controlling tty: {out}");
+}

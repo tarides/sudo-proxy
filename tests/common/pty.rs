@@ -52,6 +52,9 @@ pub struct PtyOpts {
     /// Directories put first on the daemon's own PATH (before the shims), as
     /// a dev shell would. Requested commands must not be resolved on it.
     pub extra_path: Vec<PathBuf>,
+    /// Extra environment for the daemon, on top of the cleared base (e.g.
+    /// `TERM=tmux-256color` to look like an injectable terminal).
+    pub env: Vec<(String, String)>,
 }
 
 /// What the reader thread has seen on the master, and whether it hit EOF.
@@ -124,6 +127,9 @@ impl PtyDaemon {
             .env("SUDO_PROXY_NO_BLINK", "1");
         if !opts.color {
             cmd.env("NO_COLOR", "1");
+        }
+        for (k, v) in &opts.env {
+            cmd.env(k, v);
         }
         let log = File::create(dir.path().join("daemon.log")).expect("daemon.log");
         cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(log);

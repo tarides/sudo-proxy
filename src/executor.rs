@@ -979,13 +979,27 @@ fn run_one(
         return spawn_err(format!("failed to open stderr redirect: {e}"));
     }
 
+    let needs_tty = fg_lock.is_some();
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             // New process group so kill_group SIGKILLs the whole group on
-            // timeout. setpgid (not setsid) keeps the child in the daemon's
-            // session so an escalated child can reach /dev/tty for a password
-            // prompt — see issue #19.
-            libc::setpgid(0, 0);
+            // timeout. An escalated child uses setpgid (not setsid), which
+            // keeps it in the daemon's session so it can reach /dev/tty for
+            // a password prompt — see issue #19.
+            //
+            // An unprivileged child gets its own session (setsid), so it has
+            // no controlling terminal: a child sharing the daemon's could
+            // inject keystrokes into the approval prompt with TIOCSTI (where
+            // `dev.tty.legacy_tiocsti` allows it) and approve a later
+            // privileged request, e.g. a background job left by a command
+            // run under the session `a` grant (GHSA-cpmp-67wf-gwmx). It never
+            // reads /dev/tty anyway; setsid also makes it a group leader, so
+            // kill_group still works.
+            if needs_tty {
+                libc::setpgid(0, 0);
+            } else {
+                libc::setsid();
+            }
             libc::umask(0o077);
             Ok(())
         });
@@ -997,8 +1011,12 @@ fn run_one(
     };
 
     let cpid = child.id() as libc::pid_t;
-    unsafe {
-        let _ = libc::setpgid(cpid, cpid);
+    // (Not for a setsid child: a session leader cannot change group, and
+    // setsid already made it the leader of group `cpid`.)
+    if needs_tty {
+        unsafe {
+            let _ = libc::setpgid(cpid, cpid);
+        }
     }
     let _fg = fg_lock.and_then(|m| ForegroundGuard::take(cpid, m));
 

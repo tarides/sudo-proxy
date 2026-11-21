@@ -129,6 +129,87 @@ resolved path that `env` receives. Regressions: unit tests in `executor`, and
 `resolves_line_names_the_binary_that_runs` in `tests/pty_e2e.rs`, which follows
 the issue's repro.
 
+## v1.2.2 — 2026-11-21 (security release)
+
+A patch release on top of v1.2.1 with one security fix and one backported
+fix, and nothing else (main's 1.3 work is not included):
+
+- **GHSA-cpmp-67wf-gwmx** (high): the daemon refuses to start in a terminal
+  that other same-UID processes can type into (tmux/screen, kitty/WezTerm/
+  Konsole remote control, X11, …), unless started with
+  `--allow-injectable-tty`. Unprivileged children no longer share its
+  controlling terminal.
+- **#62** (backport of #80): the `Resolves:` line names the binary that
+  actually runs.
+
+**Upgrade note:** if you start the daemon inside tmux/screen or on X11, it now
+refuses with an explanation; move it to a terminal of its own on Wayland, or
+pass `--allow-injectable-tty`. With `--host`, upgrade the remote first if you
+use the override, since a 1.2.1 remote rejects the forwarded flag.
+
+### Refuse approval terminals other processes can type into (GHSA-cpmp-67wf-gwmx)
+
+The daemon approves a request by reading one key from its terminal, and it
+cannot tell a key the human typed from one injected by another process running
+as the same user. The usual requester, an AI agent, also has a same-UID shell.
+In tmux or screen (`send-keys`, `stuff`), in a terminal with remote control
+(kitty, WezTerm, Konsole's D-Bus `sendText`), or in any X11 session
+(`xdotool key y`), it could send a privileged request and answer `y` to its own
+prompt, or `a` to grant itself the session.
+
+- The daemon now checks its terminal at startup (`src/ttyguard.rs`). If it
+  finds one of these, it prints each reason and refuses to start. Covered:
+  multiplexer `TERM` or `$TMUX`/`$STY`/`$ZELLIJ`; kitty, WezTerm, Konsole,
+  VS Code and Emacs terminals; X11 without Wayland. `--allow-injectable-tty`
+  starts it anyway, with a warning line in every prompt. There is deliberately
+  no `hosts.json` equivalent: an agent can write that file and restart the
+  daemon through MCP. `--pkexec` skips the check, since privileged approval
+  then happens in polkit's dialog.
+- With `--host`, the local terminal is checked before ssh starts, and the
+  override is forwarded to the remote daemon. A remote older than 1.2.2
+  rejects the flag and exits, which fails closed.
+- Unprivileged children now run in their own session, with no controlling
+  terminal, so a command (or a background job it leaves) cannot `TIOCSTI`
+  keystrokes into a later prompt. A kernel that still allows `TIOCSTI` is
+  reported as a warning.
+- `sudo-proxy-mcp` removes the launcher's own terminal variables (`TMUX`,
+  `KITTY_*`, …) from the window it spawns, so a fresh window is not refused for
+  the agent's tmux. If the daemon refuses, the window stays open until Enter,
+  and the `start_server` error explains what to do.
+- Docs: threat-model B3 row and attack-tree leaf 3.5 with residuals,
+  assurance-case assumption A1, security/usage/install/README.
+
+Residuals: an XWayland terminal inside a Wayland session, emulators the check
+does not know, and X11 synthetic input into the polkit dialog under `--pkexec`.
+The structural fix is to run the agent as a separate Unix user.
+
+### The `Resolves:` line names the binary that actually runs (#62, backport of #80)
+
+The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
+spawned the bare name with a cleared environment, so the child searched the
+default login PATH (sudo searched its `secure_path`, pkexec's `sh -c` the login
+PATH). A daemon started from a dev shell (Nix, virtualenv, `~/.local/bin`)
+could show one file and run another, or show a file and then fail with ENOENT.
+
+`executor::resolve_command` now resolves argv[0] on the child's PATH, and a
+name containing `/` against the child's working directory `/`. The TUI and GUI
+prompts display that result, and every spawn path uses it: directly (keeping
+the requested `argv[0]`), as the program after `sudo` / `pkexec`, and in the
+multi-stage pkexec `sh -c` string. A name that does not resolve is refused with
+`command not found: <name>` instead of being looked up a second time; in a
+pipeline, before any stage is spawned. The GUI dialog now also shows
+`(not found in PATH)`. As in 1.2.1, the TUI shows the `Resolves:` line for the
+first stage and a warning for later stages that do not resolve.
+
+Behaviour change: a privileged command found only on sudo's `secure_path` (e.g.
+`/snap/bin`) but not on the default login PATH is now refused, where it
+previously ran under a mismatched prompt.
+
+This re-applies the fix from main (#80) to the 1.2 pipeline executor; the code
+differs because 1.2 predates structured plans. Regressions: unit tests in
+`executor` and `exec_direct_spawns_resolved_path_keeping_argv0` in
+`tests/exec.rs`.
+
 ## v1.2.1 — 2026-11-18 (security release)
 
 A patch release on top of v1.2.0 with two security fixes and nothing else:
