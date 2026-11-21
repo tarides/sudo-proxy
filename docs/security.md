@@ -49,4 +49,14 @@ PATH-found file is itself a symlink), so a same-UID adversary who substitutes
 relying on a PATH search or passing the absolute path directly. If
 `canonicalize` fails (broken symlink, EACCES) the prompt says so explicitly
 rather than silently displaying the as-found name. If argv[0] is not found in
-PATH, the prompt shows `(not found in PATH)` as a warning.
+PATH, the prompt shows `(not found in PATH)` as a warning, and the stage is
+refused at spawn.
+
+argv[0] is resolved **once**, the way the child would see it: a bare name is
+searched on the child's PATH (the default login PATH, which no request can
+change), never on the daemon's own PATH; a name containing `/` is taken
+relative to the child's working directory, `/`. The executor then spawns that
+resolved path, directly or as the program after `sudo` / `pkexec` (and in the
+`sh -c` string of a multi-stage pkexec pipeline), so neither `Command`, sudo's
+`secure_path`, nor `sh` performs a second lookup that could pick a different
+file than the prompt showed (issue #62).

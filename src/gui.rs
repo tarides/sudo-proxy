@@ -2,7 +2,7 @@ use std::io;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::executor::which;
+use crate::executor::{resolve_command, which};
 use crate::protocol::ValidatedRequest;
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
@@ -58,11 +58,16 @@ fn format_prompt_text(req: &ValidatedRequest) -> String {
     lines.push(format!("Command: {}", pipeline_join(&req.pipeline)));
     if let Some(first_argv) = req.pipeline.first() {
         if let Some(cmd_name) = first_argv.first() {
-            if let Some(resolved) = which(cmd_name) {
-                let resolved_str = resolved.display().to_string();
-                if resolved_str != *cmd_name {
-                    lines.push(format!("Resolves: {}", resolved_str));
+            // Same resolution the executor spawns (issue #62), not the
+            // daemon's PATH.
+            match resolve_command(cmd_name) {
+                Some(resolved) => {
+                    let resolved_str = resolved.display().to_string();
+                    if resolved_str != *cmd_name {
+                        lines.push(format!("Resolves: {}", resolved_str));
+                    }
                 }
+                None => lines.push("Resolves: (not found in PATH)".to_string()),
             }
         }
     }

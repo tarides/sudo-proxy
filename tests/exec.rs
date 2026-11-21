@@ -237,3 +237,34 @@ impl Drop for EnvRestore {
         }
     }
 }
+
+/// Issue #62: the child is spawned from the resolved path but keeps the
+/// requested `argv[0]`, and a name that does not resolve on the child's PATH is
+/// refused instead of being looked up again.
+#[test]
+fn exec_direct_spawns_resolved_path_keeping_argv0() {
+    let resp = exec_direct(&make_req(vec![vec!["cat", "/proc/self/cmdline"]]), &login_env());
+    assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
+    let out = common::b64_decode(resp.stdout.as_deref().unwrap_or(""));
+    assert!(out.starts_with(b"cat\0"), "argv[0] not preserved: {:?}", String::from_utf8_lossy(&out));
+
+    let resp = exec_direct(&make_req(vec![vec!["sudo-proxy-no-such-cmd-62"]]), &login_env());
+    assert_eq!(resp.status, Status::Error);
+    assert!(
+        resp.message.as_deref().unwrap_or("").contains("command not found: sudo-proxy-no-such-cmd-62"),
+        "got {:?}",
+        resp
+    );
+
+    let resp = exec_direct(
+        &make_req(vec![vec!["echo", "hi"], vec!["sudo-proxy-no-such-cmd-62"]]),
+        &login_env(),
+    );
+    assert_eq!(resp.status, Status::Error, "a pipeline with an unresolved stage must be refused");
+}
+
+fn login_env() -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    apply_login_env_defaults(&mut env);
+    env
+}

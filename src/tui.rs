@@ -5,7 +5,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::executor::which;
+use crate::executor::resolve_command;
 use crate::protocol::{Response, Status, ValidatedRequest};
 
 /// Join argv into a shell-like display string, quoting args that contain spaces.
@@ -205,7 +205,7 @@ pub fn prompt_tty(
         // Warn if later stages have commands not in PATH
         for argv in req.pipeline.iter().skip(1) {
             if let Some(cmd_name) = argv.first() {
-                if which(cmd_name).is_none() {
+                if resolve_command(cmd_name).is_none() {
                     writeln!(
                         tty_w,
                         "Warning:  {bold}{cmd_name}{reset} not found in PATH"
@@ -280,7 +280,7 @@ pub fn prompt_tty(
 ///   having verified the target.
 fn write_resolves_line<W: Write>(w: &mut W, cmd_name: &str, style: &Style) -> io::Result<()> {
     let Style { bold, dim, reset } = *style;
-    let resolved = match which(cmd_name) {
+    let resolved = match resolve_command(cmd_name) {
         Some(p) => p,
         None => {
             return writeln!(w, "Resolves: {bold}(not found in PATH){reset}");

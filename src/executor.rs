@@ -112,7 +112,9 @@ pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
     }
 }
 
-/// Resolve a command name to an absolute path by searching PATH.
+/// Resolve a command name to an absolute path by searching the **daemon's**
+/// PATH. Only for the daemon's own helpers (zenity, kdialog), never for a
+/// requested command — see [`resolve_command`].
 pub fn which(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -121,8 +123,12 @@ pub fn which(name: &str) -> Option<PathBuf> {
         }
         return None;
     }
-    let path_var = std::env::var("PATH").unwrap_or_default();
-    for dir in path_var.split(':') {
+    search_path(name, &std::env::var("PATH").unwrap_or_default())
+}
+
+/// First executable regular file named `name` in the `:`-separated `path_list`.
+fn search_path(name: &str, path_list: &str) -> Option<PathBuf> {
+    for dir in path_list.split(':') {
         let candidate = Path::new(dir).join(name);
         if let Ok(meta) = candidate.metadata() {
             if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
@@ -131,6 +137,44 @@ pub fn which(name: &str) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Resolve a requested `argv[0]` the way the child sees it (issue #62): a bare
+/// name is searched on the child's PATH — the default login PATH, which no
+/// request can change — never on the daemon's own PATH; a name containing `/`
+/// is taken relative to the child's working directory, `/`. The prompt shows
+/// this result and the executor spawns it, so neither `Command`, sudo's
+/// `secure_path`, nor `sh` performs a second lookup that could pick a
+/// different file than the one the human approved.
+pub fn resolve_command(name: &str) -> Option<PathBuf> {
+    if name.contains('/') {
+        let p = Path::new("/").join(name);
+        return p.is_file().then_some(p);
+    }
+    search_path(name, DEFAULT_LOGIN_PATH)
+}
+
+/// `argv` with `argv[0]` replaced by its [`resolve_command`] result, for the
+/// sudo / pkexec paths that take the program as an argument. A name that does
+/// not resolve is refused instead of being looked up again by sudo or `sh`.
+fn resolved_argv(argv: &[String]) -> Result<Vec<String>, String> {
+    let bin = resolve_command(&argv[0])
+        .ok_or_else(|| format!("command not found: {}", argv[0]))?;
+    let mut out = Vec::with_capacity(argv.len());
+    out.push(bin.to_string_lossy().into_owned());
+    out.extend(argv[1..].iter().cloned());
+    Ok(out)
+}
+
+/// A `Command` that spawns the resolved `argv[0]` directly, keeping the
+/// requested name as the child's `argv[0]` (what `ps` and the program see).
+fn direct_command(argv: &[String]) -> Result<Command, String> {
+    let bin = resolve_command(&argv[0])
+        .ok_or_else(|| format!("command not found: {}", argv[0]))?;
+    let mut cmd = Command::new(bin);
+    cmd.arg0(&argv[0]);
+    cmd.args(&argv[1..]);
+    Ok(cmd)
 }
 
 /// Execute a pipeline via pkexec (local/graphical mode).
@@ -144,8 +188,15 @@ pub fn exec_pkexec(
         return exec_pkexec_stage(&req.pipeline[0], env, &req.id, tty_lock);
     }
 
-    // Multi-stage: wrap entire pipeline in sh -c via pkexec
-    let shell_cmd = pipeline_to_shell(&req.pipeline, env);
+    // Multi-stage: wrap entire pipeline in sh -c via pkexec, each stage's
+    // program spelled as its resolved absolute path so `sh` does no lookup.
+    let resolved: Result<Vec<Vec<String>>, String> =
+        req.pipeline.iter().map(|argv| resolved_argv(argv)).collect();
+    let resolved = match resolved {
+        Ok(r) => r,
+        Err(e) => return Response::error(&req.id, &e),
+    };
+    let shell_cmd = pipeline_to_shell(&resolved, env);
     let mut cmd = Command::new("pkexec");
     cmd.args(["sh", "-c", &shell_cmd]);
     cmd.current_dir("/");
@@ -199,8 +250,12 @@ fn exec_pkexec_stage(
     id: &str,
     tty_lock: &Mutex<()>,
 ) -> Response {
+    let argv = match resolved_argv(argv) {
+        Ok(a) => a,
+        Err(e) => return Response::error(id, &e),
+    };
     let mut cmd = Command::new("pkexec");
-    for arg in argv {
+    for arg in &argv {
         cmd.arg(arg);
     }
     cmd.current_dir("/");
@@ -230,11 +285,15 @@ fn exec_sudo_stage(
     id: &str,
     tty_lock: &Mutex<()>,
 ) -> Response {
+    let argv = match resolved_argv(argv) {
+        Ok(a) => a,
+        Err(e) => return Response::error(id, &e),
+    };
     let mut cmd = Command::new("sudo");
     for (k, v) in env {
         cmd.arg(format!("{k}={v}"));
     }
-    for arg in argv {
+    for arg in &argv {
         cmd.arg(arg);
     }
     cmd.current_dir("/");
@@ -254,8 +313,10 @@ fn exec_direct_stage(
     id: &str,
     forward_agent: bool,
 ) -> Response {
-    let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]);
+    let mut cmd = match direct_command(argv) {
+        Ok(c) => c,
+        Err(e) => return Response::error(id, &e),
+    };
     cmd.current_dir("/");
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
@@ -384,10 +445,19 @@ fn exec_pipeline(
     let n = req.pipeline.len();
     assert!(n >= 2);
 
+    // Resolve every stage before spawning any, so an unresolvable stage
+    // refuses the whole pipeline instead of leaving earlier stages running.
+    let resolved: Result<Vec<Vec<String>>, String> =
+        req.pipeline.iter().map(|argv| resolved_argv(argv)).collect();
+    let resolved = match resolved {
+        Ok(r) => r,
+        Err(e) => return Response::error(&req.id, &e),
+    };
+
     let mut children: Vec<Child> = Vec::with_capacity(n);
     let mut prev_stdout: Option<Stdio> = None;
 
-    for (i, argv) in req.pipeline.iter().enumerate() {
+    for (i, (argv, bin_argv)) in req.pipeline.iter().zip(&resolved).enumerate() {
         let is_first = i == 0;
         let is_last = i == n - 1;
 
@@ -397,13 +467,14 @@ fn exec_pipeline(
                 for (k, v) in env {
                     c.arg(format!("{k}={v}"));
                 }
-                for arg in argv {
+                for arg in bin_argv {
                     c.arg(arg);
                 }
                 c
             }
             EscalationMode::Direct => {
-                let mut c = Command::new(&argv[0]);
+                let mut c = Command::new(&bin_argv[0]);
+                c.arg0(&argv[0]);
                 c.args(&argv[1..]);
                 c.env_clear();
                 for (k, v) in env {
@@ -782,6 +853,78 @@ mod tests {
     use super::*;
     use crate::prop::Rng;
     use std::time::Duration;
+
+    // === Issue #62: argv[0] is resolved once, on the child's PATH.
+
+    fn exe(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        std::fs::write(&p, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn search_path_takes_first_executable_in_order() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        // Non-executable file in the first dir is skipped.
+        std::fs::write(a.path().join("tool"), "x").unwrap();
+        let want = exe(b.path(), "tool");
+        let list = format!("{}:{}", a.path().display(), b.path().display());
+        assert_eq!(search_path("tool", &list), Some(want));
+        exe(a.path(), "tool");
+        assert_eq!(search_path("tool", &list), Some(a.path().join("tool")));
+    }
+
+    #[test]
+    fn resolve_command_uses_child_path_not_daemon_path() {
+        // A bare name resolves inside DEFAULT_LOGIN_PATH, whatever the
+        // daemon's own PATH says; a name found only elsewhere does not resolve.
+        let sh = resolve_command("sh").expect("sh on the login PATH");
+        assert!(
+            DEFAULT_LOGIN_PATH.split(':').any(|d| sh.parent() == Some(Path::new(d))),
+            "{sh:?} not under {DEFAULT_LOGIN_PATH}"
+        );
+        let only_here = tempfile::tempdir().unwrap();
+        exe(only_here.path(), "sudo-proxy-only-here-62");
+        assert_eq!(resolve_command("sudo-proxy-only-here-62"), None);
+    }
+
+    #[test]
+    fn resolve_command_takes_slash_names_relative_to_child_cwd() {
+        // The child runs in `/`, so `bin/sh` means `/bin/sh`, not
+        // `<daemon cwd>/bin/sh`.
+        let expect = Path::new("/bin/sh").is_file().then(|| PathBuf::from("/bin/sh"));
+        assert_eq!(resolve_command("bin/sh"), expect);
+        let tmp = tempfile::tempdir().unwrap();
+        let abs = exe(tmp.path(), "tool");
+        assert_eq!(resolve_command(abs.to_str().unwrap()), Some(abs));
+    }
+
+    #[test]
+    fn unresolved_stage_is_refused_not_looked_up_again() {
+        let argv = vec!["sudo-proxy-no-such-cmd-62".to_string(), "x".into()];
+        assert_eq!(
+            resolved_argv(&argv).unwrap_err(),
+            "command not found: sudo-proxy-no-such-cmd-62"
+        );
+        assert!(direct_command(&argv).is_err());
+        let ok = resolved_argv(&["sh".to_string(), "-c".into(), "true".into()]).unwrap();
+        assert!(ok[0].starts_with('/'), "{ok:?}");
+        assert_eq!(&ok[1..], ["-c", "true"]);
+    }
+
+    #[test]
+    fn pkexec_shell_string_spells_resolved_paths() {
+        let r: Vec<Vec<String>> = [vec!["sh", "-c", "true"], vec!["cat"]]
+            .iter()
+            .map(|a| resolved_argv(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>()).unwrap())
+            .collect();
+        let s = pipeline_to_shell(&r, &HashMap::new());
+        for stage in s.split(" | ") {
+            assert!(stage.starts_with('/'), "stage not absolute: {stage:?} in {s:?}");
+        }
+    }
 
     fn pid_alive(pid: u32) -> bool {
         unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }

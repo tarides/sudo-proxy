@@ -3,6 +3,33 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased (1.2.2) — the `Resolves:` line names the binary that actually runs (#62, backport of #80)
+
+The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
+spawned the bare name with a cleared environment, so the child searched the
+default login PATH (sudo searched its `secure_path`, pkexec's `sh -c` the login
+PATH). A daemon started from a dev shell (Nix, virtualenv, `~/.local/bin`)
+could show one file and run another, or show a file and then fail with ENOENT.
+
+`executor::resolve_command` now resolves argv[0] on the child's PATH, and a
+name containing `/` against the child's working directory `/`. The TUI and GUI
+prompts display that result, and every spawn path uses it: directly (keeping
+the requested `argv[0]`), as the program after `sudo` / `pkexec`, and in the
+multi-stage pkexec `sh -c` string. A name that does not resolve is refused with
+`command not found: <name>` instead of being looked up a second time; in a
+pipeline, before any stage is spawned. The GUI dialog now also shows
+`(not found in PATH)`. As in 1.2.1, the TUI shows the `Resolves:` line for the
+first stage and a warning for later stages that do not resolve.
+
+Behaviour change: a privileged command found only on sudo's `secure_path` (e.g.
+`/snap/bin`) but not on the default login PATH is now refused, where it
+previously ran under a mismatched prompt.
+
+This re-applies the fix from main (#80) to the 1.2 pipeline executor; the code
+differs because 1.2 predates structured plans. Regressions: unit tests in
+`executor` and `exec_direct_spawns_resolved_path_keeping_argv0` in
+`tests/exec.rs`.
+
 ## v1.2.1 — 2026-11-18 (security release)
 
 A patch release on top of v1.2.0 with two security fixes and nothing else:
