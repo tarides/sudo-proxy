@@ -63,6 +63,10 @@ sudo pkexec-cache --create
 
 Then configure your MCP client — see [MCP server](mcp.md).
 
+The daemon refuses to start in a terminal other processes can type into (tmux,
+screen, X11, kitty/WezTerm remote control, …). Run it in a terminal window of
+its own on Wayland; see [Where to run the daemon](usage.md#where-to-run-the-daemon).
+
 ## Building locally
 
 ```bash

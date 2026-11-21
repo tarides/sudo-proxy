@@ -38,8 +38,31 @@ the user during TUI approval.
 
 **Execution isolation:** child processes run with cwd `/`, umask 0077, and
 stdout/stderr piped — they do not inherit the socket file descriptor. stdin is
-null except for sudo mode, which inherits the terminal so sudo can prompt for a
-password.
+null. Privileged children (sudo, pkexec) stay in the daemon's session so sudo
+can open the terminal for its password prompt. Unprivileged children run in a
+session of their own, with **no controlling terminal**, so they cannot inject
+keystrokes into the approval prompt with `TIOCSTI` (GHSA-cpmp-67wf-gwmx).
+
+**Approval terminal (GHSA-cpmp-67wf-gwmx):** the prompt cannot tell a key the
+human typed from one another process running as the same user injected, and
+an AI requester typically has a same-UID shell. So the daemon refuses to start
+in a terminal that accepts synthetic input from other processes:
+
+- tmux, GNU screen, zellij (`TERM`, `$TMUX`, `$STY`, `$ZELLIJ`);
+- kitty, WezTerm, Konsole (remote control), VS Code's integrated terminal,
+  Emacs terminals;
+- any terminal in an X11 session (XTEST, e.g. `xdotool key y`).
+
+It prints each reason and exits. Run it in a terminal window of its own, on
+Wayland (GNOME Terminal, foot, Alacritty, …). `sudo-proxy --allow-injectable-tty`
+starts it anyway, and every prompt then carries a warning line. The override
+has no `hosts.json` equivalent because an agent can write that file:
+whoever starts the daemon decides. A kernel that still allows `TIOCSTI`
+(`dev.tty.legacy_tiocsti`, or no such sysctl before 6.2) is reported as a
+warning. Detection is best effort; see the residuals in
+[threat-model.md](threat-model.md#coverage-and-residuals). The strongest
+setup is to run the agent as a **separate Unix user**, or in a sandbox without
+access to your display or your multiplexer's socket.
 
 **TUI hardening:** the Y/N prompt reads a single keypress in non-canonical
 terminal mode (no Enter required) and times out after 60 seconds (default deny).

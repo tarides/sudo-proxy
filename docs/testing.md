@@ -29,6 +29,11 @@ cargo build --release
 ./target/release/sudo-proxy -v --socket /tmp/sp-test.sock
 ```
 
+Terminal A must be a window of its own, outside tmux/screen and on Wayland:
+the daemon refuses a terminal other processes can type into
+(GHSA-cpmp-67wf-gwmx). To test inside tmux anyway, add
+`--allow-injectable-tty`; every prompt then shows a warning line.
+
 **Terminal B — send requests** with the freshly built client:
 
 ```bash

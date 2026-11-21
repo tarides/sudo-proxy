@@ -786,6 +786,7 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    scrub_launcher_terminal(&mut cmd);
     // Pass the proxy binary as a separate argv element so the terminal exec
     // path never goes through `sh -c`. This closes a command-injection
     // vector when user-controlled fields ever land in this code path.
@@ -822,7 +823,7 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     }
 
     Ok(error_result(format!(
-        "Terminal opened but socket not ready after 5s at {}",
+        "Terminal opened but socket not ready after 5s at {}. {REFUSAL_HINT}",
         socket_path.display()
     )))
 }
@@ -858,6 +859,7 @@ async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult,
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    scrub_launcher_terminal(&mut cmd);
     // Pass argv directly to the terminal — never through `sh -c`. The host
     // string is caller-controlled (via the MCP tool) and shell-interpolating
     // it would let a peer execute arbitrary commands inside the spawned
@@ -906,8 +908,27 @@ async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult,
     }
 
     Ok(error_result(format!(
-        "Terminal opened for SSH to {host} but tunnel socket not ready after 30s"
+        "Terminal opened for SSH to {host} but tunnel socket not ready after 30s. {REFUSAL_HINT}"
     )))
+}
+
+/// Appended to a start timeout: the most likely silent cause since 1.2.2.
+const REFUSAL_HINT: &str = "If the window says sudo-proxy refused to start because other processes \
+can type into its terminal (GHSA-cpmp-67wf-gwmx), ask the user to start `sudo-proxy` themselves \
+in a terminal of their own (outside tmux/screen, on Wayland); this tool will then find it running. \
+Do not start it yourself with --allow-injectable-tty: that flag is for the user to decide.";
+
+/// Prepare the environment of the terminal that will host the daemon. The
+/// new window is not a pane of the launcher's multiplexer or emulator, so
+/// variables describing the launcher's terminal are removed: otherwise the
+/// daemon's injectable-terminal check would refuse on a stale `$TMUX`.
+/// What the new window really exposes (X11, its own emulator) the daemon
+/// still detects. The hold variable keeps the window open on refusal.
+fn scrub_launcher_terminal(cmd: &mut std::process::Command) {
+    for v in crate::ttyguard::INHERITED_TERMINAL_VARS {
+        cmd.env_remove(v);
+    }
+    cmd.env(crate::ttyguard::HOLD_ENV, "1");
 }
 
 // ---------------------------------------------------------------------------
