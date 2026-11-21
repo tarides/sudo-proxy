@@ -125,6 +125,10 @@ key ID `A6F84B53410B83FB`) before installing; a missing or bad signature
 aborts the install. Prefer `cargo install` if you'd rather build from
 source.
 
+The daemon must run in a terminal window that no other process can type into:
+outside tmux/screen, on Wayland. It refuses to start otherwise; see
+[Where to run the daemon](docs/usage.md#where-to-run-the-daemon).
+
 Point your MCP client at the server — add to the project's `.mcp.json` or
 `~/.claude/claude_desktop_config.json`:
 

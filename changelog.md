@@ -3,6 +3,42 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased (1.2.2) — refuse approval terminals other processes can type into (GHSA-cpmp-67wf-gwmx)
+
+The daemon approves a request by reading one key from its terminal, and it
+cannot tell a key the human typed from one injected by another process running
+as the same user. The usual requester, an AI agent, also has a same-UID shell.
+In tmux or screen (`send-keys`, `stuff`), in a terminal with remote control
+(kitty, WezTerm, Konsole's D-Bus `sendText`), or in any X11 session
+(`xdotool key y`), it could send a privileged request and answer `y` to its own
+prompt, or `a` to grant itself the session.
+
+- The daemon now checks its terminal at startup (`src/ttyguard.rs`). If it
+  finds one of these, it prints each reason and refuses to start. Covered:
+  multiplexer `TERM` or `$TMUX`/`$STY`/`$ZELLIJ`; kitty, WezTerm, Konsole,
+  VS Code and Emacs terminals; X11 without Wayland. `--allow-injectable-tty`
+  starts it anyway, with a warning line in every prompt. There is deliberately
+  no `hosts.json` equivalent: an agent can write that file and restart the
+  daemon through MCP. `--pkexec` skips the check, since privileged approval
+  then happens in polkit's dialog.
+- With `--host`, the local terminal is checked before ssh starts, and the
+  override is forwarded to the remote daemon. A remote older than 1.2.2
+  rejects the flag and exits, which fails closed.
+- Unprivileged children now run in their own session, with no controlling
+  terminal, so a command (or a background job it leaves) cannot `TIOCSTI`
+  keystrokes into a later prompt. A kernel that still allows `TIOCSTI` is
+  reported as a warning.
+- `sudo-proxy-mcp` removes the launcher's own terminal variables (`TMUX`,
+  `KITTY_*`, …) from the window it spawns, so a fresh window is not refused for
+  the agent's tmux. If the daemon refuses, the window stays open until Enter,
+  and the `start_server` error explains what to do.
+- Docs: threat-model B3 row and attack-tree leaf 3.5 with residuals,
+  assurance-case assumption A1, security/usage/install/README.
+
+Residuals: an XWayland terminal inside a Wayland session, emulators the check
+does not know, and X11 synthetic input into the polkit dialog under `--pkexec`.
+The structural fix is to run the agent as a separate Unix user.
+
 ## Unreleased (1.2.2) — the `Resolves:` line names the binary that actually runs (#62, backport of #80)
 
 The prompt resolved `argv[0]` on the daemon's own PATH, but the executor

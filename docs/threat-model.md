@@ -73,6 +73,7 @@ invariant at a given boundary are omitted.
 | Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Displayed command length bounded with a hidden-bytes marker. | G4.3 / F3 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
+| Spoofing | A same-UID process **types the answer itself**: synthetic keystrokes into the approval terminal (`tmux send-keys`, `screen -X stuff`, kitty/wezterm remote control, Konsole D-Bus, X11 XTEST, `TIOCSTI`). The typical requester (an agent) has a same-UID shell, so A1 reaches this as A2. | The daemon refuses to start in a terminal that accepts such input (`ttyguard`: multiplexer `TERM`/`$TMUX`/`$STY`/`$ZELLIJ`, remote-control emulators, VS Code, Emacs, X11 without Wayland) unless started with `--allow-injectable-tty`, which puts a warning line in every prompt. There is deliberately no `hosts.json` equivalent, since an agent can write that file and restart the daemon through MCP. Unprivileged children run in their own session, with no controlling terminal, so they cannot `TIOCSTI` into the prompt. Legacy `TIOCSTI` is reported at startup. `sudo-proxy-mcp` scrubs the launcher's terminal variables from the window it spawns. | A1 (assumption, now checked) / GHSA-cpmp-67wf-gwmx |
 
 ### B4 — daemon → exec → root (A1)
 
@@ -135,8 +136,12 @@ A  A root command runs that the human did NOT approve
 │   │        [resolved path + "-> target" shown → G4.2 · blocked]
 │   ├─ 3.3 Push the real command / [y/N] off-screen with a huge arg
 │   │        [length bound + hidden-bytes marker → G4.3 / F3 · blocked]
-│   └─ 3.4 Printable-range Unicode look-alike / NBSP in reason
-│            [cannot hide the real command → G4.4 · residual (accepted)]
+│   ├─ 3.4 Printable-range Unicode look-alike / NBSP in reason
+│   │        [cannot hide the real command → G4.4 · residual (accepted)]
+│   └─ 3.5 Answer the prompt without the human: inject `y` into the TTY
+│            [startup refusal of injectable terminals; children without a
+│             controlling tty → A1 / GHSA-cpmp-67wf-gwmx
+│             · blocked for detected terminals (residual: undetected ones)]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
@@ -166,6 +171,18 @@ is unaccounted for. The residuals — already on record and accepted — are:
 - **loopback self-routing (F5, closed).** `is_local_host` normalizes self/loopback
   targets; residual undetected aliases are covered by the C10 composition (every
   remote daemon still gates unattended exec). See finding F5.
+- **3.5 — keystroke injection into the approval terminal
+  (GHSA-cpmp-67wf-gwmx).** Detection reads environment variables and one sysctl,
+  so it is best effort. It does not see an XWayland terminal (e.g. `xterm`)
+  inside a Wayland session, an emulator with remote control it does not know,
+  or a process that shares the daemon's controlling terminal on a kernel that
+  still allows `TIOCSTI`. Nor does it cover `--pkexec`, whose polkit dialog has
+  X11's own synthetic-input exposure, or a daemon the operator started with
+  `--allow-injectable-tty`. An agent can always start a daemon of its own in a
+  terminal it controls; that daemon's `sudo` then has no cached credential for
+  the new terminal and asks for the password. The structural fix is to run the
+  agent as a separate Unix user, or in a sandbox without access to the display
+  or the multiplexer's socket.
 - **3.4 — look-alike `reason` (F1 residual).** Printable Unicode can mislead but
   cannot conceal the real command line, which is printed separately.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no

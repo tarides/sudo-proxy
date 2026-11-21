@@ -152,6 +152,33 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
     }
 }
 
+/// Why this daemon's terminal accepts injected keystrokes, when the operator
+/// started it anyway (`--allow-injectable-tty`, GHSA-cpmp-67wf-gwmx). Set once
+/// at startup; every prompt then carries a warning line.
+static INJECTABLE_TTY: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+
+/// Record the injectable-terminal reasons shown in every prompt header.
+pub fn set_injectable_tty_warning(reasons: Vec<String>) {
+    let _ = INJECTABLE_TTY.set(reasons);
+}
+
+/// The prompt's warning line for an injectable terminal, or `None`.
+fn injectable_tty_line(reasons: &[String], style: &Style) -> Option<String> {
+    if reasons.is_empty() {
+        return None;
+    }
+    let Style { bold, reset, .. } = *style;
+    Some(format!(
+        "{bold}⚠ Other processes can type into this terminal ({}). \
+         Approve only what you asked for.{reset}",
+        reasons
+            .iter()
+            .map(|r| r.split(": ").next().unwrap_or(r).trim())
+            .collect::<Vec<_>>()
+            .join("; ")
+    ))
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 /// `eligible` gates whether the session-scoped `a` answer is offered (only for
 /// unprivileged requests on a daemon whose `unattended_eligible` policy is set).
@@ -167,6 +194,9 @@ pub fn prompt_tty(
     let Style { bold, dim, reset } = st;
 
     writeln!(tty_w, "\n{bold}━━━ Privilege Request ━━━{reset}")?;
+    if let Some(line) = INJECTABLE_TTY.get().and_then(|r| injectable_tty_line(r, &st)) {
+        writeln!(tty_w, "{line}")?;
+    }
     writeln!(
         tty_w,
         "From:    {} @ {}",
@@ -552,6 +582,23 @@ mod tests {
         let st = Style { bold: "B", dim: "D", reset: "R" };
         write_resolves_line(&mut buf, cmd_name, &st).expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn injectable_tty_line_names_each_mechanism() {
+        let st = Style { bold: "B", dim: "D", reset: "R" };
+        assert_eq!(injectable_tty_line(&[], &st), None);
+        let line = injectable_tty_line(
+            &[
+                "terminal multiplexer (TERM=tmux-256color): `tmux send-keys` can type into it".into(),
+                "X11 session (DISPLAY=:0, no Wayland): any X client can synthesise keys".into(),
+            ],
+            &st,
+        )
+        .unwrap();
+        assert!(line.starts_with("B⚠"), "{line}");
+        assert!(line.ends_with('R'), "{line}");
+        assert!(line.contains("terminal multiplexer (TERM=tmux-256color); X11 session (DISPLAY=:0, no Wayland)"), "{line}");
     }
 
     #[test]

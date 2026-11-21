@@ -54,6 +54,10 @@ sudo-proxy --unattended-eligible
 # Custom socket path
 sudo-proxy --socket /tmp/my-proxy.sock
 
+# Start even in a terminal other processes can type into (tmux, X11, …).
+# Every prompt then shows a warning; see "Where to run the daemon" below.
+sudo-proxy --allow-injectable-tty
+
 # Send a request (debug client)
 sudo-request id
 sudo-request --reason "install web server" apt install nginx
@@ -64,6 +68,23 @@ sudo-request --no-privilege ls /etc
 # Tag the request with a session name (default: sudo-request-cli)
 sudo-request --session my-project apt update
 ```
+
+## Where to run the daemon
+
+The approval prompt trusts the keypress it reads. Since 1.2.2 the daemon
+refuses to start in a terminal that other processes running as you can type
+into: tmux/screen/zellij panes, kitty/WezTerm/Konsole (remote control), VS
+Code's or Emacs' terminal, and any terminal in an X11 session. It prints why
+and exits (GHSA-cpmp-67wf-gwmx). Run it in a terminal window of its own on
+Wayland. If the MCP server's `start_server` fails for this reason, start
+`sudo-proxy` (or `sudo-proxy --host HOST`) yourself in such a terminal;
+`start_server` then finds it running. To accept the risk, start it yourself
+with `--allow-injectable-tty`. There is no `hosts.json` setting for this.
+
+With `--host`, the check runs on the local terminal, where the remote prompt
+is answered. The remote daemon checks too, and receives
+`--allow-injectable-tty` when you passed it locally. A remote older than 1.2.2
+rejects that flag, so upgrade remotes first.
 
 ## Remote hosts over SSH
 

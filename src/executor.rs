@@ -349,19 +349,33 @@ fn run_single_command(
     timeout: Duration,
     fg_lock: Option<&Mutex<()>>,
 ) -> Response {
+    let needs_tty = fg_lock.is_some();
     unsafe {
-        cmd.pre_exec(|| {
+        cmd.pre_exec(move || {
             // New process group so kill_group can SIGKILL the entire
             // group on timeout — otherwise a wrapper like `sh -c '... &'`
             // would leave grandchild processes orphaned to PID 1, holding
             // stdio pipes open and blocking our drain threads forever.
             //
-            // setpgid (vs the historical setsid) keeps the child in the
-            // *same session* as the daemon, so the controlling terminal
-            // stays reachable. Under setsid the child had no controlling
-            // tty, and `sudo` could not open /dev/tty for its password
-            // prompt — see issue #19.
-            libc::setpgid(0, 0);
+            // Privileged children (sudo, pkexec) use setpgid, which keeps
+            // them in the daemon's *session* so the controlling terminal
+            // stays reachable: under setsid `sudo` could not open /dev/tty
+            // for its password prompt — see issue #19.
+            //
+            // Unprivileged children get their own session (setsid), so they
+            // have no controlling terminal at all. A child that shared the
+            // daemon's could inject keystrokes into the approval prompt
+            // with TIOCSTI (where `dev.tty.legacy_tiocsti` allows it) and
+            // approve a later privileged request — e.g. a background job
+            // left by a command run under the session `a` grant
+            // (GHSA-cpmp-67wf-gwmx). They never read /dev/tty anyway
+            // (stdin is null, no foreground hand-off); setsid also makes
+            // the child the leader of a new group, so kill_group still works.
+            if needs_tty {
+                libc::setpgid(0, 0);
+            } else {
+                libc::setsid();
+            }
             libc::umask(0o077);
             Ok(())
         });
@@ -378,8 +392,12 @@ fn run_single_command(
     // setpgid with the same args is harmless; if the child has already
     // exec'd, EACCES is returned and we fall back to whatever the child
     // managed to set itself.
-    unsafe {
-        let _ = libc::setpgid(cpid, cpid);
+    // (Not for a setsid child: a session leader cannot change group, and
+    // setsid already made it the leader of group `cpid`.)
+    if needs_tty {
+        unsafe {
+            let _ = libc::setpgid(cpid, cpid);
+        }
     }
 
     // Hand the controlling terminal's foreground to the child so reads

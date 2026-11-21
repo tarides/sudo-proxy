@@ -23,3 +23,4 @@ pub(crate) mod prop;
 pub mod protocol;
 pub mod server;
 pub mod tui;
+pub mod ttyguard;

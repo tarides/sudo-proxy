@@ -17,6 +17,11 @@ struct Opts {
     /// `Some(_)` = an explicit CLI flag was passed and overrides the file.
     unattended_eligible: Option<bool>,
     forward_agent: bool,
+    /// `--allow-injectable-tty` (GHSA-cpmp-67wf-gwmx). Deliberately a CLI
+    /// flag only, with no `hosts.json` equivalent: an agent can write that
+    /// file, then restart the daemon through `sudo-proxy-mcp`, which never
+    /// passes this flag.
+    allow_injectable_tty: bool,
 }
 
 fn main() {
@@ -35,7 +40,10 @@ fn main() {
             }
         }
         let target = sudo_proxy::hosts::ssh_target(host, opts.login.as_deref());
-        run_remote(&target, opts.verbose, opts.forward_agent);
+        // The remote prompt is answered through *this* terminal, so it is
+        // this terminal that must not accept injected keystrokes.
+        let overridden = tty_gate(opts.allow_injectable_tty);
+        run_remote(&target, opts.verbose, opts.forward_agent, overridden);
         // run_remote execs into ssh, so we only get here on error
         return;
     }
@@ -95,6 +103,16 @@ fn main() {
         }
     });
 
+    // GHSA-cpmp-67wf-gwmx: refuse a terminal other same-UID processes can
+    // type into, unless overridden. Under --pkexec, privileged requests are
+    // approved in polkit's dialog, not here, and an injected key at the TTY
+    // prompt yields only unprivileged execution, which such a process
+    // already has — so the check is skipped.
+    if !opts.pkexec {
+        let reasons = tty_gate(opts.allow_injectable_tty);
+        sudo_proxy::tui::set_injectable_tty_warning(reasons);
+    }
+
     let config = server::ServerConfig {
         mode,
         pkexec_only: opts.pkexec,
@@ -134,6 +152,41 @@ fn main() {
     }
 }
 
+/// GHSA-cpmp-67wf-gwmx: check that this terminal does not accept keystrokes
+/// injected by other same-UID processes. Prints any warnings. When injectors
+/// are found and `allow` is false, prints the refusal and exits 1 (holding
+/// the window open first if `sudo-proxy-mcp` spawned it). Returns the
+/// injector reasons when overridden (empty when the terminal is clean).
+fn tty_gate(allow: bool) -> Vec<String> {
+    use sudo_proxy::ttyguard;
+    let a = ttyguard::assess(&ttyguard::probe());
+    for w in &a.warnings {
+        eprintln!("sudo-proxy: warning: {w}");
+    }
+    if a.injectors.is_empty() {
+        return Vec::new();
+    }
+    if !allow {
+        eprintln!("{}", ttyguard::refusal_message(&a));
+        if std::env::var_os(ttyguard::HOLD_ENV).is_some_and(|v| !v.is_empty()) {
+            // Spawned in a window of its own: keep it open so the reason
+            // can be read before it closes.
+            eprintln!("\nPress Enter to close this window.");
+            let mut line = String::new();
+            let _ = std::io::stdin().read_line(&mut line);
+        }
+        process::exit(1);
+    }
+    eprintln!(
+        "sudo-proxy: WARNING: other processes running as you can type into this terminal; \
+         starting anyway (--allow-injectable-tty):"
+    );
+    for i in &a.injectors {
+        eprintln!("  - {i}");
+    }
+    a.injectors
+}
+
 fn parse_args(args: &[String]) -> Opts {
     let mut socket = None;
     let mut host = None;
@@ -144,6 +197,7 @@ fn parse_args(args: &[String]) -> Opts {
     // Some(_) means an explicit flag overrides the file.
     let mut unattended_eligible: Option<bool> = None;
     let mut forward_agent = false;
+    let mut allow_injectable_tty = false;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -164,9 +218,10 @@ fn parse_args(args: &[String]) -> Opts {
             "--unattended-eligible" => unattended_eligible = Some(true),
             "--no-unattended-eligible" => unattended_eligible = Some(false),
             "--forward-agent" => forward_agent = true,
+            "--allow-injectable-tty" => allow_injectable_tty = true,
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent] [--allow-injectable-tty]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -184,6 +239,10 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              and its directories are yours and not group/world-writable");
                 eprintln!("  --forward-agent             With --host: enable SSH agent forwarding (-A) so unprivileged");
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
+                eprintln!("  --allow-injectable-tty      Start even if other processes running as you can type into this");
+                eprintln!("                              terminal (tmux/screen, kitty/wezterm remote control, X11, …) and");
+                eprintln!("                              so answer the prompt; every prompt then shows a warning");
+                eprintln!("                              (no hosts.json equivalent: whoever starts the daemon decides)");
                 std::process::exit(0);
             }
             _ => {
@@ -200,6 +259,7 @@ fn parse_args(args: &[String]) -> Opts {
         verbose,
         unattended_eligible,
         forward_agent,
+        allow_injectable_tty,
     }
 }
 
@@ -247,7 +307,7 @@ unsafe fn signal_hook_cleanup(path: PathBuf) {
 }
 
 /// Connect to a remote host: resolve UID, set up SSH tunnel, exec into SSH.
-fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
+fn run_remote(host: &str, verbose: bool, forward_agent: bool, injectable_overridden: Vec<String>) {
     use std::os::unix::process::CommandExt;
     use sudo_proxy::hosts::HostsConfig;
 
@@ -299,6 +359,12 @@ fn run_remote(host: &str, verbose: bool, forward_agent: bool) {
     }
     ssh_args.push(host);
     ssh_args.push("sudo-proxy");
+    // The override was accepted for the terminal the remote prompt shows in;
+    // pass it on so the remote daemon (whose TERM comes from here) agrees.
+    // A remote older than 1.2.2 rejects the flag and exits: fail closed.
+    if !injectable_overridden.is_empty() {
+        ssh_args.push("--allow-injectable-tty");
+    }
 
     if verbose {
         eprintln!("+ ssh {}", ssh_args.join(" "));
