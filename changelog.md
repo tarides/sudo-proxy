@@ -3,7 +3,25 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
-## Unreleased (1.2.2) — refuse approval terminals other processes can type into (GHSA-cpmp-67wf-gwmx)
+## v1.2.2 — 2026-11-21 (security release)
+
+A patch release on top of v1.2.1 with one security fix and one backported
+fix, and nothing else (main's 1.3 work is not included):
+
+- **GHSA-cpmp-67wf-gwmx** (high): the daemon refuses to start in a terminal
+  that other same-UID processes can type into (tmux/screen, kitty/WezTerm/
+  Konsole remote control, X11, …), unless started with
+  `--allow-injectable-tty`. Unprivileged children no longer share its
+  controlling terminal.
+- **#62** (backport of #80): the `Resolves:` line names the binary that
+  actually runs.
+
+**Upgrade note:** if you start the daemon inside tmux/screen or on X11, it now
+refuses with an explanation; move it to a terminal of its own on Wayland, or
+pass `--allow-injectable-tty`. With `--host`, upgrade the remote first if you
+use the override, since a 1.2.1 remote rejects the forwarded flag.
+
+### Refuse approval terminals other processes can type into (GHSA-cpmp-67wf-gwmx)
 
 The daemon approves a request by reading one key from its terminal, and it
 cannot tell a key the human typed from one injected by another process running
@@ -39,7 +57,7 @@ Residuals: an XWayland terminal inside a Wayland session, emulators the check
 does not know, and X11 synthetic input into the polkit dialog under `--pkexec`.
 The structural fix is to run the agent as a separate Unix user.
 
-## Unreleased (1.2.2) — the `Resolves:` line names the binary that actually runs (#62, backport of #80)
+### The `Resolves:` line names the binary that actually runs (#62, backport of #80)
 
 The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
 spawned the bare name with a cleared environment, so the child searched the
