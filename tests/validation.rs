@@ -411,6 +411,25 @@ fn plan_structural_error_rejected_without_prompt() {
     assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
 }
 
+/// Issue #90: the one `compile_plan` error that quotes request data (a setenv
+/// key that is a valid name but not allowlisted, here 10 000 chars long) is
+/// also rejected before prompting, so its unbounded text never reaches the
+/// prompt's `⚠ invalid plan` line.
+#[test]
+fn plan_disallowed_setenv_rejected_without_prompt() {
+    let s = server();
+    let plan = Plan::Setenv {
+        key: "A".repeat(10_000),
+        value: "x".into(),
+        body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+    };
+    let resp = s.send(&plan_req("v-setenv-key", plan, false));
+    assert_eq!(resp.status, Status::Error);
+    let msg = resp.message.as_deref().unwrap();
+    assert!(msg.contains("invalid plan: environment variable not allowed"), "{msg:.80}");
+    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+}
+
 /// A redirect wrapping an `alt` is structurally invalid (stdio modifiers target
 /// a single process, not a composite) and is rejected before prompting.
 #[test]

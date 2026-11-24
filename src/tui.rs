@@ -460,12 +460,13 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
-/// A filesystem-derived path as the prompt shows it: forbidden characters
-/// escaped (#86), then length-bounded (G4.3, #85). Escaping comes first so
-/// that the bound applies to what is actually printed, which escaping can
-/// lengthen, and so that clipping never cuts a raw control character.
-fn shown(path: &str) -> String {
-    clip(&escape_dangerous(path), MAX_DISPLAY_LINE_CHARS)
+/// Request- or filesystem-derived text as one prompt line shows it (a path, an
+/// opaque reason, a plan error): forbidden characters escaped (#86), then
+/// length-bounded (G4.3, #85). Escaping comes first so that the bound applies
+/// to what is actually printed, which escaping can lengthen, and so that
+/// clipping never cuts a raw control character.
+fn shown(text: &str) -> String {
+    clip(&escape_dangerous(text), MAX_DISPLAY_LINE_CHARS)
 }
 
 /// Byte length of the CSI escape sequence (`ESC [`, parameter bytes, then a
@@ -613,6 +614,21 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
     }
 }
 
+/// The plan part of the prompt: the `Command:`/`Steps:`/`Resolves:` block, or
+/// one `⚠ invalid plan` line if the plan does not compile.
+///
+/// The daemon rejects a plan that does not compile before it prompts, so the
+/// error arm is unreachable through the server today. It is bounded anyway
+/// (G4.3, #90): `compile_plan` errors can quote request data, such as a setenv
+/// key of any length.
+fn write_plan_section<W: Write>(w: &mut W, req: &ValidatedRequest, style: &Style) -> io::Result<()> {
+    let Style { bold, reset, .. } = *style;
+    match plan_display(req) {
+        Ok(views) => write_plan_stages(w, &req.exec_plan(), &views, req.privileged, style),
+        Err(e) => writeln!(w, "{bold}⚠ invalid plan: {}{reset}", shown(&e)),
+    }
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 /// `eligible` gates whether the session-scoped `a` answer is offered (only for
 /// unprivileged requests on a daemon whose `unattended_eligible` policy is set).
@@ -636,10 +652,7 @@ pub fn prompt_tty(
     // by one resolved binary per literal stage, so a bundle of root effects can
     // no longer hide inside one opaque command. Built from the same
     // `compile_plan` walk the executor uses, so prompt and execution agree.
-    match plan_display(req) {
-        Ok(views) => write_plan_stages(&mut tty_w, &req.exec_plan(), &views, req.privileged, &st)?,
-        Err(e) => writeln!(tty_w, "{bold}⚠ invalid plan: {e}{reset}")?,
-    }
+    write_plan_section(&mut tty_w, req, &st)?;
 
     write_env_line(&mut tty_w, req)?;
 
@@ -2471,11 +2484,48 @@ mod tests {
         out
     }
 
+    /// The plan section exactly as `prompt_tty` writes it, for a plan that
+    /// compiles (the `⚠ invalid plan` arm has its own test).
     fn plan_output(req: &ValidatedRequest, style: &Style) -> String {
-        let views = plan_display(req).expect("compiles");
+        assert!(plan_display(req).is_ok(), "compiles");
+        plan_section(req, style)
+    }
+
+    fn plan_section(req: &ValidatedRequest, style: &Style) -> String {
         let mut buf = Vec::new();
-        write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, style).expect("write");
+        write_plan_section(&mut buf, req, style).expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    /// Issue #90: a plan that does not compile shows one `⚠ invalid plan`
+    /// line, and that line is bounded although the error quotes request data
+    /// (here a 10 000-char setenv key: a valid name, but not allowlisted).
+    #[test]
+    fn invalid_plan_line_is_bounded() {
+        let key = "A".repeat(10_000);
+        let req = mk_req(
+            Plan::Setenv {
+                key: key.clone(),
+                value: "x".into(),
+                body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+            },
+            false,
+        );
+        let err = plan_display(&req).err().expect("setenv key is not allowlisted");
+        assert!(err.contains(&key), "the error quotes the key: unbounded without the clip");
+        let label = "⚠ invalid plan: ";
+        for st in [style_for(true), style_for(false)] {
+            let out = plan_section(&req, &st);
+            assert_eq!(out.lines().count(), 1, "one line: {out:?}");
+            let line = strip_csi(out.trim_end_matches('\n'));
+            assert!(
+                line.starts_with(&format!("{label}environment variable not allowed: AAA")),
+                "{line:.80}"
+            );
+            assert!(line.ends_with(" more chars hidden]"), "marker: …{}", &line[line.len() - 40..]);
+            let n = line.chars().count();
+            assert!(n <= label.chars().count() + MAX_DISPLAY_LINE_CHARS + MARKER_MAX, "{n} chars");
+        }
     }
 
     /// The `Steps:` lines and the `Resolves:` lines (block rows included) of a
