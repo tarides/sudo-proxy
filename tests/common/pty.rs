@@ -14,7 +14,8 @@
 //! `ICANON` cleared before writing the key.
 //!
 //! The daemon runs with a cleared environment: no `DISPLAY`/`WAYLAND_DISPLAY`
-//! (so `Mode::Remote`: TUI prompt + sudo), a private `HOME`/`XDG_CONFIG_HOME`
+//! (so `Mode::Remote`: TUI prompt + sudo) unless `PtyOpts::env` sets one, a
+//! private `HOME`/`XDG_CONFIG_HOME`
 //! (no developer `hosts.json` policy leaks in), and `tests/shims` first on
 //! `PATH`, so privileged steps reach the logging `sudo` shim, not real sudo.
 
@@ -52,8 +53,9 @@ pub struct PtyOpts {
     /// Directories put first on the daemon's own PATH (before the shims), as
     /// a dev shell would. Requested commands must not be resolved on it.
     pub extra_path: Vec<PathBuf>,
-    /// Extra environment for the daemon, on top of the cleared base (e.g.
-    /// `TERM=tmux-256color` to look like an injectable terminal).
+    /// Extra environment for the daemon, set after `env_clear` and the
+    /// harness's own (e.g. `TERM=tmux-256color` to look like an injectable
+    /// terminal, or `DISPLAY` so `Mode::detect` returns `Local`).
     pub env: Vec<(String, String)>,
 }
 

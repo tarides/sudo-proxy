@@ -175,3 +175,34 @@ fn resolves_line_names_the_binary_that_runs() {
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::decode_stdout(&resp), "hello\n");
 }
+
+/// Issue #88: under `--pkexec` (with a display, so `Mode::Local`), a
+/// privileged multi-step plan must not be handed to pkexec's single-argv
+/// dialog: it gets the TUI prompt and, once approved, sudo. Checks the real
+/// CLI wiring (`--pkexec` → `pkexec_only`, `Mode::detect`). The leaves name a
+/// nonexistent program, so a regressed gate fails at `build_command` and never
+/// raises a polkit dialog for the test argv.
+#[test]
+fn pkexec_flag_multi_step_plan_gets_the_tui_prompt() {
+    const NO_SUCH: &str = "sudo-proxy-test-88-no-such-cmd";
+    let mut d = PtyDaemon::spawn(PtyOpts {
+        args: vec!["--pkexec".into()],
+        env: vec![("DISPLAY".into(), ":99".into())],
+        ..Default::default()
+    });
+    let step = |n: &str| Plan::Exec { argv: vec![NO_SUCH.into(), n.into()] };
+    let mut r = common::make_req("pty-pkexec-88", vec![]);
+    r.privileged = true;
+    r.plan = Some(Plan::Run { steps: vec![step("step-one"), step("step-two")] });
+    let h = d.request_async(&r);
+    let prompt = d.answer(b'n');
+    assert!(prompt.contains("Execute as root?"), "prompt: {prompt}");
+    assert!(prompt.contains("step-one"), "prompt: {prompt}");
+    assert!(prompt.contains("step-two"), "prompt: {prompt}");
+    let resp = h.join().unwrap();
+    assert_eq!(resp.status, Status::Denied, "{resp:?}");
+    assert!(d.shim_log().is_empty(), "sudo ran on denial: {:?}", d.shim_log());
+    // Not vacuous: the daemon really ran in local (pkexec-capable) mode.
+    let log = d.daemon_log();
+    assert!(log.contains("mode: local (TUI + pkexec)"), "daemon log: {log}");
+}

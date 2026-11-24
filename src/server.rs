@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audit::{AuditConfig, AuditLog, Event, Outcome, Reject};
-use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
+use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env, LeafPrivilege, LeafView};
 use crate::mode::Mode;
 use crate::protocol::{is_dangerous_char, Request, Response, ValidatedRequest};
 use crate::tui::{self, Prompter, ResultSink};
@@ -654,6 +654,25 @@ fn escape_for_terminal(s: &str) -> String {
     out
 }
 
+/// `--pkexec` delegates approval to pkexec's dialog only when that dialog
+/// shows one escalated argv with no redirection: privileged as a whole, one
+/// leaf, no redirects. Everything else takes the TUI prompt and sudo.
+///
+/// `req_privileged` is the request's raw `privileged` flag, not
+/// `effective_privileged()`: a plan escalating only through `run-as` may carry
+/// unescalated leaves that pkexec never shows, so it must not delegate.
+fn delegate_to_pkexec(
+    pkexec_only: bool,
+    mode: Mode,
+    req_privileged: bool,
+    views: &[LeafView],
+) -> bool {
+    pkexec_only
+        && mode == Mode::Local
+        && req_privileged
+        && matches!(views, [v] if v.redirects.is_empty() && v.privilege != LeafPrivilege::Direct)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn handle_connection(
     mut stream: UnixStream,
@@ -919,13 +938,15 @@ fn handle_connection(
         );
     }
 
-    // --pkexec hands approval to pkexec's own dialog, which shows only one
-    // escalated leaf's argv. That is sound only for a request that is
-    // privileged as a whole (every leaf escalates, so every leaf raises a
-    // dialog). A request that is privileged only through `run-as` nodes may
-    // carry unescalated leaves that pkexec never sees, so it takes the TUI
-    // prompt (and sudo) like any other privileged plan.
-    let use_pkexec = pkexec_only && mode == Mode::Local && req.privileged;
+    // --pkexec hands approval to pkexec's own dialog, which shows a single
+    // escalated argv (as `env -C DIR -- BIN args`) and no redirection. So it
+    // delegates only a request that is `privileged: true`, compiles to exactly
+    // one leaf, and has no redirection on it (the daemon opens redirected
+    // files itself; the dialog never names them). Everything else — a
+    // multi-step plan, a redirected step, or a plan privileged only through
+    // `run-as` — takes the TUI prompt and runs through sudo. The predicate
+    // reads the same `views` the prompt renders.
+    let use_pkexec = delegate_to_pkexec(pkexec_only, mode, req.privileged, &views);
 
     let (resp, outcome) = if effective_privileged {
         if use_pkexec {
@@ -1110,6 +1131,48 @@ mod tests {
     use super::*;
     use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
+
+    fn leaf_view(privilege: LeafPrivilege, redirects: &str) -> LeafView {
+        LeafView {
+            stage_id: 0,
+            argv: vec!["id".into()],
+            privilege,
+            resolved_bin: None,
+            opaque: false,
+            redirects: redirects.into(),
+            in_pipe: false,
+        }
+    }
+
+    #[test]
+    fn delegate_to_pkexec_only_for_a_single_plain_leaf() {
+        let root = || leaf_view(LeafPrivilege::Root, "");
+        let nobody = || leaf_view(LeafPrivilege::User("nobody".into()), "");
+        let d = |views: &[LeafView]| delegate_to_pkexec(true, Mode::Local, true, views);
+
+        // The only shape that delegates: one escalated leaf, no redirection.
+        assert!(d(&[root()]));
+        assert!(d(&[nobody()]));
+
+        // More or fewer than one leaf.
+        assert!(!d(&[root(), root()]));
+        assert!(!d(&[root(), nobody()]));
+        assert!(!d(&[]));
+
+        // A redirected single leaf: the dialog would not show the file.
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "> /tmp/x")]));
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "< /etc/hosts")]));
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "2>&1")]));
+
+        // Defensive: an unescalated leaf never delegates.
+        assert!(!d(&[leaf_view(LeafPrivilege::Direct, "")]));
+
+        // The other conjuncts.
+        assert!(!delegate_to_pkexec(false, Mode::Local, true, &[root()]));
+        assert!(!delegate_to_pkexec(true, Mode::Remote, true, &[root()]));
+        // privileged: false (e.g. a run-as-only plan) never delegates.
+        assert!(!delegate_to_pkexec(true, Mode::Local, false, &[nobody()]));
+    }
 
     /// `--log-json` prints request bytes before validation, on the approval
     /// terminal: escape, C1, DEL and bidi characters must come out inert.
