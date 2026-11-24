@@ -7,7 +7,9 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
 use crate::executor::{plan_display, LeafPrivilege, LeafView};
-use crate::protocol::{Plan, RedirTarget, Response, RunAs, Status, Stream, ValidatedRequest};
+use crate::protocol::{
+    escape_dangerous, Plan, RedirTarget, Response, RunAs, Status, Stream, ValidatedRequest,
+};
 
 /// Quote a single token for safe, paste-able POSIX shell. Anything outside a
 /// conservative unquoted-safe set is wrapped in single quotes (with embedded
@@ -910,7 +912,7 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
             match &view.resolved_bin {
                 Some(p) => format!(
                     "{bold}opaque — resolves only the shell: {}{reset}",
-                    p.display()
+                    escape_dangerous(&p.display().to_string())
                 ),
                 None => format!("{bold}opaque — shell not found in PATH{reset}"),
             }
@@ -936,6 +938,12 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
 /// always naming a concrete path. Used by the consolidated resolve block; it
 /// mirrors `write_resolves_line`'s symlink display but never elides — the block
 /// shows every binary, even one supplied as an already-canonical absolute path.
+///
+/// Both paths are printed through `escape_dangerous` (issue #86). Only the
+/// canonical path is caller-influenced (a symlink's target name never goes
+/// through `ValidatedRequest::validate`); the resolved path is built from the
+/// validated `argv[0]`/cwd and the constant login PATH, so escaping it is
+/// defence in depth. Comparisons use the raw strings.
 fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
     let Style { bold, dim, reset, .. } = *style;
     let resolved = match resolved {
@@ -947,12 +955,19 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
         Ok(canonical) => {
             let canonical_str = canonical.display().to_string();
             if canonical_str != resolved_str {
-                format!("{resolved_str} {bold}->{reset} {canonical_str}")
+                format!(
+                    "{} {bold}->{reset} {}",
+                    escape_dangerous(&resolved_str),
+                    escape_dangerous(&canonical_str)
+                )
             } else {
-                resolved_str
+                escape_dangerous(&resolved_str)
             }
         }
-        Err(_) => format!("{resolved_str} {dim}(canonicalize failed){reset}"),
+        Err(_) => format!(
+            "{} {dim}(canonicalize failed){reset}",
+            escape_dangerous(&resolved_str)
+        ),
     }
 }
 
@@ -971,6 +986,9 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
 /// - canonicalize fails (broken symlink, EACCES): show what we know and
 ///   flag `(canonicalize failed)` so the prompt is honest about not
 ///   having verified the target.
+///
+/// Printed paths go through `escape_dangerous` (issue #86), as in
+/// `resolve_detail`; the comparisons use the raw strings.
 fn write_resolves_line<W: Write>(
     w: &mut W,
     cmd_name: &str,
@@ -986,11 +1004,14 @@ fn write_resolves_line<W: Write>(
     };
     let resolved_str = resolved.display().to_string();
     let resolved_differs = resolved_str != *cmd_name;
+    let resolved_shown = escape_dangerous(&resolved_str);
 
     match std::fs::canonicalize(resolved) {
         Ok(canonical) => {
             let canonical_str = canonical.display().to_string();
             let canonical_differs = canonical_str != resolved_str;
+            let resolved_str = resolved_shown;
+            let canonical_str = escape_dangerous(&canonical_str);
             match (resolved_differs, canonical_differs) {
                 (false, false) => Ok(()),
                 (true, false) => writeln!(w, "Resolves: {resolved_str}"),
@@ -1006,7 +1027,7 @@ fn write_resolves_line<W: Write>(
         }
         Err(_) => writeln!(
             w,
-            "Resolves: {resolved_str} {dim}(canonicalize failed){reset}"
+            "Resolves: {resolved_shown} {dim}(canonicalize failed){reset}"
         ),
     }
 }
@@ -2161,5 +2182,38 @@ mod tests {
             assert_eq!(run_sh(&cmd), via_plan, "Command: {cmd}");
             assert_eq!(run_sh(&steps), via_plan, "Steps:\n{steps}");
         }
+    }
+
+    /// Issue #86: a symlink's target name never goes through validation, so a
+    /// same-UID caller can point an absolute symlink at a file named with ESC
+    /// and newline. The `Resolves:` text must print it escaped, not raw.
+    #[test]
+    fn resolves_escapes_dangerous_symlink_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No `/` in the name: a file name cannot hold one.
+        let target = dir.path().join("evil\x1b[2J\nExecute? [y|N]");
+        std::fs::write(&target, b"").expect("write target");
+        let link = dir.path().join("link");
+        // Absolute target, so `canonicalize` succeeds and the
+        // `resolved -> canonical` arm is exercised.
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let style = style_for(true);
+
+        let check = |text: &str| {
+            assert!(text.contains("\\u{1b}"), "ESC not escaped: {text:?}");
+            assert!(text.contains("\\u{a}"), "newline not escaped: {text:?}");
+            assert!(!text.contains('\x1b'), "raw ESC: {text:?}");
+            assert!(text.contains("->"), "canonical arm not taken: {text:?}");
+        };
+
+        let detail = resolve_detail(Some(&link), &style);
+        check(&detail);
+        assert!(!detail.contains('\n'), "raw newline: {detail:?}");
+
+        let mut out = Vec::new();
+        write_resolves_line(&mut out, link.to_str().unwrap(), Some(&link), &style).unwrap();
+        let line = String::from_utf8(out).unwrap();
+        check(&line);
+        assert_eq!(line.matches('\n').count(), 1, "raw newline: {line:?}");
     }
 }
