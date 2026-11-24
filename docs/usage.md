@@ -281,8 +281,9 @@ declared one), `host`, `privileged`,
 `command` (only for requests that passed validation), `detail` (the error sent
 to the client), `status` and `exit_codes` (for requests that ran). Request
 `env` values, `reason`, and the raw bytes of an invalid request are never
-recorded. Request-derived strings are clipped to 256 characters, and control,
-bidi and zero-width characters are written as `\u{…}` escapes (as on stderr), so
+recorded. Request-derived strings are clipped to 256 characters, and tab,
+newline and every character the prompt forbids (control, format, separator and
+default-ignorable) are written as `\u{…}` escapes (as on stderr), so
 the file is safe to `cat` or `tail -f` in a terminal.
 
 The file belongs to the daemon's UID, which is also the requester's UID, so a

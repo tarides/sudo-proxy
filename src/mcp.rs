@@ -47,6 +47,18 @@ fn read_timeout_for(privileged: bool, timeout_ms: Option<u64>) -> Option<Duratio
     }
 }
 
+/// Strip every forbidden prompt character (`protocol::is_dangerous_char`:
+/// controls, format, separators, default-ignorables such as emoji variation
+/// selectors) from the MCP `description` before it becomes `reason`. The daemon
+/// rejects any request whose `reason` holds one, so without this an agent's
+/// `"Restart nginx ⚠️"` (U+FE0F) would fail validation. The daemon gate itself
+/// stays strict; this only keeps the common MCP path working.
+fn sanitize_description(desc: &str) -> String {
+    desc.chars()
+        .filter(|c| !protocol::is_dangerous_char(*c))
+        .collect()
+}
+
 /// Build the outgoing `Request` from the tool parameters. Exactly one command
 /// form is accepted: a structured `plan`, or the legacy `pipeline` / `argv`.
 /// The daemon re-validates; this is only the client-side assembly.
@@ -60,7 +72,7 @@ fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String
 
     let session = "sudo-proxy-mcp".to_string();
     let env = params.env.clone().unwrap_or_default();
-    let reason = params.description.clone().unwrap_or_default();
+    let reason = sanitize_description(params.description.as_deref().unwrap_or_default());
 
     let mut req = if let Some(plan_json) = &params.plan {
         let plan: protocol::Plan = serde_json::from_value(plan_json.clone())
@@ -290,7 +302,7 @@ impl McpProxy {
     }
 
     #[tool(
-        description = "Execute a command (or multi-stage pipeline) on a sudo-proxy host after a human approves it at that host's terminal. Provide `argv` for a single command or `pipeline` for piped stages (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]); `host` targets a remote daemon started via start_server (omit for localhost). Unprivileged commands on the local machine are refused — use your Bash tool, which applies the same controls. `timeout` is in milliseconds (max 600000); it defaults to 120000 for privileged commands but is opt-in for unprivileged ones (omitted = wait as long as the daemon needs, so an approved-but-slow command is not falsely timed out). Blocks until the human answers, then returns the final stage's stdout plus per-stage stderr and exit codes. Errors: 'Request denied by user.' if the human declines, a timeout error if unanswered within 60s, and 'sudo-proxy is not running' if the daemon is down — call start_server first."
+        description = "Execute a command (or multi-stage pipeline) on a sudo-proxy host after a human approves it at that host's terminal. Provide `argv` for a single command or `pipeline` for piped stages (e.g. [[\"ls\", \"/tmp\"], [\"wc\", \"-l\"]]); `host` targets a remote daemon started via start_server (omit for localhost). Unprivileged commands on the local machine are refused — use your Bash tool, which applies the same controls. `timeout` is in milliseconds (max 600000); it defaults to 120000 for privileged commands but is opt-in for unprivileged ones (omitted = wait as long as the daemon needs, so an approved-but-slow command is not falsely timed out). Invisible/format characters (e.g. emoji variation selectors, zero-width or bidi controls) are removed from `description` before it is shown to the approver. Blocks until the human answers, then returns the final stage's stdout plus per-stage stderr and exit codes. Errors: 'Request denied by user.' if the human declines, a timeout error if unanswered within 60s, and 'sudo-proxy is not running' if the daemon is down — call start_server first."
     )]
     async fn execute(
         &self,
@@ -1256,6 +1268,28 @@ fn touch_host(host: &str, version: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #86: the MCP `description` loses every forbidden prompt character
+    /// before it becomes `reason`, so the daemon's widened gate never rejects
+    /// an agent's emoji-presentation or zero-width text; printable non-ASCII
+    /// is kept.
+    #[test]
+    fn description_is_sanitised_of_forbidden_chars() {
+        assert_eq!(
+            sanitize_description("Restart nginx \u{26a0}\u{fe0f}"),
+            "Restart nginx \u{26a0}"
+        );
+        assert_eq!(sanitize_description("a\u{200b}b\u{2065}c"), "abc");
+        let benign = "café 漢字 → 🙂";
+        assert_eq!(sanitize_description(benign), benign);
+        for s in [
+            "x\u{1b}[2J\ny",
+            "\u{feff}bom\u{ad}\u{2028}\u{e0041}\u{85}",
+            "Restart nginx \u{26a0}\u{fe0f}",
+        ] {
+            assert!(!protocol::has_dangerous_chars(&sanitize_description(s)));
+        }
+    }
 
     /// The routing contract behind C9 and the Bash-delegation refusal: a
     /// loopback/self alias resolves to the local target (`None`), a genuine

@@ -11,9 +11,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::audit::{AuditConfig, AuditLog, Event, Outcome, Reject};
-use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env};
+use crate::executor::{exec_direct, exec_pkexec, exec_sudo, sanitize_env, LeafPrivilege, LeafView};
 use crate::mode::Mode;
-use crate::protocol::{Request, Response, ValidatedRequest};
+use crate::protocol::{is_dangerous_char, Request, Response, ValidatedRequest};
 use crate::tui::{self, Prompter, ResultSink};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -638,23 +638,40 @@ fn log_plan_json(line: &[u8]) {
     }
 }
 
-/// Make untrusted text safe to print on the approval terminal: C0 controls
-/// (except newline and tab), DEL, C1 controls, and the zero-width / bidi
-/// characters `has_dangerous_chars` forbids are written as `\u{…}` escapes.
+/// Make untrusted text safe to print on the approval terminal: every
+/// character `protocol::is_dangerous_char` forbids (control, format,
+/// separator, default-ignorable; tab is not one) except newline is written as
+/// a `\u{…}` escape.
 fn escape_for_terminal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         let u = c as u32;
-        let unsafe_char = (u < 0x20 && c != '\n' && c != '\t')
-            || (0x7F..=0x9F).contains(&u)
-            || matches!(u, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069);
-        if unsafe_char {
+        if c != '\n' && is_dangerous_char(c) {
             out.push_str(&format!("\\u{{{u:x}}}"));
         } else {
             out.push(c);
         }
     }
     out
+}
+
+/// `--pkexec` delegates approval to pkexec's dialog only when that dialog
+/// shows one escalated argv with no redirection: privileged as a whole, one
+/// leaf, no redirects. Everything else takes the TUI prompt and sudo.
+///
+/// `req_privileged` is the request's raw `privileged` flag, not
+/// `effective_privileged()`: a plan escalating only through `run-as` may carry
+/// unescalated leaves that pkexec never shows, so it must not delegate.
+fn delegate_to_pkexec(
+    pkexec_only: bool,
+    mode: Mode,
+    req_privileged: bool,
+    views: &[LeafView],
+) -> bool {
+    pkexec_only
+        && mode == Mode::Local
+        && req_privileged
+        && matches!(views, [v] if v.redirects.is_empty() && v.privilege != LeafPrivilege::Direct)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -929,13 +946,15 @@ fn handle_connection(
         );
     }
 
-    // --pkexec hands approval to pkexec's own dialog, which shows only one
-    // escalated leaf's argv. That is sound only for a request that is
-    // privileged as a whole (every leaf escalates, so every leaf raises a
-    // dialog). A request that is privileged only through `run-as` nodes may
-    // carry unescalated leaves that pkexec never sees, so it takes the TUI
-    // prompt (and sudo) like any other privileged plan.
-    let use_pkexec = pkexec_only && mode == Mode::Local && req.privileged;
+    // --pkexec hands approval to pkexec's own dialog, which shows a single
+    // escalated argv (as `env -C DIR -- BIN args`) and no redirection. So it
+    // delegates only a request that is `privileged: true`, compiles to exactly
+    // one leaf, and has no redirection on it (the daemon opens redirected
+    // files itself; the dialog never names them). Everything else — a
+    // multi-step plan, a redirected step, or a plan privileged only through
+    // `run-as` — takes the TUI prompt and runs through sudo. The predicate
+    // reads the same `views` the prompt renders.
+    let use_pkexec = delegate_to_pkexec(pkexec_only, mode, req.privileged, &views);
 
     let (resp, outcome) = if effective_privileged {
         if use_pkexec {
@@ -1120,6 +1139,50 @@ mod tests {
     use super::*;
     use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
+
+    fn leaf_view(privilege: LeafPrivilege, redirects: &str) -> LeafView {
+        LeafView {
+            stage_id: 0,
+            argv: vec!["id".into()],
+            privilege,
+            resolved_bin: None,
+            opaque: false,
+            opaque_reason: None,
+            programs: vec![],
+            redirects: redirects.into(),
+            in_pipe: false,
+        }
+    }
+
+    #[test]
+    fn delegate_to_pkexec_only_for_a_single_plain_leaf() {
+        let root = || leaf_view(LeafPrivilege::Root, "");
+        let nobody = || leaf_view(LeafPrivilege::User("nobody".into()), "");
+        let d = |views: &[LeafView]| delegate_to_pkexec(true, Mode::Local, true, views);
+
+        // The only shape that delegates: one escalated leaf, no redirection.
+        assert!(d(&[root()]));
+        assert!(d(&[nobody()]));
+
+        // More or fewer than one leaf.
+        assert!(!d(&[root(), root()]));
+        assert!(!d(&[root(), nobody()]));
+        assert!(!d(&[]));
+
+        // A redirected single leaf: the dialog would not show the file.
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "> /tmp/x")]));
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "< /etc/hosts")]));
+        assert!(!d(&[leaf_view(LeafPrivilege::Root, "2>&1")]));
+
+        // Defensive: an unescalated leaf never delegates.
+        assert!(!d(&[leaf_view(LeafPrivilege::Direct, "")]));
+
+        // The other conjuncts.
+        assert!(!delegate_to_pkexec(false, Mode::Local, true, &[root()]));
+        assert!(!delegate_to_pkexec(true, Mode::Remote, true, &[root()]));
+        // privileged: false (e.g. a run-as-only plan) never delegates.
+        assert!(!delegate_to_pkexec(true, Mode::Local, false, &[nobody()]));
+    }
 
     /// `--log-json` prints request bytes before validation, on the approval
     /// terminal: escape, C1, DEL and bidi characters must come out inert.
@@ -1555,16 +1618,55 @@ mod tests {
     }
 
     /// Build a string of length `0..=max_len` from a benign `char` alphabet —
-    /// every one of these passes `has_dangerous_chars`.
+    /// every one of these passes `has_dangerous_chars`. It includes printable
+    /// non-ASCII (issue #86), so the accept direction covers multibyte text.
+    /// Used for argv, reason, host, session, version, id, requester and env
+    /// *values*; env keys come from `rand_env_key`.
     fn rand_chars(rng: &mut Rng, max_len: usize) -> String {
-        const BENIGN: &[char] = &['a', 'b', 'c', '0', '1', ' ', '/', '-', '.', '_', '=', ':', ','];
+        const BENIGN: &[char] = &[
+            'a', 'b', 'c', '0', '1', ' ', '/', '-', '.', '_', '=', ':', ',', 'é', '漢', '→',
+        ];
         let len = rng.below(max_len + 1);
         (0..len).map(|_| BENIGN[rng.below(BENIGN.len())]).collect()
     }
 
-    // The exact danger classes `has_dangerous_chars` forbids: control chars
-    // (NUL, ESC, newline, CR) and zero-width / bidi overrides.
-    const DANGEROUS: &[char] = &['\u{0}', '\u{1b}', '\n', '\r', '\u{200b}', '\u{202e}', '\u{2066}'];
+    /// A valid env key (`[a-z_][a-z0-9_]{0,4}`), so `is_valid_env_name` never
+    /// rejects the request before the property under test is reached.
+    fn rand_env_key(rng: &mut Rng) -> String {
+        const FIRST: &[char] = &['a', 'b', 'c', '_'];
+        const REST: &[char] = &['a', 'b', 'c', '0', '1', '_'];
+        let mut key = String::from(FIRST[rng.below(FIRST.len())]);
+        for _ in 0..rng.below(5) {
+            key.push(REST[rng.below(REST.len())]);
+        }
+        key
+    }
+
+    // A sample of every danger class `has_dangerous_chars` forbids: C0
+    // controls (NUL, ESC, newline, CR), DEL and C1 (NEL, CSI), format
+    // characters (soft hyphen, ALM, zero-width, bidi override/isolate, word
+    // joiner, BOM, tag), line/paragraph separators, and reserved
+    // default-ignorable U+2065 (issue #86).
+    const DANGEROUS: &[char] = &[
+        '\u{0}',
+        '\u{1b}',
+        '\n',
+        '\r',
+        '\u{200b}',
+        '\u{202e}',
+        '\u{2066}',
+        '\u{7f}',
+        '\u{85}',
+        '\u{9b}',
+        '\u{ad}',
+        '\u{61c}',
+        '\u{2028}',
+        '\u{2029}',
+        '\u{2060}',
+        '\u{2065}',
+        '\u{feff}',
+        '\u{e0041}',
+    ];
 
     /// Generate a request whose fields are all benign, then with probability
     /// 1/2 splice one dangerous char into one randomly-chosen displayed field.
@@ -1583,7 +1685,7 @@ mod tests {
         let mut env = std::collections::HashMap::new();
         // Always at least one entry so the env branch is reachable.
         for _ in 0..(1 + rng.below(2)) {
-            env.insert(rand_chars(rng, 5), rand_chars(rng, 5));
+            env.insert(rand_env_key(rng), rand_chars(rng, 5));
         }
         let mut req = Request {
             id: rand_chars(rng, 6),
@@ -1642,5 +1744,12 @@ mod tests {
         // Both directions exercised: the implication is not vacuous.
         assert!(accepted > 0, "generator never produced an accepted request");
         assert!(rejected > 0, "generator never produced a rejected request");
+        // About half the requests are clean by construction; demand a solid
+        // share so the accept direction (multibyte text included) is not
+        // vacuous.
+        assert!(
+            accepted >= 2000,
+            "too few accepted requests: {accepted} of 5000"
+        );
     }
 }

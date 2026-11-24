@@ -24,6 +24,82 @@ stages are now rejected. Tests: unit tables and two properties in
 `tests/pty_no_shell.rs`, a `wrappers` pty golden, corpus cases 06/22 stay
 transparent. Assurance case G4.7.
 
+## Unreleased — Bound every approval-prompt line, not only Command: (#85)
+
+**The gap.** Only the `Command:` line was length-bounded (G4.3 / F3). The
+`Steps:` block capped its number of lines but wrote each line whole, so a
+privileged `exec ["echo", <900 KB>]` printed the whole argument on `Steps:`
+line 0 and pushed the `[y/N]` question off-screen. The `Resolves:` block and
+line (a long absolute `argv[0]`, and up to 256 entries) and the metadata lines
+(`From:`, `Requester:`, `Client:`, `Time:`, `ID:`, `Reason:`, `Env:`, the
+session name of the `a` line) had no length bound either. **The fix**
+(`src/tui.rs`, display only): each `Steps:` line is clipped to 160 visible
+chars (`clip_styled`, which skips the daemon's own colour escapes and resets
+the colour before the marker), each `Resolves:` name and path to 160, each
+metadata field to 256, the `Env:` line to 1024, and the `Resolves:` block to 32
+entries, each with an explicit `… [N more chars hidden]` marker. The full texts
+the bash-oracle properties check (`steps_shell_text`, `command_summary`) are
+unchanged. **Tests:** unit tests for each clip, the property
+`prop_prompt_lines_are_bounded_and_prefix_faithful` (every line bounded, line
+count bounded, each `Steps:` line a prefix of its unclipped text), the pty test
+`huge_argument_prompt_is_bounded`, and a `long-argument` golden; the existing
+goldens are byte-identical.
+
+## Unreleased — `--pkexec` delegates only single-step privileged requests to pkexec (#88)
+
+Under `--pkexec`, every `privileged: true` request went to pkexec, one dialog
+per escalated step. A dialog shows a single argv (named `/usr/bin/env`, since
+steps run as `pkexec env -C DIR -- argv`) and never the files the daemon opens
+for a redirection, so no dialog showed the whole plan, and with `pkexec-cache`
+the later steps ran with no dialog at all. Now only a `privileged: true`
+request that compiles to one step with no redirection is delegated to pkexec
+(`delegate_to_pkexec` in `src/server.rs`, reading the same views the prompt
+renders). Every other privileged request (multi-step, redirected, or escalating
+only through `run-as`) gets the TUI prompt and runs through sudo; a `--pkexec`
+user without sudo rights now gets a sudo failure after approving such a plan,
+as `run-as` plans already did, and these requests are audited as
+`approved`/`denied`/`timeout` instead of `pkexec`. Unchanged: the dialog still
+names `/usr/bin/env` and omits env and accepted exit codes (backlog items
+"pkexec dialog names `/usr/bin/env`" and "Does a single-leaf plan's `setenv`
+reach the program under `--pkexec`?"). Tests: a unit table for the predicate, `tests/plan_exec.rs`
+`pkexec_mode_prompts_for_multi_leaf_privileged_plans` (run/seq/alt/pipe,
+redirect, with-stdin-from; one `denied` audit record each, none `pkexec`), and
+the pty test `pkexec_flag_multi_step_plan_gets_the_tui_prompt` through the real
+CLI with `DISPLAY` set. G5.4 / Sn5.4 and threat-model leaf 4.5 added.
+
+## Unreleased — Widen the prompt's forbidden-character class (#86)
+
+`has_dangerous_chars` rejected C0 controls and three zero-width/bidi ranges
+only. DEL and C1 (NEL, CSI, OSC), soft hyphen, ALM, line/paragraph
+separators, word joiner and invisible operators, BOM, tag characters and
+variation selectors all reached the approval prompt. The class is now one
+rule, `c ≠ TAB ∧ c ∈ Cc ∪ Cf ∪ Zl ∪ Zp ∪ Default_Ignorable_Code_Point`,
+held as a table built from the Unicode 16.0.0 UCD
+(`protocol::DANGEROUS_RANGES`) and reused by the audit-record and
+`--log-json` escapers.
+
+- **Resolves paths.** Paths shown on `Resolves:` (tui and zenity) are printed
+  through `escape_dangerous`: a symlink's target name never goes through
+  validation, so a same-UID caller could put ESC or a newline on the prompt
+  that way.
+- **Env-key message.** The "env key contains forbidden characters" error no
+  longer echoes the key. For consistency only: the key reached only the
+  response, and the audit copy was already escaped.
+- **MCP.** `sudo-proxy-mcp` strips the class from `description` before it
+  becomes `reason`, so an emoji with U+FE0F no longer fails the request. The
+  daemon gate stays strict.
+- **Newly rejected input.** Soft hyphens, emoji presentation sequences with
+  U+FE0F in `reason` from non-MCP clients, Arabic/Syriac text using U+061C,
+  U+0600–0605 or U+070F, a leading BOM, and tag characters now get the
+  existing validation error; drop the character.
+- **Tests.** An exhaustive unit test checks the table over every `char`
+  against a General_Category oracle (`unicode-general-category`, a pinned
+  dev-dependency) plus a verbatim copy of the DICP list; a regression table;
+  integration tests over argv/reason/session/env value/plan leaves; a
+  non-ASCII accept test; an audit escape test; a `Resolves:` symlink test;
+  the property test with valid env keys and multibyte text; and the Kani
+  harnesses over the whole `char` domain.
+
 ## Unreleased — Audit log for every request outcome (#65)
 
 The daemon logged prompted requests and unattended runs, and only with `-v`. It

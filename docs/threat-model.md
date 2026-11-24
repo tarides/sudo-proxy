@@ -70,8 +70,8 @@ invariant at a given boundary are omitted.
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
-| Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control/zero-width/bidi on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks. | G4.1, G4.2 / F1 |
-| Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Displayed command length bounded with a hidden-bytes marker. | G4.3 / F3 |
+| Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks; filesystem-derived `Resolves:` paths escaped (#86). | G4.1, G4.2 / F1 |
+| Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Every prompt line and block length-bounded (`Command:`, `Steps:`, `Resolves:`, metadata) with a hidden-chars marker. | G4.3 / F3 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
 | Spoofing | A same-UID process **types the answer itself**: synthetic keystrokes into the approval terminal (`tmux send-keys`, `screen -X stuff`, kitty/wezterm remote control, Konsole D-Bus, X11 XTEST, `TIOCSTI`). The typical requester (an agent) has a same-UID shell, so A1 reaches this as A2. | The daemon refuses to start in a terminal that accepts such input (`ttyguard`: multiplexer `TERM`/`$TMUX`/`$STY`/`$ZELLIJ`, remote-control emulators, VS Code, Emacs, X11 without Wayland) unless started with `--allow-injectable-tty`, which puts a warning line in every prompt. There is deliberately no `hosts.json` equivalent, since an agent can write that file and restart the daemon through MCP. Unprivileged children run in their own session, with no controlling terminal, so they cannot `TIOCSTI` into the prompt. Legacy `TIOCSTI` is reported at startup. `sudo-proxy-mcp` scrubs the launcher's terminal variables from the window it spawns. | A1 (assumption, now checked) / GHSA-cpmp-67wf-gwmx |
@@ -137,7 +137,7 @@ A  A root command runs that the human did NOT approve
 │   ├─ 3.2 Symlink redirection of argv[0] (/usr/local/bin/foo -> /tmp/evil)
 │   │        [resolved path + "-> target" shown → G4.2 · blocked]
 │   ├─ 3.3 Push the real command / [y/N] off-screen with a huge arg
-│   │        [length bound + hidden-bytes marker → G4.3 / F3 · blocked]
+│   │        [every prompt line and block length-bounded (`Command:`, `Steps:`, `Resolves:`, metadata) → G4.3 / F3 · blocked]
 │   ├─ 3.4 Printable-range Unicode look-alike / NBSP in reason
 │   │        [cannot hide the real command → G4.4 · residual (accepted)]
 │   ├─ 3.5 Answer the prompt without the human: inject `y` into the TTY
@@ -155,9 +155,13 @@ A  A root command runs that the human did NOT approve
     │         · blocked (residual: first-contact MITM, assumption A4)]
     ├─ 4.3 Exhaust resources to make the gate fail open
     │        [caps + default-deny timeout → G5.2 / G6.4 · blocked]
-    └─ 4.4 Tamper hosts.json to weaken the gate
-             [enforced owner/mode check / F4; privileged gate independent → G5.3 · blocked
-              (residual: unprivileged auto-approve, by design)]
+    ├─ 4.4 Tamper hosts.json to weaken the gate
+    │        [enforced owner/mode check / F4; privileged gate independent → G5.3 · blocked
+    │         (residual: unprivileged auto-approve, by design)]
+    └─ 4.5 Use `--pkexec` delegation to run a multi-step plan behind single-step
+             dialogs (or none, under `pkexec-cache`)
+             [single-leaf delegation → G5.4 / #88 · blocked (residual: dialog names
+              `/usr/bin/env` and omits env / exit codes; `pkexec-cache` documented as unsafe)]
 ```
 
 ## Coverage and residuals
@@ -189,6 +193,10 @@ is unaccounted for. The residuals — already on record and accepted — are:
   or the multiplexer's socket.
 - **3.4 — look-alike `reason` (F1 residual).** Printable Unicode can mislead but
   cannot conceal the real command line, which is printed separately.
+  Combining overlays (U+0334–0338), RTL letters and whitespace look-alikes
+  (U+00A0, U+2000–200A, U+3000) remain accepted after #86: they are printable,
+  and `shquote` single-quotes any non-ASCII token, so they cannot sit next to an
+  operator.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no
   `StrictHostKeyChecking`; safety depends on the remote being in `known_hosts`
   first, or configuring `StrictHostKeyChecking=accept-new`.
@@ -198,6 +206,12 @@ is unaccounted for. The residuals — already on record and accepted — are:
   it. It is tamper-evident against other users, not against the requester. The
   syslog copy, held by the system logger, is the stronger record; ship it off
   the host for a record the requester cannot reach.
+- **4.5 — `--pkexec` delegation (#88, narrowed).** Only a `privileged: true`
+  request that is one step with no redirection is delegated to pkexec's dialog;
+  every other privileged plan gets the TUI prompt and sudo. The dialog still
+  names `/usr/bin/env`, shows the working directory only as `env -C`, and omits
+  plan `setenv`, request env and accepted exit codes; `pkexec-cache` (opt-in,
+  documented as unsafe) removes the dialog altogether.
 
 These residuals were the inputs to **Rung 4**, now discharged
 ([roadmap](formalisation-roadmap.md#the-rigor-ladder)): the policy-transition

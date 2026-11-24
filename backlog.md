@@ -80,15 +80,14 @@ shipped in PR #67 (see changelog).
    22); and the residuals — `awk`/`sed` `e`/`system()`, `git -c`, `make`,
    `opam exec`, `dune exec` and other open-ended runners, interpreters running
    a script file, env names only some programs interpret (`PYTHONSTARTUP`, …).
-6. **`--pkexec` with a multi-step `privileged: true` plan** (issue #88; also
-   Phase 0 of *"Display fidelity — Option A"* below). Each escalated
-   step raises its own pkexec dialog, which shows only that step (and, since
-   steps run as `pkexec env -C <dir> -- argv`, names `/usr/bin/env` as the
-   program). With the `pkexec-cache` polkit rule, steps after the first run with
-   no dialog at all. Options: reject multi-leaf plans in `--pkexec` mode, or
-   show the whole plan in the TUI and use pkexec only to authenticate. Plans
-   that escalate only via `run-as` already take the TUI prompt (PR #59 review
-   fix). Found in the PR #59 review.
+6. **pkexec dialog names `/usr/bin/env`** (left over from #88). Use
+   `pkexec --keep-cwd` when polkit ≥ 121 (probe once, like
+   `env_supports_chdir`), or skip `env -C` when the cwd is the target user's
+   home.
+7. **Does a single-leaf plan's `setenv` reach the program under `--pkexec`?**
+   pkexec resets the environment. If it does not, either pass it as `env K=V`
+   arguments (so the dialog shows it) or route `setenv` plans to the TUI and
+   sudo. Found in the #88 plan review.
 
 ## Cap far-future request timestamps, then re-climb the ladder to Rung 4
 
@@ -145,10 +144,12 @@ One PR per item; each moves its evidence status in `docs/assurance-case.md`;
 every prompt-touching PR gets the pty goldens plus a live manual run.
 
 **Phase 0 — close the current gaps** (independent; patch releases 1.2.x):
-#86 `has_dangerous_chars` gaps (DEL/C1, U+00AD, U+061C, U+2028/2029,
-U+2060–2064, U+FEFF; update the Kani harness and proptest with it) · #85 bound
+~~#86 `has_dangerous_chars` gaps~~ (done, see changelog) · #85 bound
 each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
 above) · #87 wrapper-aware `runs_shell` (item 5 above; done).
+
+Done: #88.
+Done: #85.
 
 **Phase 1 — state the invariant, make it literally true** (release 1.3.0):
 1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim

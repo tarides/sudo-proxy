@@ -79,7 +79,100 @@ fn dangerous_env_key_rejected() {
     req.env.insert("BAD\u{0001}KEY".into(), "v".into());
     let resp = s.send(&req);
     assert_eq!(resp.status, Status::Error);
-    assert!(resp.message.as_deref().unwrap().contains("env key"));
+    let msg = resp.message.as_deref().unwrap();
+    assert!(msg.contains("env key"));
+    // Issue #86: the message no longer echoes the raw (forbidden) key.
+    assert!(!msg.contains("BAD"), "raw key echoed: {msg:?}");
+    assert!(!msg.contains('\u{0001}'), "raw key echoed: {msg:?}");
+}
+
+/// Issue #86: the forbidden class is Cc ∪ Cf ∪ Zl ∪ Zp ∪ Default_Ignorable
+/// (minus TAB). Every newly covered character is rejected in every
+/// prompt-rendered field, on both the flat-pipeline and the structured-plan
+/// path.
+#[test]
+fn newly_forbidden_chars_rejected() {
+    use sudo_proxy::protocol::Plan;
+    let s = server();
+    let chars = [
+        '\u{9b}',
+        '\u{85}',
+        '\u{ad}',
+        '\u{61c}',
+        '\u{2028}',
+        '\u{2060}',
+        '\u{2065}',
+        '\u{feff}',
+        '\u{e0041}',
+    ];
+    let fields = [
+        "argv",
+        "reason",
+        "session",
+        "env value",
+        "plan exec",
+        "plan chdir",
+    ];
+    for c in chars {
+        let bad = format!("a{c}b");
+        for field in fields {
+            let id = format!("v-new-{:x}-{}", c as u32, field.replace(' ', "-"));
+            let mut req = make_req(&id, vec![vec!["true"]]);
+            match field {
+                "argv" => req.pipeline = vec![vec!["echo".into(), bad.clone()]],
+                "reason" => req.reason = bad.clone(),
+                "session" => req.session = bad.clone(),
+                "env value" => {
+                    req.env.insert("OK".into(), bad.clone());
+                }
+                "plan exec" => {
+                    req.pipeline = vec![];
+                    req.plan = Some(Plan::Exec {
+                        argv: vec!["echo".into(), bad.clone()],
+                    });
+                }
+                "plan chdir" => {
+                    req.pipeline = vec![];
+                    req.plan = Some(Plan::Chdir {
+                        dir: bad.clone(),
+                        body: Box::new(Plan::Exec {
+                            argv: vec!["true".into()],
+                        }),
+                    });
+                }
+                _ => unreachable!(),
+            }
+            let resp = s.send(&req);
+            assert_eq!(
+                resp.status,
+                Status::Error,
+                "U+{:04X} in {field} must be rejected",
+                c as u32
+            );
+            let msg = resp.message.as_deref().unwrap_or("");
+            assert!(
+                msg.contains("forbidden"),
+                "U+{:04X} in {field}: got {msg:?}",
+                c as u32
+            );
+        }
+    }
+    assert_eq!(
+        s.prompter.call_count(),
+        0,
+        "no rejected request may reach the prompt"
+    );
+}
+
+/// Issue #86: the widened class must not reject legitimate printable
+/// non-ASCII text.
+#[test]
+fn legitimate_non_ascii_accepted() {
+    let s = server();
+    let req = make_req("v-non-ascii", vec![vec!["echo", "café 漢字 — →"]]);
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Ok, "got: {:?}", resp.message);
+    assert_eq!(s.prompter.call_count(), 1);
 }
 
 #[test]

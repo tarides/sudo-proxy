@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use crate::executor::{plan_display, which};
-use crate::protocol::ValidatedRequest;
+use crate::protocol::{escape_dangerous, ValidatedRequest};
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -73,7 +73,13 @@ fn format_prompt_text(req: &ValidatedRequest) -> String {
             None => "(not found in PATH)".to_string(),
         };
         if shown != *cmd_name && seen.insert((cmd_name.clone(), shown.clone())) {
-            lines.push(format!("Resolves: {cmd_name} → {shown}"));
+            // Escaped for display only (issue #86): `shown` is built from the
+            // validated argv[0]/cwd and the constant login PATH, so this is
+            // defence in depth; the comparison above uses the raw string.
+            lines.push(format!(
+                "Resolves: {cmd_name} → {}",
+                escape_dangerous(&shown)
+            ));
         }
     }
     lines.push(String::new());

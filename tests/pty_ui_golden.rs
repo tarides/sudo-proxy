@@ -35,6 +35,7 @@ const CASES: &[(&str, bool)] = &[
     ("escalation-b-boundary", false),
     ("escalation-c-ambient-plus-boundary", true),
     ("escalation-d-named-user", false),
+    ("long-argument", true),
     ("wrappers", true),
 ];
 
@@ -200,6 +201,68 @@ fn ui_prompts_color() {
     assert!(!dd.contains(ROOT_BOUNDARY), "d: named user shown as root");
 
     check_goldens(&blocks, "color");
+}
+
+/// `s` as the terminal shows it: CSI escapes and the bell removed.
+fn strip_escapes(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            for f in chars.by_ref() {
+                if ('\x40'..='\x7e').contains(&f) {
+                    break;
+                }
+            }
+        } else if c != '\x07' {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// G4.3 / #85: a privileged request with a 900 KB argument (under the 1 MiB
+/// request cap; sent over the socket, so no kernel per-argument limit) cannot
+/// flood the prompt through any line: `Command:`, `Steps:` and `Resolves:` are
+/// all bounded, and the question is the last line.
+#[test]
+fn huge_argument_prompt_is_bounded() {
+    // `MAX_DISPLAY_CMD_CHARS` (1024) + the `truncate_for_display` marker
+    // (≤ 64) + label and agent tag (≤ 64), see `src/tui.rs`. Every plan-block
+    // line has a smaller bound.
+    const META_BOUND: usize = 1024 + 64 + 64;
+
+    let mut d = PtyDaemon::spawn(PtyOpts { color: true, ..Default::default() });
+    let mut r = common::make_req("ui-huge-argument", vec![]);
+    r.plan = Some(Plan::Exec { argv: vec!["echo".into(), "A".repeat(900_000)] });
+    r.privileged = true;
+    let h = d.request_async(&r);
+    let head = d.expect("Privilege Request");
+    let start = head.rfind('\n').unwrap_or(0);
+    let mut block = head[start..].to_string();
+    block += &d.expect("default=N) ");
+
+    assert!(block.len() < 16 * 1024, "prompt block of {} bytes", block.len());
+    let shown = strip_escapes(&block);
+    for line in shown.lines() {
+        assert!(line.chars().count() <= META_BOUND, "line of {} chars", line.chars().count());
+    }
+    assert!(shown.contains("\nCommand: "), "{shown}");
+    assert!(shown.contains("\nSteps:\n"), "{shown}");
+    let steps0 = shown.lines().skip_while(|l| *l != "Steps:").nth(1).expect("Steps line 0");
+    assert!(steps0.starts_with("0  sudo echo AAAA") && steps0.contains("more chars hidden"), "{steps0}");
+    let last = shown.lines().last().expect("a line").trim_end();
+    assert!(
+        last.starts_with("Execute as root? [y/N] (") && last.ends_with("s timeout, default=N)"),
+        "question is not the last line: {last:?}"
+    );
+
+    d.answer_raw(b'n');
+    d.expect("→ Denied");
+    let resp = h.join().unwrap();
+    assert_eq!(resp.status, Status::Denied, "{resp:?}");
+    assert!(d.shim_log().is_empty(), "a denied plan reached sudo: {:?}", d.shim_log());
 }
 
 #[test]

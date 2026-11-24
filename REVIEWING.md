@@ -62,8 +62,8 @@ finding.
   authentication is owned entirely by `sudo`/`pkexec`. *Attack:* find any path
   where sudo-proxy holds, caches, or replays a credential. → `src/executor.rs`.
 - **C6 — Display fields can't lie.** Fields shown at the prompt are rejected if
-  they contain control (0x00–0x1F bar tab), zero-width (U+200B–U+200F), or bidi
-  override (U+202A–U+202E, U+2066–U+2069) characters, so shown text cannot be
+  they contain control, format, separator or default-ignorable characters
+  (Cc/Cf/Zl/Zp/DICP bar tab; `protocol::DANGEROUS_RANGES`), so shown text cannot be
   made to diverge from real `argv` via those classes. *Attack:* get a
   divergence-causing character past the scanner to the prompt. →
   `src/protocol.rs` (`ValidatedRequest::validate`, `:172`), `has_dangerous_chars`.

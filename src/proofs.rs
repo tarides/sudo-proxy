@@ -11,8 +11,9 @@
 //! that are *our* code:
 //!   - `datetime::ymd_hms_to_epoch` — the panic/overflow/wrap-relevant core of
 //!     the `parse_age` freshness gate (issues #11/#14).
-//!   - `protocol::has_dangerous_chars` — the control/bidi scanner the approval
-//!     prompt relies on.
+//!   - `protocol::has_dangerous_chars` / `is_dangerous_char` — the scanner for
+//!     the control, format, separator and default-ignorable characters
+//!     (Cc/Cf/Zl/Zp/DICP) the approval prompt relies on (widened in #86).
 //! It deliberately does *not* attempt the base64 and `serde_json` decode paths:
 //! those are upstream crates that return `Result`, and our call sites contain no
 //! `.unwrap()` on them (`if let Ok`/`?` throughout — server.rs, tui.rs, mcp.rs,
@@ -105,39 +106,72 @@ fn ymd_hms_to_epoch_is_monotone_on_valid_dates() {
     }
 }
 
-/// Proof: `has_dangerous_chars` is panic-free for any character and classifies
-/// it *exactly* per its documented danger ranges. The function is a per-char
-/// fold with no cross-character state, so single-char coverage of the
-/// classification generalises to any string. This is the Rung 3 discharge of
-/// the display-field clause behind `ValidatedRequest::validate`.
+/// Proof: `has_dangerous_chars` is panic-free for any character, agrees with
+/// the per-char class `is_dangerous_char` through UTF-8 encode/decode, and
+/// that class contains every code point issue #86 names and excludes TAB and
+/// printable ASCII. The function is a per-char fold with no cross-character
+/// state, so single-char coverage generalises to any string. This is the
+/// Rung 3 discharge of the display-field clause behind
+/// `ValidatedRequest::validate`.
 ///
-/// Two tractability choices keep CBMC fast without weakening the result:
-///   - `encode_utf8` writes into a stack `[u8; 4]` rather than allocating a
-///     `String`, so CBMC need not model the heap.
-///   - The codepoint is bounded below `0x2100`. Every range the function
-///     forbids lies at or below `0x2069`, and for any codepoint `>= 0x2100`
-///     *both* the function (no matching arm) and `expected` are `false` by
-///     inspection — so the bound excludes only a region where the equality
-///     holds trivially. The proof is therefore total in substance.
+/// The spec has three parts, none of them tautological:
+///   (a) no panic, and `has_dangerous_chars(encode(c)) == is_dangerous_char(c)`
+///       for every `char` (the string fold agrees with the char class);
+///   (b) must-reject: an independently written `matches!` of the ranges the
+///       issue names, plus C0/C1/DEL and reserved U+2065, implies dangerous;
+///   (c) must-accept: TAB and `0x20..=0x7E` are not dangerous.
+/// Exact set membership (every code point in or out of
+/// Cc ∪ Cf ∪ Zl ∪ Zp ∪ DICP) is *not* proved here: it is discharged by the
+/// exhaustive unit test `protocol::tests::dangerous_class_matches_unicode_oracle`,
+/// which checks all 1,114,112 `char`s against a General_Category oracle.
 ///
-/// `#[kani::unwind(5)]` bounds the `for c in s.chars()` loop: the buffer holds
-/// a single (≤3-byte) char, so the loop runs once and the UTF-8 byte decode
-/// at most three times — 5 unwindings cover every path and let CBMC discharge
-/// the unwinding assertion.
+/// `encode_utf8` writes into a stack `[u8; 4]` rather than allocating a
+/// `String`, so CBMC need not model the heap. The domain is the whole `char`
+/// range (the earlier `< 0x2100` bound no longer holds: tag characters sit at
+/// U+E0000).
+///
+/// `#[kani::unwind(8)]`: the buffer holds one (≤4-byte) char, so the
+/// `chars()` loop runs once and the UTF-8 decode at most four times; the
+/// `is_dangerous_char` lookup is a `partition_point` binary search over the
+/// 27-entry `DANGEROUS_RANGES`, which iterates at most ⌈log2 27⌉ + 1 = 6
+/// times (a linear scan would need 28). 8 covers both with margin and lets
+/// CBMC discharge the unwinding assertion.
 #[kani::proof]
-#[kani::unwind(5)]
+#[kani::unwind(8)]
 fn has_dangerous_chars_matches_spec_per_char() {
     let c: char = kani::any();
-    kani::assume((c as u32) < 0x2100);
 
     let mut buf = [0u8; 4];
     let s: &str = c.encode_utf8(&mut buf);
     let got = crate::protocol::has_dangerous_chars(s);
+    let class = crate::protocol::is_dangerous_char(c);
+
+    // (a) the string fold agrees with the char class.
+    assert_eq!(got, class);
 
     let u = c as u32;
-    let expected = (c != '\t' && u < 0x20)
-        || matches!(u, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069);
-    assert_eq!(got, expected);
+    // (b) must-reject (written independently of `DANGEROUS_RANGES`).
+    let must_reject = (c != '\t' && u < 0x20)
+        || matches!(
+            u,
+            0x7F..=0x9F
+                | 0xAD
+                | 0x61C
+                | 0x200B..=0x200F
+                | 0x2028..=0x202E
+                | 0x2060..=0x2069
+                | 0xFE0F
+                | 0xFEFF
+                | 0xE0001
+                | 0xE0020..=0xE007F
+        );
+    if must_reject {
+        assert!(class, "a code point named by #86 must be dangerous");
+    }
+    // (c) must-accept.
+    if c == '\t' || (0x20..=0x7E).contains(&u) {
+        assert!(!class, "TAB and printable ASCII must be accepted");
+    }
 }
 
 /// Proof: the structured-plan leaf check is panic-free and agrees with the
@@ -150,15 +184,15 @@ fn has_dangerous_chars_matches_spec_per_char() {
 /// predicates.
 ///
 /// Scope mirrors `has_dangerous_chars_matches_spec_per_char`: one leaf, one
-/// character bounded below `0x2100` (every forbidden range lies ≤ `0x2069`), so
-/// the single-leaf result generalises — `validate_tree` is a fold applying that
-/// same per-char predicate to every string leaf. `unwind(6)` bounds the single
-/// ≤3-byte char decode plus the one-element argv loop.
+/// character over the whole `char` domain (no bound since #86: tag characters
+/// sit at U+E0000), so the single-leaf result generalises — `validate_tree` is
+/// a fold applying that same per-char predicate to every string leaf.
+/// `unwind(8)` bounds the single ≤4-byte char decode, the one-element argv
+/// loop and the ≤6-step binary search of `is_dangerous_char`.
 #[kani::proof]
-#[kani::unwind(6)]
+#[kani::unwind(8)]
 fn plan_run_leaf_matches_dangerous_char_spec() {
     let c: char = kani::any();
-    kani::assume((c as u32) < 0x2100);
 
     let mut buf = [0u8; 4];
     let s: &str = c.encode_utf8(&mut buf);

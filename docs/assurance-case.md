@@ -99,8 +99,8 @@ a sanitized environment.*
 | **Sn3.1** | `Command::new(argv[0]).args(…)`, never `sh -c` (`src/executor.rs`); the multi-stage `shell_escape` fuzzed with 5000 inputs, round-tripped through `/bin/sh` byte-for-byte. | 2 | [partial] → Flux boundary type (Rung 3) |
 | **G3.2** | The environment is a hard-reject allowlist; `LD_PRELOAD`/`LD_*`/`IFS`/`BASH_ENV`/`SSH_AUTH_SOCK` are rejected, not stripped. | — | |
 | **Sn3.2** | `src/executor.rs` env sanitization; login defaults from `getpwuid(geteuid())`, not the request. | 1–2 | [discharged] |
-| **G3.3** | Inputs carrying control / zero-width / bidi characters are rejected before use. | — | |
-| **Sn3.3** | `has_dangerous_chars()` over every `pipeline` arg and `env` key/value; `tests/validation.rs`. | 2 | [discharged] |
+| **G3.3** | Inputs carrying control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters are rejected before use. | — | |
+| **Sn3.3** | `has_dangerous_chars()` over every `pipeline` arg and `env` key/value; `tests/validation.rs` (widened in #86; class checked exhaustively against the UCD; Kani proves string/char agreement). | 2 | [discharged] |
 
 ### G4 — Faithful display at the gate
 
@@ -108,12 +108,12 @@ a sanitized environment.*
 
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
-| **G4.1** | No request field rendered to `/dev/tty` can inject ANSI / control / bidi sequences. | — | |
-| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id`, `requester` in `validate_request`, covering both MCP and direct-socket paths; regression test. | 2 | [discharged] |
+| **G4.1** | No request field rendered to `/dev/tty` can inject ANSI or control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters. | — | |
+| **Sn4.1** | After **F1** fix: `has_dangerous_chars()` is applied to `reason`, `session`, `host`, `version`, `id`, `requester` in `validate_request`, covering both MCP and direct-socket paths; regression test (widened in #86; class checked exhaustively against the UCD; Kani proves string/char agreement). | 2 | [discharged] |
 | **G4.2** | The resolved absolute path of argv[0] is shown, with `-> target` when it is a symlink, so redirection cannot be hidden. | — | |
 | **Sn4.2** | `src/tui.rs` path canonicalisation + explicit failure message. Programs run by a wrapper are listed too, with `(run by …)`: with their path for a stage running as the daemon user, `looked up at run time` for an escalated one, and no path for a multi-call applet, which the dispatcher runs built in (#87). | 1 | [discharged] |
 | **G4.3** | A large command cannot push the real command or the `[y/N]` line off-screen. | — | |
-| **Sn4.3** | After **F3** fix: displayed command length is bounded with an explicit hidden-bytes marker. | 1 | [discharged] |
+| **Sn4.3** | After **F3** fix and #85: every line written to the approval prompt is length-bounded (`Command:` 1024 chars; `Steps:` lines, `Resolves:` names and paths 160; metadata fields 256; `Env:` 1024), each with an explicit hidden-chars marker, and the `Steps:` and `Resolves:` blocks are capped at 32 entries. Evidence: `prop_prompt_lines_are_bounded_and_prefix_faithful`, `huge_argument_prompt_is_bounded` (pty), the `long-argument` golden. Residual: the bound limits the prompt's size to a constant but does not guarantee it fits a small terminal (worst case about 70 lines, plus wrapping at 80 columns); and characters are counted as chars, not terminal columns: wide CJK glyphs take two columns, and tabs (allowed by `has_dangerous_chars`) can each expand to up to 8 columns, so a 160-char `Steps:` line of tabs can render about 1 280 columns (16 rows at 80 columns) (#98). The clip is applied to the whole rendered text, so a long argument can push a chain operator, a group's `(` or `)`, or a redirection (`> path`, `2>&1`, `< path`) into the hidden tail of its `Steps:` line, and of `Command:` past 1024 chars; the marker shows that text is hidden, but not which (#97). | 2 | [discharged] |
 | **G4.4** | Residual: printable-range Unicode look-alikes / NBSP in `reason` (passive, cannot hide the real command). | — | |
 | **Sn4.4** | Documented residual in [security-audit.md](security-audit.md) (F1). | 0 | [accepted-risk] |
 | **G4.5** | The grouping shown at the gate is the grouping that runs: the `Steps:` block (what the operator reviews) and the `Command:` line (what they may paste) parse, as shell, to the same tree, and that tree means what the executor runs. | — | |
@@ -128,12 +128,14 @@ keypress binds to the command shown.*
 
 | Node | Claim / Evidence | Rung | Status |
 |------|------------------|------|--------|
-| **G5.1** | `privileged:true` always reaches the Y/N gate regardless of any policy. | — | |
+| **G5.1** | `privileged:true` always reaches the Y/N gate regardless of any policy. Exception: under the opt-in `--pkexec` flag, polkit's dialog replaces the Y/N gate for a single unredirected escalated step; see G5.4. | — | |
 | **Sn5.1** | TLC-checked: the `PolicyFlipsOnlyOnKeypress` invariant of [`proofs/tla/`](../proofs/tla/) proves the policy flag flips only via an interactive `a` keypress on an unprivileged request — never a request field, replay, MCP flag, or timeout — over all attacker forgeries/replays and operator choices. `src/server.rs`. | 4 | [discharged] (model-checked) |
 | **G5.2** | The prompt reads a single keypress in non-canonical mode and times out after 60 s (default **deny**). | — | |
 | **Sn5.2** | `src/tui.rs` prompt; timeout test. | 1 | [discharged] |
 | **G5.3** | No policy value relaxes the **privileged** gate: `privileged:true` requires a `y` keypress regardless of `unattended_eligible` or the session grant. | — | |
 | **Sn5.3** | TLC-checked: `PrivilegedGateIndependentOfPolicy` ([`proofs/tla/`](../proofs/tla/)) proves the privileged gate requires a `y` keypress for *any* eligibility/grant state. The *unprivileged* side (eligibility + session grant) is the second invariant **G7** below. | 4 | [discharged] (model-checked) |
+| **G5.4** | Under `--pkexec`, approval is delegated to polkit only for a request whose dialog shows one escalated argv with no redirection (`privileged: true`, one leaf, no redirection); every other privileged request reaches the TUI Y/N gate. | — | |
+| **Sn5.4** | `src/server.rs` `delegate_to_pkexec` (unit table `delegate_to_pkexec_only_for_a_single_plain_leaf`; it reads the same `plan_display` views the prompt renders); `tests/plan_exec.rs` `pkexec_mode_prompts_for_multi_leaf_privileged_plans`, `pkexec_mode_still_prompts_for_run_as_plans`; `tests/pty_e2e.rs` `pkexec_flag_multi_step_plan_gets_the_tui_prompt`. Residuals: the dialog names `/usr/bin/env` and shows the working directory only as `env -C DIR`; it does not show plan `setenv`, request env or `with-accepted-exit-codes` (whether `setenv` reaches the program under pkexec at all is unverified; see backlog); `pkexec-cache` makes even a single-step request run with no dialog (documented as not recommended). | 1–2 | [discharged] |
 
 ### G6 — Adversary cannot bypass the gate
 
