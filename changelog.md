@@ -3,6 +3,22 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Bound the `⚠ invalid plan` prompt line (#90)
+
+The prompt printed a `compile_plan` error unclipped on its `⚠ invalid plan`
+line, and that error can quote request data: `environment variable not
+allowed: {key}` carries a setenv key of any length. The daemon rejects a plan
+that does not compile before prompting, so the line was unreachable, but it
+sat outside the "every prompt line is bounded" property of #85 (G4.3).
+The plan part of the prompt is now one function, `write_plan_section`, used by
+`prompt_tty`; its error arm prints the message through `shown` (escaped, then
+clipped to 160 chars with the hidden-chars marker). Valid plans render as
+before: no golden changed. Tests: `invalid_plan_line_is_bounded` (a 10 000-char
+key gives one bounded line under both styles), the #85 property now goes
+through `write_plan_section`, and `plan_disallowed_setenv_rejected_without_prompt`
+pins the server-side ordering for the one error that quotes request data.
+Sn4.3 lists the line and the two tests.
+
 ## Unreleased — wrapper-aware opaque detection (#87)
 
 **The gap.** The opaque flag and the `no_shell` policy (#67) looked only at a
