@@ -118,6 +118,7 @@ and covers both the MCP and direct-socket paths. Residual after fix: printable-r
 Unicode look-alikes/NBSP in `reason` — a far weaker, passive social-engineering vector
 that cannot hide the real command (documented, see F3 for the length dimension).
 Regression test mirrors the existing argv bidi/control tests in `tests/validation.rs`.
+Class widened under #86 (to Cc/Cf/Zl/Zp/DICP; filesystem-derived `Resolves:` paths escaped).
 
 ---
 
