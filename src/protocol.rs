@@ -1145,6 +1145,89 @@ mod tests {
         );
     }
 
+    /// The plan wire form, frozen: one literal per variant (both `run-as`
+    /// forms, both redirect targets, both write modes). Captured from the
+    /// derived serializer before the `deny_unknown_fields` change (#89, 1.3.0),
+    /// so any change to the bytes on the wire fails here. Checked in both
+    /// directions: serializing gives exactly this text, and this text parses
+    /// back to the same plan.
+    #[test]
+    fn wire_form_literals() {
+        let b = || Box::new(exec(&["id"]));
+        let cases: Vec<(Plan, &str)> = vec![
+            (exec(&["echo", "a b"]), r#"{"op":"exec","argv":["echo","a b"]}"#),
+            (
+                Plan::Run { steps: vec![exec(&["true"]), exec(&["false"])] },
+                r#"{"op":"run","steps":[{"op":"exec","argv":["true"]},{"op":"exec","argv":["false"]}]}"#,
+            ),
+            (Plan::Seq { steps: vec![exec(&["true"])] }, r#"{"op":"seq","steps":[{"op":"exec","argv":["true"]}]}"#),
+            (
+                Plan::Alt { steps: vec![exec(&["false"]), exec(&["true"])] },
+                r#"{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["true"]}]}"#,
+            ),
+            (
+                Plan::Pipe { stages: vec![exec(&["ls"]), exec(&["wc", "-l"])] },
+                r#"{"op":"pipe","stages":[{"op":"exec","argv":["ls"]},{"op":"exec","argv":["wc","-l"]}]}"#,
+            ),
+            (
+                Plan::Redirect {
+                    stream: Stream::Stdout,
+                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Truncate },
+                    body: b(),
+                },
+                r#"{"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Redirect {
+                    stream: Stream::Both,
+                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Append },
+                    body: b(),
+                },
+                r#"{"op":"redirect","stream":"both","target":{"to":"file","path":"/tmp/o","mode":"append"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Redirect { stream: Stream::Stderr, target: RedirTarget::DevNull, body: b() },
+                r#"{"op":"redirect","stream":"stderr","target":{"to":"dev-null"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::WithStdinFrom { path: "/etc/hosts".into(), body: b() },
+                r#"{"op":"with-stdin-from","path":"/etc/hosts","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Setenv { key: "LANG".into(), value: "C".into(), body: b() },
+                r#"{"op":"setenv","key":"LANG","value":"C","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Chdir { dir: "/srv".into(), body: b() },
+                r#"{"op":"chdir","dir":"/srv","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::RunAs { who: RunAs::Root, body: b() },
+                r#"{"op":"run-as","as":"root","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::RunAs { who: RunAs::User { name: "alice".into() }, body: b() },
+                r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::WithAcceptedExitCodes { codes: vec![0, 1], body: b() },
+                r#"{"op":"with-accepted-exit-codes","codes":[0,1],"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Shell { shell: ShellProc::Bash, script: "echo hi".into() },
+                r#"{"op":"shell","shell":"bash","script":"echo hi"}"#,
+            ),
+            (
+                Plan::Shell { shell: ShellProc::Sh, script: "true".into() },
+                r#"{"op":"shell","shell":"sh","script":"true"}"#,
+            ),
+        ];
+        for (plan, wire) in cases {
+            assert_eq!(serde_json::to_string(&plan).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<Plan>(wire).unwrap(), plan, "{wire}");
+        }
+    }
+
     /// `effective_privileged` is true for a top-level privileged flag, and also
     /// for an unprivileged request whose plan smuggles any `RunAs` node.
     #[test]
