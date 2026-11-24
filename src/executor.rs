@@ -156,30 +156,11 @@ fn search_path(name: &str, path_var: &str) -> Option<PathBuf> {
     None
 }
 
-/// Shell interpreters. A leaf whose program is one of these runs a script the
-/// prompt cannot show stage by stage (`sh -c '…'`, `bash script.sh`, a shell
-/// reading stdin), so it is flagged opaque exactly like an explicit `Shell`
-/// node — and rejected by the `no_shell` policy.
-const SHELLS: &[&str] = &[
-    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "yash", "posh",
-];
-
-/// True if the basename of `p` names a shell interpreter.
+/// True if the basename of `p` names a shell interpreter (see
+/// [`crate::wrappers::SHELLS`]).
+#[cfg(test)]
 fn is_shell_name(p: &Path) -> bool {
-    p.file_name()
-        .and_then(|n| n.to_str())
-        .is_some_and(|n| SHELLS.contains(&n))
-}
-
-/// True if a leaf with program `argv0` (resolved to `resolved`, if found) runs
-/// a shell: either the name as written is a shell, or the canonical resolved
-/// binary is one (catches `/bin/sh -> dash` and a renamed symlink to bash).
-/// Wrappers such as `env`/`nice`/`timeout` are not looked through.
-fn runs_shell(argv0: &str, resolved: Option<&Path>) -> bool {
-    is_shell_name(Path::new(argv0))
-        || resolved
-            .and_then(|p| std::fs::canonicalize(p).ok())
-            .is_some_and(|c| is_shell_name(&c))
+    p.to_str().is_some_and(crate::wrappers::is_shell_name)
 }
 
 /// Top-level escalation mechanism chosen by the dispatcher. It governs how an
@@ -240,9 +221,10 @@ pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Res
 // No shell is ever assembled on the privileged path: each leaf fork/execs its
 // literal argv, and an escalated leaf is `sudo [-u user] -- argv` / `pkexec
 // [--user user] argv`, never `sudo sh -c`. The daemon never *adds* a shell;
-// a leaf whose own program is a shell (an explicit `Shell` node, or an `Exec`
-// of `sh`/`bash`/…) is flagged opaque at the prompt and rejected outright under
-// the `no_shell` policy.
+// a leaf that runs one (an explicit `Shell` node, or an `Exec` of `sh`/`bash`/…,
+// directly or behind a wrapper such as `env`/`nice`/`timeout`), an inline-code
+// interpreter or a program runner is flagged opaque at the prompt and rejected
+// outright under the `no_shell` policy (see `crate::wrappers`).
 // ---------------------------------------------------------------------------
 
 /// Per-leaf run-as context, resolved from the ambient `privileged` flag and any
@@ -293,10 +275,13 @@ struct LeafPlan {
     stdin: InSpec,
     stdout: OutSpec,
     stderr: ErrSpec,
-    /// True for a leaf that runs a shell — an explicit `Shell` node or an
-    /// `Exec` whose program is a shell (see `runs_shell`). The prompt flags it
-    /// as opaque; `resolved_bin` resolves only the shell.
-    opaque: bool,
+    /// Why the leaf is opaque: an explicit `Shell` node, or a program the
+    /// prompt cannot show stage by stage (a shell, an inline-code interpreter,
+    /// a runner), directly or behind a wrapper (see [`crate::wrappers`]).
+    /// The prompt flags it; the `no_shell` policy rejects it.
+    opaque: Option<Opacity>,
+    /// The programs the leaf runs: `argv[0]`, then each program a wrapper runs.
+    programs: Vec<ProgramHop>,
     /// `argv[0]` resolved by [`resolve_command`]. The prompt displays it and
     /// [`build_command`] spawns it, so the two can never disagree; `None` means
     /// the stage is refused at spawn rather than looked up again.
@@ -551,16 +536,99 @@ fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result
     Ok(())
 }
 
+/// One program a leaf runs: `argv[0]`, or a program run by a wrapper.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramHop {
+    /// The program word as written in argv.
+    pub name: String,
+    /// Its resolution (`resolve_command`). For `argv[0]` this is the leaf's
+    /// `resolved_bin`. `None` when not found, and always `None` when
+    /// `runtime_lookup` is set.
+    pub resolved: Option<PathBuf>,
+    /// The wrapper (as written) that runs it; `None` for `argv[0]`.
+    pub via: Option<String>,
+    /// An inner program of an escalated leaf: the wrapper looks it up at run
+    /// time on the escalated PATH (sudo's `secure_path`, pkexec's environment),
+    /// not the PATH the daemon resolves with, so no path is shown.
+    pub runtime_lookup: bool,
+    /// An applet of a multi-call dispatcher (`busybox sh`): the dispatcher
+    /// runs its built-in applet, so its PATH resolution is not shown
+    /// (`resolved` is `None`).
+    pub applet: bool,
+}
+
+/// Why a leaf is opaque, described once for both the prompt and the
+/// `no_shell` rejection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Opacity {
+    /// Index into the leaf's `programs` of the program the reason is about.
+    pub at: usize,
+    /// [`crate::wrappers::OpaqueReason::describe`].
+    pub reason: String,
+    /// The reason is a shell (the prompt keeps "resolves only the shell").
+    pub is_shell: bool,
+    /// The reason is about the program itself, so its path is shown.
+    pub names_program: bool,
+}
+
+/// The leaf cwd with an accumulated `env -C` directory applied.
+fn hop_cwd(cwd: &str, chdir: Option<&str>) -> String {
+    match chdir {
+        Some(d) => Path::new(cwd).join(d).to_string_lossy().into_owned(),
+        None => cwd.to_string(),
+    }
+}
+
 /// Append a resolved leaf to the list and return its index (= stage id).
-fn push_leaf(argv: Vec<String>, opaque: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
+fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
     let resolved_bin = argv.first().and_then(|name| resolve_command(name, &ctx.cwd));
-    // An `Exec` of a shell is as opaque as an explicit `Shell` node: decide it
-    // here, the one place every leaf is created, so the prompt, the resolve
-    // block and the `no_shell` policy all read the same bit.
-    let opaque = opaque
-        || argv
-            .first()
-            .is_some_and(|a| runs_shell(a, resolved_bin.as_deref()));
+    // Decide opacity here, the one place every leaf is created, so the
+    // prompt, the resolve block and the `no_shell` policy all read the same
+    // value. The canonical name of each hop's binary catches a renamed
+    // symlink (`/bin/sh -> dash`, `innocuous -> bash`, `innocuous -> env`).
+    let canonical = |i: usize, chdir: Option<&str>| -> Option<String> {
+        let path = if i == 0 {
+            resolved_bin.clone()
+        } else {
+            resolve_command(&argv[i], &hop_cwd(&ctx.cwd, chdir))
+        }?;
+        let c = std::fs::canonicalize(path).ok()?;
+        c.file_name().and_then(|n| n.to_str()).map(str::to_string)
+    };
+    let (hops, reason) = crate::wrappers::unwrap(&argv, canonical);
+    let reason = if shell_op {
+        Some(crate::wrappers::OpaqueReason::ShellOp)
+    } else {
+        reason
+    };
+    let opaque = reason.map(|r| Opacity {
+        at: r.hop().min(hops.len().saturating_sub(1)),
+        reason: r.describe(&hops, &argv),
+        is_shell: r.is_shell(),
+        names_program: r.names_program(),
+    });
+    let escalated = ctx.runas.is_escalated();
+    let programs = hops
+        .iter()
+        .map(|h| {
+            let name = argv[h.argv_index].clone();
+            let inner = h.argv_index != 0;
+            let resolved = if !inner {
+                resolved_bin.clone()
+            } else if escalated || h.applet {
+                None
+            } else {
+                resolve_command(&name, &hop_cwd(&ctx.cwd, h.chdir.as_deref()))
+            };
+            ProgramHop {
+                name,
+                resolved,
+                via: h.via.map(|p| argv[hops[p].argv_index].clone()),
+                runtime_lookup: inner && escalated && !h.applet,
+                applet: h.applet,
+            }
+        })
+        .collect();
     let stage_id = leaves.len();
     leaves.push(LeafPlan {
         argv,
@@ -571,6 +639,7 @@ fn push_leaf(argv: Vec<String>, opaque: bool, ctx: Ctx, leaves: &mut Vec<LeafPla
         stdout: ctx.stdout,
         stderr: ctx.stderr,
         opaque,
+        programs,
         resolved_bin,
         accepted: ctx.accepted,
         forward_agent: ctx.forward_agent,
@@ -626,11 +695,16 @@ pub struct LeafView {
     pub stage_id: usize,
     pub argv: Vec<String>,
     pub privilege: LeafPrivilege,
-    /// `argv[0]` resolved through PATH (for an opaque leaf, the shell).
+    /// `argv[0]` resolved through PATH.
     pub resolved_bin: Option<PathBuf>,
-    /// True for a leaf that runs a shell (`Shell` node or `Exec` of a shell) —
-    /// rendered "opaque", and rejected under the `no_shell` policy.
+    /// True for an opaque leaf (see `opaque_reason`) — rendered "opaque", and
+    /// rejected under the `no_shell` policy.
     pub opaque: bool,
+    /// Why the leaf is opaque, and which of `programs` it is about.
+    pub opaque_reason: Option<Opacity>,
+    /// Every program the leaf runs: `argv[0]` first, then each program a
+    /// wrapper runs (`env X=1 true` → `env`, `true`).
+    pub programs: Vec<ProgramHop>,
     /// Human-readable redirection summary, e.g. `> /tmp/out`, `< in`, `2>&1`.
     pub redirects: String,
     /// True if this leaf is a stage of a pipe.
@@ -657,7 +731,9 @@ pub fn plan_display(req: &ValidatedRequest) -> Result<Vec<LeafView>, String> {
                 LeafRunAs::User(n) => LeafPrivilege::User(n.clone()),
             },
             resolved_bin: l.resolved_bin.clone(),
-            opaque: l.opaque,
+            opaque: l.opaque.is_some(),
+            opaque_reason: l.opaque.clone(),
+            programs: l.programs.clone(),
             redirects: summarize_redirects(l),
             in_pipe: in_pipe[l.stage_id],
         })
@@ -1644,7 +1720,8 @@ mod tests {
             stdin: InSpec::Null,
             stdout: OutSpec::Capture,
             stderr: ErrSpec::Capture,
-            opaque: false,
+            opaque: None,
+            programs: vec![],
             resolved_bin: Some(PathBuf::from(format!("/usr/bin/{}", argv[0]))),
             accepted: vec![],
             forward_agent: false,
@@ -1943,7 +2020,8 @@ mod tests {
             stdin: InSpec::Null,
             stdout: OutSpec::Capture,
             stderr: ErrSpec::Capture,
-            opaque: false,
+            opaque: None,
+            programs: vec![],
             resolved_bin: Some(PathBuf::from("/usr/sbin/sysctl")),
             accepted: Vec::new(),
             forward_agent: false,
@@ -2066,6 +2144,74 @@ mod tests {
         let req = ValidatedRequest::validate(req).expect("valid");
         let flags: Vec<bool> = plan_display(&req).unwrap().iter().map(|v| v.opaque).collect();
         assert_eq!(flags, [false, true]);
+
+        // Issue #87: a shell or an inline-code interpreter behind a wrapper is
+        // opaque too, in a plan and in a legacy flat pipeline.
+        assert_eq!(opaque(ex(&["env", "sh", "-c", "x"])), [true]);
+        assert_eq!(opaque(ex(&["nice", "bash"])), [true]);
+        assert_eq!(opaque(ex(&["timeout", "5", "sh", "-c", "x"])), [true]);
+        assert_eq!(opaque(ex(&["python3", "-c", "x"])), [true]);
+        assert_eq!(opaque(ex(&["env", "FOO=1", "true"])), [false]);
+        assert_eq!(opaque(ex(&["env", "LD_PRELOAD=/x", "true"])), [true]);
+        let mut req = Request::new_plan(
+            String::new(),
+            "test".into(),
+            ex(&["true"]),
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
+        );
+        req.plan = None;
+        req.pipeline = vec![
+            vec!["echo".into(), "x".into()],
+            vec!["env".into(), "bash".into(), "-lc".into(), "cat".into()],
+        ];
+        let req = ValidatedRequest::validate(req).expect("valid");
+        let views = plan_display(&req).unwrap();
+        let flags: Vec<bool> = views.iter().map(|v| v.opaque).collect();
+        assert_eq!(flags, [false, true]);
+        let why = views[1].opaque_reason.as_ref().unwrap();
+        assert_eq!((why.at, why.is_shell), (1, true));
+        assert_eq!(views[1].programs[why.at].via.as_deref(), Some("env"));
+    }
+
+    /// The prompt lists every program a wrapper runs: with its path for a
+    /// leaf running as the daemon user, and as looked up at run time for an
+    /// escalated leaf (the wrapper searches sudo's `secure_path`, not ours).
+    #[test]
+    fn plan_display_lists_wrapped_programs() {
+        let ex = Plan::Exec { argv: vec!["env".into(), "X=1".into(), "true".into()] };
+        let views = plan_display(&mk_plan_req(ex.clone(), false)).unwrap();
+        let p = &views[0].programs;
+        assert_eq!(p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["env", "true"]);
+        assert_eq!(p[0].via, None);
+        assert_eq!(p[1].via.as_deref(), Some("env"));
+        assert_eq!(p[0].resolved, views[0].resolved_bin);
+        assert_eq!(p[1].resolved, resolve_command("true", "/"));
+        assert!(p[1].resolved.is_some());
+        assert!(!p[0].runtime_lookup && !p[1].runtime_lookup);
+        assert!(!views[0].opaque);
+
+        let rooted = Plan::RunAs { who: RunAs::Root, body: Box::new(ex) };
+        let views = plan_display(&mk_plan_req(rooted, false)).unwrap();
+        let p = &views[0].programs;
+        assert!(!p[0].runtime_lookup && p[0].resolved.is_some());
+        assert!(p[1].runtime_lookup);
+        assert_eq!(p[1].resolved, None);
+    }
+
+    /// Review C5: a multi-call dispatcher runs its built-in applet, so the
+    /// applet's PATH resolution is not shown.
+    #[test]
+    fn plan_display_shows_no_path_for_an_applet() {
+        let ex = Plan::Exec { argv: vec!["busybox".into(), "true".into()] };
+        let views = plan_display(&mk_plan_req(ex, false)).unwrap();
+        let p = &views[0].programs;
+        assert_eq!(p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["busybox", "true"]);
+        assert!(!p[0].applet && p[1].applet);
+        assert!(!p[1].runtime_lookup);
+        assert_eq!(p[1].resolved, None);
     }
 
     /// A symlink with an innocuous name pointing at a shell is still a shell:
@@ -2081,7 +2227,36 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let link = dir.path().join("innocuous");
         std::os::unix::fs::symlink(&sh, &link).expect("symlink");
-        assert!(runs_shell(link.to_str().unwrap(), Some(&link)));
-        assert!(!runs_shell("true", which("true").as_deref()));
+        let ex = |argv: &[&str]| Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() };
+        let views = plan_display(&mk_plan_req(ex(&[link.to_str().unwrap()]), false)).unwrap();
+        assert!(views[0].opaque);
+        assert!(views[0].opaque_reason.as_ref().unwrap().is_shell);
+        let views = plan_display(&mk_plan_req(ex(&["true"]), false)).unwrap();
+        assert!(!views[0].opaque);
+    }
+
+    /// A symlink with an innocuous name pointing at `env` is unwrapped as
+    /// `env` (the canonical class wins over a plain written name).
+    #[test]
+    fn renamed_symlink_to_env_is_unwrapped() {
+        let Some(env) = which("env") else { return };
+        // On a multi-call system (`/usr/bin/env -> busybox`) the target's name
+        // is the dispatcher, which is ignored for classification.
+        let canonical = std::fs::canonicalize(&env).unwrap();
+        if canonical.file_name().and_then(|n| n.to_str()) != Some("env") {
+            return;
+        }
+        let dir = tempfile::tempdir().expect("tempdir");
+        let link = dir.path().join("innocuous");
+        std::os::unix::fs::symlink(&env, &link).expect("symlink");
+        let link = link.to_str().unwrap().to_string();
+        let ex = |argv: Vec<String>| Plan::Exec { argv };
+        let views = plan_display(&mk_plan_req(ex(vec![link.clone(), "sh".into()]), false)).unwrap();
+        assert!(views[0].opaque, "innocuous -> env running sh");
+        let views = plan_display(&mk_plan_req(ex(vec![link.clone(), "true".into()]), false)).unwrap();
+        assert!(!views[0].opaque);
+        let names: Vec<&str> = views[0].programs.iter().map(|h| h.name.as_str()).collect();
+        assert_eq!(names, [link.as_str(), "true"]);
+        assert_eq!(views[0].programs[1].via.as_deref(), Some(link.as_str()));
     }
 }

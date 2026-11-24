@@ -3,6 +3,27 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — wrapper-aware opaque detection (#87)
+
+**The gap.** The opaque flag and the `no_shell` policy (#67) looked only at a
+stage's `argv[0]`, so `env sh -c …`, `nice bash …`, `timeout 5 sh -c …` and
+`python3 -c …` rendered as tame stages and ran under `no_shell`; `env VAR=… opam
+…` also hid `opam` from `Resolves:`. **The fix.** New pure module
+`src/wrappers.rs` unwraps argv through known wrappers (`env`, `nice`, `nohup`,
+`setsid`, `stdbuf`, `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`,
+`busybox`/`toybox`/`coreutils`, `find -exec`) and flags shells, inline-code
+interpreters and runners (`sudo`, `ssh`, …) as opaque. It fails closed on
+unknown or abbreviated options, missing arguments, `env -S`/`-i`/PATH
+changes, env names `setenv` hard-rejects (`LD_*`, `BASH_ENV`, `ENV`, `IFS`),
+`find -exec {}`, dispatcher options, ambiguous names and chains deeper than 8.
+`Resolves:` lists every program with `(run by …)`, and `looked up at run time`
+(no path) for an escalated stage's inner programs. The `no_shell` message
+gives the prompt's reason. **Behaviour change under `no_shell`:** these
+stages are now rejected. Tests: unit tables and two properties in
+`src/wrappers.rs`, executor/TUI tests, `tests/no_shell.rs`,
+`tests/pty_no_shell.rs`, a `wrappers` pty golden, corpus cases 06/22 stay
+transparent. Assurance case G4.7.
+
 ## Unreleased — Bound every approval-prompt line, not only Command: (#85)
 
 **The gap.** Only the `Command:` line was length-bounded (G4.3 / F3). The

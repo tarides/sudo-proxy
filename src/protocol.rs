@@ -90,9 +90,9 @@ pub enum RunAs {
 }
 
 /// Which interpreter an explicit `Shell` escape-hatch node runs. Named so the
-/// prompt can render the stage as "opaque — resolves only the shell": this is
-/// the *only* place a shell re-enters the execution path, and it is never
-/// hidden.
+/// prompt can render the stage as "opaque — resolves only the shell". A shell
+/// can also be an `Exec`'s program, directly or behind a wrapper; that stage
+/// is flagged opaque the same way, so a shell is never hidden.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShellProc {
@@ -177,8 +177,10 @@ pub enum Plan {
     /// prompt as "opaque — resolves only the shell"; the strict `no_shell`
     /// policy (`policy.no_shell` in hosts.json, or `--no-shell`) rejects it
     /// before prompting. An `Exec` whose program is a shell (`sh -c '…'`,
-    /// `bash script.sh`) is treated identically, so the hatch cannot be taken
-    /// unflagged.
+    /// `bash script.sh`), directly or behind a wrapper (`env sh -c …`,
+    /// `timeout 5 bash …`), is treated identically, so the hatch cannot be
+    /// taken unflagged; so are inline-code interpreters (`python3 -c`) and
+    /// program runners (`sudo`, `ssh`) — see `crate::wrappers`.
     Shell { shell: ShellProc, script: String },
 }
 

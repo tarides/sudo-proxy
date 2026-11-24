@@ -459,7 +459,8 @@ pub struct ServerConfig {
     /// `false` (fail-closed): every unprivileged command is prompted.
     pub unattended_eligible: bool,
     /// Strict "structured or nothing" mode: reject, before prompting, any
-    /// request with an opaque stage (a `Shell` node, or an `Exec` of a shell).
+    /// request with an opaque stage (a `Shell` node, or an `Exec` of a shell,
+    /// inline-code interpreter or runner, directly or behind a wrapper).
     /// Read from `policy.no_shell` in `hosts.json` or `--no-shell` /
     /// `--allow-shell` at startup; immutable thereafter. Default `false`.
     pub no_shell: bool,
@@ -897,19 +898,26 @@ fn handle_connection(
         }
     };
 
-    // Strict no-shell policy: reject any opaque stage (a `Shell` node or an
-    // `Exec` of a shell) before prompting and before the unattended grant or
-    // `--pkexec` paths. It reads the same `opaque` bit the prompt renders, so
+    // Strict no-shell policy: reject any opaque stage (a `Shell` node, or a
+    // shell, inline-code interpreter or runner, directly or behind a wrapper)
+    // before prompting and before the unattended grant or `--pkexec` paths. It
+    // reads the same opacity, and the same reason text, the prompt renders, so
     // what the prompt would flag is exactly what is refused.
     if no_shell {
-        if let Some(v) = views.iter().find(|v| v.opaque) {
-            let prog = v.argv.first().map(String::as_str).unwrap_or("");
+        if let Some((v, o)) = views.iter().find_map(|v| v.opaque_reason.as_ref().map(|o| (v, o))) {
+            let prog = v.programs.get(o.at);
+            let name = prog.map(|p| p.name.as_str()).unwrap_or("");
+            let via = prog
+                .and_then(|p| p.via.as_deref())
+                .map(|w| format!(" via {w}"))
+                .unwrap_or_default();
             let resp = Response::error(
                 &req.id,
                 &format!(
-                    "shell escape hatch rejected by policy (no_shell): stage {} runs {prog}; \
-                     express it with structured ops (run/seq/alt/pipe/redirect/setenv/chdir/run-as)",
-                    v.stage_id
+                    "shell escape hatch rejected by policy (no_shell): stage {} runs {name}{via}: \
+                     opaque — {}; express it with structured ops \
+                     (run/seq/alt/pipe/redirect/setenv/chdir/run-as)",
+                    v.stage_id, o.reason
                 ),
             );
             reject(&mut stream, &ev, Reject::NoShell, resp);
@@ -1139,6 +1147,8 @@ mod tests {
             privilege,
             resolved_bin: None,
             opaque: false,
+            opaque_reason: None,
+            programs: vec![],
             redirects: redirects.into(),
             in_pipe: false,
         }
