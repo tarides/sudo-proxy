@@ -25,6 +25,39 @@ redirect, with-stdin-from; one `denied` audit record each, none `pkexec`), and
 the pty test `pkexec_flag_multi_step_plan_gets_the_tui_prompt` through the real
 CLI with `DISPLAY` set. G5.4 / Sn5.4 and threat-model leaf 4.5 added.
 
+## Unreleased — Widen the prompt's forbidden-character class (#86)
+
+`has_dangerous_chars` rejected C0 controls and three zero-width/bidi ranges
+only. DEL and C1 (NEL, CSI, OSC), soft hyphen, ALM, line/paragraph
+separators, word joiner and invisible operators, BOM, tag characters and
+variation selectors all reached the approval prompt. The class is now one
+rule, `c ≠ TAB ∧ c ∈ Cc ∪ Cf ∪ Zl ∪ Zp ∪ Default_Ignorable_Code_Point`,
+held as a table built from the Unicode 16.0.0 UCD
+(`protocol::DANGEROUS_RANGES`) and reused by the audit-record and
+`--log-json` escapers.
+
+- **Resolves paths.** Paths shown on `Resolves:` (tui and zenity) are printed
+  through `escape_dangerous`: a symlink's target name never goes through
+  validation, so a same-UID caller could put ESC or a newline on the prompt
+  that way.
+- **Env-key message.** The "env key contains forbidden characters" error no
+  longer echoes the key. For consistency only: the key reached only the
+  response, and the audit copy was already escaped.
+- **MCP.** `sudo-proxy-mcp` strips the class from `description` before it
+  becomes `reason`, so an emoji with U+FE0F no longer fails the request. The
+  daemon gate stays strict.
+- **Newly rejected input.** Soft hyphens, emoji presentation sequences with
+  U+FE0F in `reason` from non-MCP clients, Arabic/Syriac text using U+061C,
+  U+0600–0605 or U+070F, a leading BOM, and tag characters now get the
+  existing validation error; drop the character.
+- **Tests.** An exhaustive unit test checks the table over every `char`
+  against a General_Category oracle (`unicode-general-category`, a pinned
+  dev-dependency) plus a verbatim copy of the DICP list; a regression table;
+  integration tests over argv/reason/session/env value/plan leaves; a
+  non-ASCII accept test; an audit escape test; a `Resolves:` symlink test;
+  the property test with valid env keys and multibyte text; and the Kani
+  harnesses over the whole `char` domain.
+
 ## Unreleased — Audit log for every request outcome (#65)
 
 The daemon logged prompted requests and unattended runs, and only with `-v`. It

@@ -133,6 +133,20 @@ fn validation_failure_is_recorded_without_command() {
     assert_eq!(s.prompter.call_count(), 0);
 }
 
+/// Issue #86: a line separator and a soft hyphen are now forbidden; the
+/// rejected request is recorded with both escaped.
+#[test]
+fn widened_class_is_rejected_and_escaped_in_record() {
+    let s = server();
+    let mut req = make_req("a-sep", vec![vec!["true"]]);
+    req.session = "evil\u{2028}ses\u{ad}sion".into();
+    assert_eq!(s.send(&req).status, Status::Error);
+    let r = s.audit_for("a-sep");
+    check_common(&r, "rejected:invalid_request");
+    assert_eq!(r["session"], "evil\\u{2028}ses\\u{ad}sion");
+    assert_eq!(s.prompter.call_count(), 0);
+}
+
 #[test]
 fn disallowed_env_is_recorded_without_its_value() {
     let s = server();

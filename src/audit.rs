@@ -24,7 +24,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-use crate::protocol::{Response, Status};
+use crate::protocol::{is_dangerous_char, Response, Status};
 
 /// Longest a single untrusted field may be in a record. A request that fails
 /// validation can carry up to 1 MiB in `id`/`session`/`host`; the log must not
@@ -312,17 +312,15 @@ fn clip(s: &str) -> String {
     }
 }
 
-/// Clip, then make terminal-safe: every C0/C1 control (newline and tab
-/// included — a record is one line), DEL, and the zero-width / bidi characters
-/// `has_dangerous_chars` forbids are written as `\u{…}` escapes.
+/// Clip, then make terminal-safe: newline, tab (a record is one line) and
+/// every character `protocol::is_dangerous_char` forbids on the prompt
+/// (control, format, separator, default-ignorable) are written as `\u{…}`
+/// escapes.
 fn safe(s: &str) -> String {
     let mut out = String::new();
     for c in clip(s).chars() {
         let u = c as u32;
-        if u < 0x20
-            || (0x7F..=0x9F).contains(&u)
-            || matches!(u, 0x200B..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069)
-        {
+        if c == '\t' || c == '\n' || is_dangerous_char(c) {
             out.push_str(&format!("\\u{{{u:x}}}"));
         } else {
             out.push(c);
