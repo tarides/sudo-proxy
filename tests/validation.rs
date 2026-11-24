@@ -411,6 +411,34 @@ fn plan_structural_error_rejected_without_prompt() {
     assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
 }
 
+/// #89 (1.3.0): a key the plan grammar does not define, here three levels deep,
+/// fails the request before anything is prompted, instead of being dropped
+/// silently. Sent raw, so no client-side parse can catch it first.
+#[test]
+fn plan_unknown_key_rejected_without_prompt() {
+    let s = server();
+    let req = plan_req(
+        "v-unknown-key",
+        Plan::Run {
+            steps: vec![Plan::Chdir {
+                dir: "/".into(),
+                body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+            }],
+        },
+        false,
+    );
+    let mut v = serde_json::to_value(&req).unwrap();
+    v["plan"]["steps"][0]["do"]["stdin_from"] = serde_json::json!("/etc/shadow");
+    let mut line = serde_json::to_vec(&v).unwrap();
+    line.push(b'\n');
+    let resp: serde_json::Value =
+        serde_json::from_slice(s.send_raw(&line).trim_ascii()).expect("response JSON");
+    assert_eq!(resp["status"], "error");
+    let msg = resp["message"].as_str().unwrap();
+    assert!(msg.contains("unknown field `stdin_from`"), "{msg}");
+    assert_eq!(s.prompter.call_count(), 0, "must not prompt for a plan with an unknown key");
+}
+
 /// Issue #90: the one `compile_plan` error that quotes request data (a setenv
 /// key that is a valid name but not allowlisted, here 10 000 chars long) is
 /// also rejected before prompting, so its unbounded text never reaches the

@@ -3,6 +3,31 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Unknown plan keys are rejected (#89, 1.3.0)
+
+Every plan object accepted and silently dropped keys it does not define. A
+misspelled key (`stdin_from` for `with-stdin-from`, `pth` for a redirect's
+`path`) vanished, and the rest of the plan was prompted for and run: the
+regression test shows such a request approved and executed on the old code.
+Plans now reject unknown keys at any depth, on every node and on redirect
+targets, before anything is prompted, with serde's "unknown field `x`, expected …" from the
+daemon (`invalid JSON`), the MCP server (`invalid plan`) and `sudo-request
+--plan` (`invalid plan JSON`). `run-as` with `as: root` and a `name`, whose
+`name` used to be dropped, is now an error too. The request envelope stays
+lenient, so a newer client can still talk to an older daemon.
+
+1.3.0 is the first release to ship plans, so this fixes their wire format
+before any client depends on the lenient one; it is pulled forward from #89's
+Phase 1. serde cannot combine `deny_unknown_fields` with the `flatten` that
+`run-as` needs, so `Plan` and `RedirTarget` now (de)serialize through a private
+wire form (`protocol::wire`), converted by exhaustive matches in both
+directions. The Rust types are unchanged and the bytes on the wire are
+identical: `wire_form_literals` was frozen from the old serializer, in its own
+commit, and passes before and after. Tests: `prop_plan_wire_roundtrip` (5 000
+random plans over every variant), `plan_rejects_unknown_keys_at_every_level`,
+`request_stays_lenient_but_its_plan_is_strict`, and
+`plan_unknown_key_rejected_without_prompt` (raw socket, no prompt).
+
 ## Unreleased — Bound the `⚠ invalid plan` prompt line (#90)
 
 The prompt printed a `compile_plan` error unclipped on its `⚠ invalid plan`

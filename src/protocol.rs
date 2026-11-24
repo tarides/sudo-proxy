@@ -64,11 +64,10 @@ pub enum WriteMode {
 
 /// Where a `Redirect` node sends its stream.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "to", rename_all = "kebab-case")]
+#[serde(from = "wire::RedirTargetWire", into = "wire::RedirTargetWire")]
 pub enum RedirTarget {
     File {
         path: String,
-        #[serde(default)]
         mode: WriteMode,
     },
     /// `>/dev/null` — discard (the Dune `ignore-*` case).
@@ -82,8 +81,9 @@ pub enum RedirTarget {
 /// because running as root *or* as another user requires escalation the daemon
 /// gates behind the human prompt. It is the structured replacement for the
 /// nested `sudo -H -u <user> bash -lc '…'` the approval log showed.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "as", rename_all = "lowercase")]
+/// Not serialized on its own: on the wire it is the `as`/`name` keys of a
+/// `run-as` node (see `wire::PlanWire`).
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunAs {
     Root,
     User { name: String },
@@ -112,7 +112,9 @@ pub enum ShellProc {
 /// one that runs. A flat `pipeline` desugars into this via
 /// `Request::exec_plan`, so every current client keeps working unchanged.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "kebab-case")]
+// The wire form is `wire::PlanWire`: same keys, with `deny_unknown_fields`
+// on every node (serde cannot combine it with the `flatten` `run-as` needs).
+#[serde(try_from = "wire::PlanWire", into = "wire::PlanWire")]
 pub enum Plan {
     /// A single literal command: prog + args (one `execve`). No word-splitting,
     /// globbing, or substitution — the leaf of every tree.
@@ -133,13 +135,11 @@ pub enum Plan {
     Redirect {
         stream: Stream,
         target: RedirTarget,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// Feed a file as stdin to the inner plan (Dune `with-stdin-from`, = `<`).
     WithStdinFrom {
         path: String,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// Add an env var to the inner plan's scope (Dune `setenv`). Still subject
@@ -147,30 +147,25 @@ pub enum Plan {
     Setenv {
         key: String,
         value: String,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// Change cwd for the inner plan (Dune `chdir`).
     Chdir {
         dir: String,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// Run the inner plan under a specific privilege context — `[ROOT]` or
-    /// `[as <user>]`. The axis Dune lacks; see `RunAs`. `who` is flattened, so
-    /// the wire form is `{"op":"run-as","as":"root","do":{…}}` /
+    /// `[as <user>]`. The axis Dune lacks; see `RunAs`. On the wire `who` is
+    /// flattened: `{"op":"run-as","as":"root","do":{…}}` /
     /// `{"op":"run-as","as":"user","name":"…","do":{…}}` (matching the MCP docs),
-    /// not a nested `"who":{…}` object.
+    /// not a nested `"who":{…}` object (see `wire::PlanWire`).
     RunAs {
-        #[serde(flatten)]
         who: RunAs,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// Treat these exit codes as success (Dune `with-accepted-exit-codes`).
     WithAcceptedExitCodes {
         codes: Vec<i32>,
-        #[serde(rename = "do")]
         body: Box<Plan>,
     },
     /// EXPLICIT opaque escape hatch (Dune `system`/`bash`). Rendered at the
@@ -182,6 +177,170 @@ pub enum Plan {
     /// taken unflagged; so are inline-code interpreters (`python3 -c`) and
     /// program runners (`sudo`, `ssh`) — see `crate::wrappers`.
     Shell { shell: ShellProc, script: String },
+}
+
+/// The plan wire form. `Plan` and `RedirTarget` (de)serialize only through
+/// these types, which carry `deny_unknown_fields`: a key the grammar does not
+/// define is an error, at any depth, instead of being dropped silently (#89).
+/// `Request` itself stays lenient, so a newer client still talks to an older
+/// daemon; only the plan is strict.
+///
+/// serde cannot combine `deny_unknown_fields` with the `flatten` that
+/// `run-as`'s `as`/`name` keys would need, so here they are explicit fields,
+/// in the order the flattened form used: the bytes on the wire are unchanged
+/// (`wire_form_literals`). Both conversions are exhaustive matches, so a new
+/// `Plan` variant does not compile until its wire form is defined.
+mod wire {
+    use super::{Plan, RedirTarget, RunAs, ShellProc, Stream, WriteMode};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "op", rename_all = "kebab-case", deny_unknown_fields)]
+    pub enum PlanWire {
+        Exec {
+            argv: Vec<String>,
+        },
+        Run {
+            steps: Vec<Plan>,
+        },
+        Seq {
+            steps: Vec<Plan>,
+        },
+        Alt {
+            steps: Vec<Plan>,
+        },
+        Pipe {
+            stages: Vec<Plan>,
+        },
+        Redirect {
+            stream: Stream,
+            target: RedirTarget,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        WithStdinFrom {
+            path: String,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        Setenv {
+            key: String,
+            value: String,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        Chdir {
+            dir: String,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        RunAs {
+            #[serde(rename = "as")]
+            kind: RunAsKind,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        WithAcceptedExitCodes {
+            codes: Vec<i32>,
+            #[serde(rename = "do")]
+            body: Box<Plan>,
+        },
+        Shell {
+            shell: ShellProc,
+            script: String,
+        },
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    pub enum RunAsKind {
+        Root,
+        User,
+    }
+
+    /// `DevNull` is an empty *struct* variant, not a unit variant, so that
+    /// `deny_unknown_fields` also rejects `{"to":"dev-null","path":…}`; the
+    /// wire form is still `{"to":"dev-null"}`.
+    #[derive(Serialize, Deserialize)]
+    #[serde(tag = "to", rename_all = "kebab-case", deny_unknown_fields)]
+    pub enum RedirTargetWire {
+        File {
+            path: String,
+            #[serde(default)]
+            mode: WriteMode,
+        },
+        DevNull {},
+    }
+
+    impl From<Plan> for PlanWire {
+        fn from(p: Plan) -> Self {
+            match p {
+                Plan::Exec { argv } => PlanWire::Exec { argv },
+                Plan::Run { steps } => PlanWire::Run { steps },
+                Plan::Seq { steps } => PlanWire::Seq { steps },
+                Plan::Alt { steps } => PlanWire::Alt { steps },
+                Plan::Pipe { stages } => PlanWire::Pipe { stages },
+                Plan::Redirect { stream, target, body } => PlanWire::Redirect { stream, target, body },
+                Plan::WithStdinFrom { path, body } => PlanWire::WithStdinFrom { path, body },
+                Plan::Setenv { key, value, body } => PlanWire::Setenv { key, value, body },
+                Plan::Chdir { dir, body } => PlanWire::Chdir { dir, body },
+                Plan::RunAs { who: RunAs::Root, body } => PlanWire::RunAs { kind: RunAsKind::Root, name: None, body },
+                Plan::RunAs { who: RunAs::User { name }, body } => {
+                    PlanWire::RunAs { kind: RunAsKind::User, name: Some(name), body }
+                }
+                Plan::WithAcceptedExitCodes { codes, body } => PlanWire::WithAcceptedExitCodes { codes, body },
+                Plan::Shell { shell, script } => PlanWire::Shell { shell, script },
+            }
+        }
+    }
+
+    impl TryFrom<PlanWire> for Plan {
+        type Error = String;
+        fn try_from(w: PlanWire) -> Result<Self, String> {
+            Ok(match w {
+                PlanWire::Exec { argv } => Plan::Exec { argv },
+                PlanWire::Run { steps } => Plan::Run { steps },
+                PlanWire::Seq { steps } => Plan::Seq { steps },
+                PlanWire::Alt { steps } => Plan::Alt { steps },
+                PlanWire::Pipe { stages } => Plan::Pipe { stages },
+                PlanWire::Redirect { stream, target, body } => Plan::Redirect { stream, target, body },
+                PlanWire::WithStdinFrom { path, body } => Plan::WithStdinFrom { path, body },
+                PlanWire::Setenv { key, value, body } => Plan::Setenv { key, value, body },
+                PlanWire::Chdir { dir, body } => Plan::Chdir { dir, body },
+                PlanWire::RunAs { kind, name, body } => {
+                    let who = match (kind, name) {
+                        (RunAsKind::Root, None) => RunAs::Root,
+                        (RunAsKind::Root, Some(_)) => return Err("run-as root takes no name".into()),
+                        (RunAsKind::User, Some(name)) => RunAs::User { name },
+                        (RunAsKind::User, None) => return Err("run-as user needs a name".into()),
+                    };
+                    Plan::RunAs { who, body }
+                }
+                PlanWire::WithAcceptedExitCodes { codes, body } => Plan::WithAcceptedExitCodes { codes, body },
+                PlanWire::Shell { shell, script } => Plan::Shell { shell, script },
+            })
+        }
+    }
+
+    impl From<RedirTarget> for RedirTargetWire {
+        fn from(t: RedirTarget) -> Self {
+            match t {
+                RedirTarget::File { path, mode } => RedirTargetWire::File { path, mode },
+                RedirTarget::DevNull => RedirTargetWire::DevNull {},
+            }
+        }
+    }
+
+    impl From<RedirTargetWire> for RedirTarget {
+        fn from(t: RedirTargetWire) -> Self {
+            match t {
+                RedirTargetWire::File { path, mode } => RedirTarget::File { path, mode },
+                RedirTargetWire::DevNull {} => RedirTarget::DevNull,
+            }
+        }
+    }
 }
 
 impl Plan {
@@ -1143,6 +1302,204 @@ mod tests {
                 body: Box::new(exec(&["id"])),
             }
         );
+    }
+
+    /// The plan wire form, frozen: one literal per variant (both `run-as`
+    /// forms, both redirect targets, both write modes). Captured from the
+    /// derived serializer before the `deny_unknown_fields` change (#89, 1.3.0),
+    /// so any change to the bytes on the wire fails here. Checked in both
+    /// directions: serializing gives exactly this text, and this text parses
+    /// back to the same plan.
+    #[test]
+    fn wire_form_literals() {
+        let b = || Box::new(exec(&["id"]));
+        let cases: Vec<(Plan, &str)> = vec![
+            (exec(&["echo", "a b"]), r#"{"op":"exec","argv":["echo","a b"]}"#),
+            (
+                Plan::Run { steps: vec![exec(&["true"]), exec(&["false"])] },
+                r#"{"op":"run","steps":[{"op":"exec","argv":["true"]},{"op":"exec","argv":["false"]}]}"#,
+            ),
+            (Plan::Seq { steps: vec![exec(&["true"])] }, r#"{"op":"seq","steps":[{"op":"exec","argv":["true"]}]}"#),
+            (
+                Plan::Alt { steps: vec![exec(&["false"]), exec(&["true"])] },
+                r#"{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["true"]}]}"#,
+            ),
+            (
+                Plan::Pipe { stages: vec![exec(&["ls"]), exec(&["wc", "-l"])] },
+                r#"{"op":"pipe","stages":[{"op":"exec","argv":["ls"]},{"op":"exec","argv":["wc","-l"]}]}"#,
+            ),
+            (
+                Plan::Redirect {
+                    stream: Stream::Stdout,
+                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Truncate },
+                    body: b(),
+                },
+                r#"{"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Redirect {
+                    stream: Stream::Both,
+                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Append },
+                    body: b(),
+                },
+                r#"{"op":"redirect","stream":"both","target":{"to":"file","path":"/tmp/o","mode":"append"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Redirect { stream: Stream::Stderr, target: RedirTarget::DevNull, body: b() },
+                r#"{"op":"redirect","stream":"stderr","target":{"to":"dev-null"},"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::WithStdinFrom { path: "/etc/hosts".into(), body: b() },
+                r#"{"op":"with-stdin-from","path":"/etc/hosts","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Setenv { key: "LANG".into(), value: "C".into(), body: b() },
+                r#"{"op":"setenv","key":"LANG","value":"C","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Chdir { dir: "/srv".into(), body: b() },
+                r#"{"op":"chdir","dir":"/srv","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::RunAs { who: RunAs::Root, body: b() },
+                r#"{"op":"run-as","as":"root","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::RunAs { who: RunAs::User { name: "alice".into() }, body: b() },
+                r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::WithAcceptedExitCodes { codes: vec![0, 1], body: b() },
+                r#"{"op":"with-accepted-exit-codes","codes":[0,1],"do":{"op":"exec","argv":["id"]}}"#,
+            ),
+            (
+                Plan::Shell { shell: ShellProc::Bash, script: "echo hi".into() },
+                r#"{"op":"shell","shell":"bash","script":"echo hi"}"#,
+            ),
+            (
+                Plan::Shell { shell: ShellProc::Sh, script: "true".into() },
+                r#"{"op":"shell","shell":"sh","script":"true"}"#,
+            ),
+        ];
+        for (plan, wire) in cases {
+            assert_eq!(serde_json::to_string(&plan).unwrap(), wire);
+            assert_eq!(serde_json::from_str::<Plan>(wire).unwrap(), plan, "{wire}");
+        }
+    }
+
+    /// A random plan over every variant, both `run-as` forms, both redirect
+    /// targets and both write modes. Not necessarily valid or runnable: this
+    /// exercises the wire form only.
+    fn random_wire_plan(rng: &mut crate::prop::Rng, depth: usize) -> Plan {
+        const WORD: &[u8] = b"abc /-_.=x";
+        let word = |rng: &mut crate::prop::Rng| rng.string(WORD, 6);
+        if depth == 0 {
+            return Plan::Exec { argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect() };
+        }
+        let sub = |rng: &mut crate::prop::Rng| Box::new(random_wire_plan(rng, depth - 1));
+        let subs = |rng: &mut crate::prop::Rng| (0..rng.below(3)).map(|_| random_wire_plan(rng, depth - 1)).collect();
+        match rng.below(13) {
+            0 => Plan::Exec { argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect() },
+            1 => Plan::Run { steps: subs(rng) },
+            2 => Plan::Seq { steps: subs(rng) },
+            3 => Plan::Alt { steps: subs(rng) },
+            4 => Plan::Pipe { stages: subs(rng) },
+            5 => Plan::Redirect {
+                stream: [Stream::Stdout, Stream::Stderr, Stream::Both][rng.below(3)],
+                target: if rng.below(2) == 0 {
+                    RedirTarget::DevNull
+                } else {
+                    RedirTarget::File {
+                        path: word(rng),
+                        mode: [WriteMode::Truncate, WriteMode::Append][rng.below(2)],
+                    }
+                },
+                body: sub(rng),
+            },
+            6 => Plan::WithStdinFrom { path: word(rng), body: sub(rng) },
+            7 => Plan::Setenv { key: word(rng), value: word(rng), body: sub(rng) },
+            8 => Plan::Chdir { dir: word(rng), body: sub(rng) },
+            9 => Plan::RunAs { who: RunAs::Root, body: sub(rng) },
+            10 => Plan::RunAs { who: RunAs::User { name: word(rng) }, body: sub(rng) },
+            11 => Plan::WithAcceptedExitCodes {
+                codes: (0..rng.below(3)).map(|_| rng.below(256) as i32).collect(),
+                body: sub(rng),
+            },
+            _ => Plan::Shell { shell: [ShellProc::Sh, ShellProc::Bash][rng.below(2)], script: word(rng) },
+        }
+    }
+
+    /// The wire conversion is lossless: every plan survives a JSON round trip.
+    #[test]
+    fn prop_plan_wire_roundtrip() {
+        let mut rng = crate::prop::Rng::new(0x89_13_00);
+        for _ in 0..5000 {
+            let plan = random_wire_plan(&mut rng, 4);
+            let json = serde_json::to_string(&plan).unwrap();
+            let back: Plan = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{e}: {json}"));
+            assert_eq!(back, plan, "{json}");
+        }
+    }
+
+    /// A key the plan grammar does not define is rejected wherever it appears
+    /// (#89, 1.3.0): on every node type, deep inside a tree, inside a redirect
+    /// target, and `name` on a `run-as root` (which used to be dropped).
+    #[test]
+    fn plan_rejects_unknown_keys_at_every_level() {
+        let id = r#"{"op":"exec","argv":["id"]}"#;
+        let cases: Vec<(String, &str)> = vec![
+            (r#"{"op":"exec","argv":["id"],"x":1}"#.into(), "unknown field `x`"),
+            (format!(r#"{{"op":"run","steps":[{id}],"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"seq","steps":[{id}],"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"alt","steps":[{id}],"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"pipe","stages":[{id}],"x":1}}"#), "unknown field `x`"),
+            (
+                format!(r#"{{"op":"redirect","stream":"stdout","target":{{"to":"dev-null"}},"do":{id},"x":1}}"#),
+                "unknown field `x`",
+            ),
+            (format!(r#"{{"op":"with-stdin-from","path":"/f","do":{id},"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"setenv","key":"LANG","value":"C","do":{id},"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"chdir","dir":"/srv","do":{id},"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"run-as","as":"root","do":{id},"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"run-as","as":"user","name":"a","do":{id},"x":1}}"#), "unknown field `x`"),
+            (format!(r#"{{"op":"with-accepted-exit-codes","codes":[1],"do":{id},"x":1}}"#), "unknown field `x`"),
+            (r#"{"op":"shell","shell":"sh","script":"true","x":1}"#.into(), "unknown field `x`"),
+            // Deep in a tree: three levels down.
+            (
+                r#"{"op":"run","steps":[{"op":"chdir","dir":"/srv","do":{"op":"pipe","stages":[{"op":"exec","argv":["id"],"stdin_from":"/etc/shadow"}]}}]}"#.into(),
+                "unknown field `stdin_from`",
+            ),
+            // Inside a redirect target, for both target kinds.
+            (
+                format!(r#"{{"op":"redirect","stream":"stdout","target":{{"to":"file","path":"/o","pth":"/p"}},"do":{id}}}"#),
+                "unknown field `pth`",
+            ),
+            (
+                format!(r#"{{"op":"redirect","stream":"stdout","target":{{"to":"dev-null","path":"/o"}},"do":{id}}}"#),
+                "unknown field `path`",
+            ),
+            // `run-as` keys that contradict `as`.
+            (format!(r#"{{"op":"run-as","as":"root","name":"alice","do":{id}}}"#), "run-as root takes no name"),
+            (format!(r#"{{"op":"run-as","as":"user","do":{id}}}"#), "run-as user needs a name"),
+        ];
+        for (json, want) in &cases {
+            let err = serde_json::from_str::<Plan>(json).expect_err(json).to_string();
+            assert!(err.contains(want), "{json}\n  wanted {want:?}\n  got {err}");
+        }
+    }
+
+    /// Only the plan is strict: an unknown *top-level* request key is still
+    /// accepted (forward compatibility with newer clients), while the same
+    /// request with an unknown key inside `plan` is rejected.
+    #[test]
+    fn request_stays_lenient_but_its_plan_is_strict() {
+        let req = Request::new_plan(String::new(), "s".into(), exec(&["id"]), HashMap::new(), String::new(), false, false);
+        let mut v = serde_json::to_value(&req).unwrap();
+        v["from_a_newer_client"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Request>(v.clone()).is_ok(), "top-level unknown key must be accepted");
+        v["plan"]["x"] = serde_json::json!(1);
+        let err = serde_json::from_value::<Request>(v).expect_err("plan unknown key").to_string();
+        assert!(err.contains("unknown field `x`"), "{err}");
     }
 
     /// `effective_privileged` is true for a top-level privileged flag, and also
