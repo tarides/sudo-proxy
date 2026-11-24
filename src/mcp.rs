@@ -184,7 +184,8 @@ pub struct ExecuteParams {
     /// Rules: paths in chdir / redirect / with-stdin-from must be absolute; a
     /// stream may be redirected at most once along any path; with-stdin-from is
     /// allowed only on the first stage of a pipe; env keys must be shell
-    /// variable names; run-as names a user, never a `#uid`.
+    /// variable names; run-as names a user, never a `#uid`. Unknown keys are
+    /// rejected at any depth (`unknown field …`), never silently ignored.
     /// Semantics to plan around: a `run` (`&&`) runs its steps in order and STOPS
     /// at the first failing step — the earlier steps have already run and their
     /// effects are committed, so make early steps idempotent (or put the
