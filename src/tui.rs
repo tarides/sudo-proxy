@@ -2484,11 +2484,48 @@ mod tests {
         out
     }
 
+    /// The plan section exactly as `prompt_tty` writes it, for a plan that
+    /// compiles (the `⚠ invalid plan` arm has its own test).
     fn plan_output(req: &ValidatedRequest, style: &Style) -> String {
-        let views = plan_display(req).expect("compiles");
+        assert!(plan_display(req).is_ok(), "compiles");
+        plan_section(req, style)
+    }
+
+    fn plan_section(req: &ValidatedRequest, style: &Style) -> String {
         let mut buf = Vec::new();
-        write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, style).expect("write");
+        write_plan_section(&mut buf, req, style).expect("write");
         String::from_utf8(buf).expect("utf8")
+    }
+
+    /// Issue #90: a plan that does not compile shows one `⚠ invalid plan`
+    /// line, and that line is bounded although the error quotes request data
+    /// (here a 10 000-char setenv key: a valid name, but not allowlisted).
+    #[test]
+    fn invalid_plan_line_is_bounded() {
+        let key = "A".repeat(10_000);
+        let req = mk_req(
+            Plan::Setenv {
+                key: key.clone(),
+                value: "x".into(),
+                body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+            },
+            false,
+        );
+        let err = plan_display(&req).err().expect("setenv key is not allowlisted");
+        assert!(err.contains(&key), "the error quotes the key: unbounded without the clip");
+        let label = "⚠ invalid plan: ";
+        for st in [style_for(true), style_for(false)] {
+            let out = plan_section(&req, &st);
+            assert_eq!(out.lines().count(), 1, "one line: {out:?}");
+            let line = strip_csi(out.trim_end_matches('\n'));
+            assert!(
+                line.starts_with(&format!("{label}environment variable not allowed: AAA")),
+                "{line:.80}"
+            );
+            assert!(line.ends_with(" more chars hidden]"), "marker: …{}", &line[line.len() - 40..]);
+            let n = line.chars().count();
+            assert!(n <= label.chars().count() + MAX_DISPLAY_LINE_CHARS + MARKER_MAX, "{n} chars");
+        }
     }
 
     /// The `Steps:` lines and the `Resolves:` lines (block rows included) of a
