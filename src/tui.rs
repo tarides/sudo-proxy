@@ -460,12 +460,13 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
-/// A filesystem-derived path as the prompt shows it: forbidden characters
-/// escaped (#86), then length-bounded (G4.3, #85). Escaping comes first so
-/// that the bound applies to what is actually printed, which escaping can
-/// lengthen, and so that clipping never cuts a raw control character.
-fn shown(path: &str) -> String {
-    clip(&escape_dangerous(path), MAX_DISPLAY_LINE_CHARS)
+/// Request- or filesystem-derived text as one prompt line shows it (a path, an
+/// opaque reason, a plan error): forbidden characters escaped (#86), then
+/// length-bounded (G4.3, #85). Escaping comes first so that the bound applies
+/// to what is actually printed, which escaping can lengthen, and so that
+/// clipping never cuts a raw control character.
+fn shown(text: &str) -> String {
+    clip(&escape_dangerous(text), MAX_DISPLAY_LINE_CHARS)
 }
 
 /// Byte length of the CSI escape sequence (`ESC [`, parameter bytes, then a
@@ -613,6 +614,21 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
     }
 }
 
+/// The plan part of the prompt: the `Command:`/`Steps:`/`Resolves:` block, or
+/// one `⚠ invalid plan` line if the plan does not compile.
+///
+/// The daemon rejects a plan that does not compile before it prompts, so the
+/// error arm is unreachable through the server today. It is bounded anyway
+/// (G4.3, #90): `compile_plan` errors can quote request data, such as a setenv
+/// key of any length.
+fn write_plan_section<W: Write>(w: &mut W, req: &ValidatedRequest, style: &Style) -> io::Result<()> {
+    let Style { bold, reset, .. } = *style;
+    match plan_display(req) {
+        Ok(views) => write_plan_stages(w, &req.exec_plan(), &views, req.privileged, style),
+        Err(e) => writeln!(w, "{bold}⚠ invalid plan: {}{reset}", shown(&e)),
+    }
+}
+
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 /// `eligible` gates whether the session-scoped `a` answer is offered (only for
 /// unprivileged requests on a daemon whose `unattended_eligible` policy is set).
@@ -636,10 +652,7 @@ pub fn prompt_tty(
     // by one resolved binary per literal stage, so a bundle of root effects can
     // no longer hide inside one opaque command. Built from the same
     // `compile_plan` walk the executor uses, so prompt and execution agree.
-    match plan_display(req) {
-        Ok(views) => write_plan_stages(&mut tty_w, &req.exec_plan(), &views, req.privileged, &st)?,
-        Err(e) => writeln!(tty_w, "{bold}⚠ invalid plan: {e}{reset}")?,
-    }
+    write_plan_section(&mut tty_w, req, &st)?;
 
     write_env_line(&mut tty_w, req)?;
 
