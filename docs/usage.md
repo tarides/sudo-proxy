@@ -163,7 +163,8 @@ sudo-request --requester automation apt update
 
 # Send a structured plan (assembled like the MCP execute tool). Drives the full
 # plan surface — exec / run(&&) / seq(;) / alt(||) / pipe / redirect / run-as /
-# setenv / chdir / shell.
+# setenv / chdir / shell. A key the plan grammar does not define is an error,
+# at any depth (`unknown field …`), never silently ignored.
 sudo-request --no-privilege \
     --plan '{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["echo","none"]}]}'
 
