@@ -22,8 +22,9 @@ for the assurance-ladder context behind the security-formalisation entries.
   fingerprint (the values fingerprint stays on the terminal: the log also goes
   to syslog, and a short hash of a weak secret can be brute-forced). A request
   that inherits is recorded with `inherited: true` (and `inherited-env` on the
-  human line) and its resolved programs (`path -> target`). No variable name
-  or value is ever recorded.
+  human line) and its resolved programs (`path -> target`, each path clipped
+  in the middle so the entry, marker included, fits the 256-char field). No
+  variable name or value is ever recorded.
 - **Docs:** `threat-model.md` (B3, B4, leaves 2.4 and 3.8, the residuals),
   `assurance-case.md` (A3, G3.2, G4.2, G4.7, new G7.4), `security.md`,
   `security-audit.md`, `REVIEWING.md` (C1, C8, no-assurance item 7) and a
