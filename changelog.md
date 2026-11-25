@@ -3,7 +3,21 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
-## Unreleased — Pre-release tags publish as pre-releases (#113, 1.3.0)
+## v1.3.0-rc.1 — 2026-11-25 (pre-release)
+
+The first release candidate for 1.3.0: everything on `main` since 1.2.0,
+including the fixes already shipped in the 1.2.1–1.2.3 security releases.
+Install it with `cargo install sudo-proxy --version 1.3.0-rc.1`. Highlights:
+
+- `--inherit-path` and `--inherit-env=PATTERN,…` (#101), with helpers run in
+  a cleared environment and user-writable programs marked at the prompt.
+- Each program is resolved once and pinned (#105); trusted helpers under
+  `/nix/store` are accepted for NixOS `--pkexec`.
+- Unknown plan keys are rejected (#89); an audit log records every request
+  outcome (#65); a strict `no_shell` policy closes the `exec sh -c`
+  loophole (#67).
+
+### Pre-release tags publish as pre-releases (#113)
 
 - A tag whose version has a SemVer pre-release part (`v1.3.0-rc.1`) creates
   the GitHub release with `--prerelease`, publishes the crate to crates.io
@@ -15,7 +29,7 @@ for the assurance-ladder context behind the security-formalisation entries.
 - CLAUDE.md documents the convention, and that `.claude-plugin/plugin.json`
   stays at the last stable version during a pre-release.
 
-## Unreleased — What `--inherit-*` shows and records (#101, 1.3.0)
+### What `--inherit-*` shows and records (#101)
 
 - **`(user-writable)`.** A `Resolves:` entry is marked when the daemon's user
   could replace what runs: it owns or may write the file, the directory it
@@ -52,7 +66,7 @@ step, audit records free of names and values); unit tests for the
 fingerprints, the middle clipping and the markers. The pty goldens are
 unchanged.
 
-## Unreleased — `--inherit-path` and `--inherit-env=PATTERN,…` (#101, 1.3.0)
+### `--inherit-path` and `--inherit-env=PATTERN,…` (#101)
 
 Two daemon flags, off by default and command-line only, for a daemon started
 by hand inside a dev shell (direnv, Nix). The design is the "Full design"
@@ -107,7 +121,7 @@ never runs; every startup refusal; `sudo-proxy-mcp` never passes the flags),
 unit tests in `inherit.rs`, `wrappers.rs` and `executor.rs`. The marker,
 report, audit records and documentation are in the entry above.
 
-## Unreleased — Helpers run with a cleared environment (#101, 1.3.0)
+### Helpers run with a cleared environment (#101)
 
 Two gaps left by 1.2.3 (GHSA-gx9w-4f7x-2gcp), closed before #101's
 `--inherit-path` makes the daemon's `PATH` user-writable on purpose:
@@ -136,7 +150,7 @@ sudo process gets only `TERM`, `LANG` and `LC_*` (a negative control without
 the clearing fails). The test `sudo` shim now logs next to its own copy, since
 it can no longer be told where through its environment.
 
-## Unreleased — Each program is resolved once and pinned (#105, 1.3.0)
+### Each program is resolved once and pinned (#105)
 
 A request's plan was compiled, and every program in it looked up, three
 times: for the `no_shell` check, for the prompt, and for the spawn. The prompt
@@ -195,7 +209,7 @@ swap is one whose contents it could already rewrite. It is a prerequisite for
   the real prompt confirmed the refusal of a symlink retargeted after
   approval.
 
-## Unreleased — Trusted helpers under `/nix/store` are accepted (NixOS `--pkexec`, 1.3.0)
+### Trusted helpers under `/nix/store` are accepted (NixOS `--pkexec`)
 
 The trusted-helper check added for GHSA-gx9w-4f7x-2gcp refused any directory
 that is group- or world-writable. On NixOS `/usr/bin/env` resolves into
@@ -209,7 +223,7 @@ rename or remove root's. Since a directory on the search list can now hold
 other users' entries, every symlink on the helper's path as found must be
 root-owned, or it could be repointed between the check and the spawn.
 
-## Unreleased — Unknown plan keys are rejected (#89, 1.3.0)
+### Unknown plan keys are rejected (#89)
 
 Every plan object accepted and silently dropped keys it does not define. A
 misspelled key (`stdin_from` for `with-stdin-from`, `pth` for a redirect's
@@ -234,7 +248,7 @@ random plans over every variant), `plan_rejects_unknown_keys_at_every_level`,
 `request_stays_lenient_but_its_plan_is_strict`, and
 `plan_unknown_key_rejected_without_prompt` (raw socket, no prompt).
 
-## Unreleased — Bound the `⚠ invalid plan` prompt line (#90)
+### Bound the `⚠ invalid plan` prompt line (#90)
 
 The prompt printed a `compile_plan` error unclipped on its `⚠ invalid plan`
 line, and that error can quote request data: `environment variable not
@@ -250,7 +264,7 @@ through `write_plan_section`, and `plan_disallowed_setenv_rejected_without_promp
 pins the server-side ordering for the one error that quotes request data.
 Sn4.3 lists the line and the two tests.
 
-## Unreleased — wrapper-aware opaque detection (#87)
+### wrapper-aware opaque detection (#87)
 
 **The gap.** The opaque flag and the `no_shell` policy (#67) looked only at a
 stage's `argv[0]`, so `env sh -c …`, `nice bash …`, `timeout 5 sh -c …` and
@@ -271,7 +285,7 @@ stages are now rejected. Tests: unit tables and two properties in
 `tests/pty_no_shell.rs`, a `wrappers` pty golden, corpus cases 06/22 stay
 transparent. Assurance case G4.7.
 
-## Unreleased — Bound every approval-prompt line, not only Command: (#85)
+### Bound every approval-prompt line, not only Command: (#85)
 
 **The gap.** Only the `Command:` line was length-bounded (G4.3 / F3). The
 `Steps:` block capped its number of lines but wrote each line whole, so a
@@ -292,7 +306,7 @@ count bounded, each `Steps:` line a prefix of its unclipped text), the pty test
 `huge_argument_prompt_is_bounded`, and a `long-argument` golden; the existing
 goldens are byte-identical.
 
-## Unreleased — `--pkexec` delegates only single-step privileged requests to pkexec (#88)
+### `--pkexec` delegates only single-step privileged requests to pkexec (#88)
 
 Under `--pkexec`, every `privileged: true` request went to pkexec, one dialog
 per escalated step. A dialog shows a single argv (named `/usr/bin/env`, since
@@ -314,7 +328,7 @@ redirect, with-stdin-from; one `denied` audit record each, none `pkexec`), and
 the pty test `pkexec_flag_multi_step_plan_gets_the_tui_prompt` through the real
 CLI with `DISPLAY` set. G5.4 / Sn5.4 and threat-model leaf 4.5 added.
 
-## Unreleased — Widen the prompt's forbidden-character class (#86)
+### Widen the prompt's forbidden-character class (#86)
 
 `has_dangerous_chars` rejected C0 controls and three zero-width/bidi ranges
 only. DEL and C1 (NEL, CSI, OSC), soft hyphen, ALM, line/paragraph
@@ -347,7 +361,7 @@ held as a table built from the Unicode 16.0.0 UCD
   the property test with valid env keys and multibyte text; and the Kani
   harnesses over the whole `char` domain.
 
-## Unreleased — Audit log for every request outcome (#65)
+### Audit log for every request outcome (#65)
 
 The daemon logged prompted requests and unattended runs, and only with `-v`. It
 did not log replayed ids, stale or malformed `time`, validation failures, human
@@ -367,7 +381,7 @@ line and the peer-UID rejection line are folded into the audit line. The
 covers each outcome and the no-leak properties; the busy test and a pty test
 check the default file path.
 
-## Unreleased — Close the `exec sh -c` loophole; strict `no_shell` policy (#67)
+### Close the `exec sh -c` loophole; strict `no_shell` policy (#67)
 
 **The gap.** Only an explicit `shell` op was flagged *opaque* at the prompt. A
 plain `exec` of `["sh","-c","…"]` (or a flat-pipeline stage) put a whole shell on
@@ -400,7 +414,7 @@ Verified live by driving the real daemon through a pty (`script(1)`): the
 permissive daemon flagged `sh` as opaque and ran on `y`; `--no-shell` returned
 the policy error with no prompt. That probe became backlog item #1 / issue #68.
 
-## Unreleased — a captured `stop` no longer stops a restarted daemon (#63)
+### a captured `stop` no longer stops a restarted daemon (#63)
 
 Replay protection (`SeenIds`) keeps the ids it has seen in memory, one set per
 daemon instance. A `stop` accepted by one instance was therefore accepted
@@ -420,7 +434,7 @@ Tests: `server::tests::check_not_before_start_boundaries`,
 `stop_dated_before_daemon_start_is_rejected` and
 `captured_stop_does_not_stop_restarted_daemon` (the issue's repro).
 
-## Unreleased — `pkexec-cache` check no longer says "not installed" when it cannot read rules.d (#75)
+### `pkexec-cache` check no longer says "not installed" when it cannot read rules.d (#75)
 
 The check mode began with `Path::exists()`, which returns `false` on any error,
 including `EACCES`. On distributions that ship `/etc/polkit-1/rules.d` as
@@ -434,7 +448,7 @@ Tests: `pkexec-cache` unit tests `read_rule_missing_is_none`,
 `read_rule_present_returns_content` and
 `read_rule_unreadable_dir_is_permission_denied` (the issue's case).
 
-## Unreleased — `pkexec-cache` validates the username it writes into the polkit rule (#64)
+### `pkexec-cache` validates the username it writes into the polkit rule (#64)
 
 `pkexec-cache --create` took the username from `SUDO_USER`, `PKEXEC_UID` or
 `LOGNAME`/`USER` without checking it and pasted it into the generated polkit
@@ -453,7 +467,7 @@ Tests: `pkexec-cache` unit tests `validate_username_*`, `expected_content_*`,
 `extract_username_*`, `injected_rule_does_not_check_as_installed` (the issue's
 repro) and `resolve_user_rejects_root_and_unknown_users`.
 
-## Unreleased — the `Resolves:` line names the binary that actually runs (#62)
+### the `Resolves:` line names the binary that actually runs (#62)
 
 The prompt resolved `argv[0]` on the daemon's own PATH, but the executor
 spawned the bare name with a cleared environment, so the child searched the
