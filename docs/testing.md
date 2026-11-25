@@ -218,6 +218,9 @@ pseudo-terminal harness. Three headless-friendly paths:
   reads, termios restoration and the result display. Privileged steps reach
   `tests/shims/sudo`, a stand-in that logs its argv and runs the command
   unescalated, so the literal argv handed to `sudo` is checked end to end.
+  The harness names it with `--sudo-path`: the daemon never takes `sudo`
+  from its own PATH (GHSA-gx9w-4f7x-2gcp), which
+  `planted_sudo_on_daemon_path_never_runs` checks.
   Send keys with `PtyDaemon::answer`, which waits for the tty to enter raw
   mode first; the prompt discards input typed before that.
   `tests/pty_unattended.rs` covers the `a` answer (offered only when eligible,

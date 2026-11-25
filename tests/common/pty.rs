@@ -113,11 +113,14 @@ impl PtyDaemon {
             .arg(&socket)
             .arg("-v")
             .arg("--no-syslog")
+            // GHSA-gx9w-4f7x-2gcp: the daemon never takes `sudo` from its
+            // PATH, so the stand-in is named explicitly.
+            .arg("--sudo-path")
+            .arg(shims.join("sudo"))
             .args(&opts.args);
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         let mut daemon_path: Vec<String> =
             opts.extra_path.iter().map(|p| p.display().to_string()).collect();
-        daemon_path.push(shims.display().to_string());
         daemon_path.push(path);
         cmd.env_clear()
             .env("PATH", daemon_path.join(":"))

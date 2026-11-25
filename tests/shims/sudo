@@ -1,7 +1,8 @@
 #!/bin/sh
 # Test stand-in for sudo (tests/pty_e2e.rs). The daemon spawns
-# `sudo [-u USER] K=V... -- argv`, finding `sudo` on its PATH, where the pty
-# harness puts this directory first. Log the argv exactly as received, then
+# `sudo [-u USER] K=V... -- argv`; the pty harness names this file with
+# `--sudo-path` (the daemon never looks `sudo` up on its PATH, GHSA-gx9w-4f7x-2gcp).
+# Log the argv exactly as received, then
 # run the command as the invoking user. Nothing is ever escalated.
 #
 # Log format: one record per invocation, each argument NUL-terminated, then a

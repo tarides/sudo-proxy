@@ -206,3 +206,29 @@ fn pkexec_flag_multi_step_plan_gets_the_tui_prompt() {
     let log = d.daemon_log();
     assert!(log.contains("mode: local (TUI + pkexec)"), "daemon log: {log}");
 }
+
+/// GHSA-gx9w-4f7x-2gcp, end to end: a `sudo` planted first on the daemon's
+/// own PATH never runs. The approved privileged request goes through the
+/// escalator the daemon was given (`--sudo-path`, the shim), and the startup
+/// report names it.
+#[test]
+fn planted_sudo_on_daemon_path_never_runs() {
+    let plant = tempfile::tempdir_in("/tmp").expect("tempdir");
+    let marker = plant.path().join("PLANTED");
+    let fake = plant.path().join("sudo");
+    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\nexit 97\n", marker.display())).unwrap();
+    std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut d = PtyDaemon::spawn(PtyOpts { extra_path: vec![plant.path().to_path_buf()], ..Default::default() });
+
+    let mut r = req("pty-gx9w", &["echo", "real"], "GHSA-gx9w");
+    r.privileged = true;
+    let h = d.request_async(&r);
+    d.answer(b'y');
+    let resp = h.join().unwrap();
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(common::decode_stdout(&resp), "real\n");
+    assert!(!marker.exists(), "the sudo planted on the daemon's PATH ran");
+    assert_eq!(d.shim_log().len(), 1, "the --sudo-path escalator ran once");
+    let log = d.daemon_log();
+    assert!(log.contains("--sudo-path; not checked"), "daemon log: {log}");
+}

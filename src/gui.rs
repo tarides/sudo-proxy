@@ -1,8 +1,10 @@
 use std::io;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::executor::{plan_display, which};
+use crate::executor::plan_display;
+use crate::helper::{find_trusted, HELPER_PATH};
 use crate::protocol::{escape_dangerous, ValidatedRequest};
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
@@ -29,14 +31,16 @@ impl Prompter for GuiPrompter {
 pub fn prompt_gui(req: &ValidatedRequest, eligible: bool) -> io::Result<PromptResult> {
     let text = format_prompt_text(req);
 
-    if which("zenity").is_some() {
-        if let Ok(result) = prompt_zenity(&text) {
+    // The dialog answers the approval, so it is found like an escalator:
+    // never on the daemon's own PATH (GHSA-gx9w-4f7x-2gcp).
+    if let Ok(zenity) = find_trusted("zenity", false, HELPER_PATH) {
+        if let Ok(result) = prompt_zenity(&zenity, &text) {
             return Ok(result);
         }
     }
 
-    if which("kdialog").is_some() {
-        if let Ok(result) = prompt_kdialog(&text) {
+    if let Ok(kdialog) = find_trusted("kdialog", false, HELPER_PATH) {
+        if let Ok(result) = prompt_kdialog(&kdialog, &text) {
             return Ok(result);
         }
     }
@@ -87,8 +91,8 @@ fn format_prompt_text(req: &ValidatedRequest) -> String {
     lines.join("\n")
 }
 
-fn prompt_zenity(text: &str) -> io::Result<PromptResult> {
-    let status = Command::new("zenity")
+fn prompt_zenity(zenity: &Path, text: &str) -> io::Result<PromptResult> {
+    let status = Command::new(zenity)
         .args(["--question", "--title=Command Request", "--timeout=60"])
         .arg(format!("--text={text}"))
         .stdin(Stdio::null())
@@ -99,8 +103,8 @@ fn prompt_zenity(text: &str) -> io::Result<PromptResult> {
     map_zenity_status(status.code())
 }
 
-fn prompt_kdialog(text: &str) -> io::Result<PromptResult> {
-    let status = Command::new("kdialog")
+fn prompt_kdialog(kdialog: &Path, text: &str) -> io::Result<PromptResult> {
+    let status = Command::new(kdialog)
         .args(["--yesno", text, "--title", "Command Request"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
