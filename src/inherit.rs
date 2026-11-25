@@ -273,7 +273,11 @@ impl Inherited {
             let mut tags = Vec::new();
             if e.missing {
                 tags.push("missing");
-            } else if dir_writable_by_me(Path::new(&e.dir)) {
+            }
+            // A missing entry is user-writable if the user could create it:
+            // its nearest existing directory is the one to ask about.
+            let existing = Path::new(&e.dir).ancestors().find(|a| a.exists());
+            if existing.is_some_and(dir_controlled_by_me) {
                 tags.push("user-writable");
             }
             let tags = if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) };
@@ -294,12 +298,17 @@ impl Inherited {
                 let _ = writeln!(out, "  skipped: {}", self.skipped.join(" "));
             }
         }
-        let _ = writeln!(
-            out,
-            "  fingerprint: names+PATH {}, names+values {} (compare with the last start)",
-            self.names_fingerprint(),
-            self.values_fingerprint()
-        );
+        if self.mode == InheritMode::Env {
+            let _ = writeln!(
+                out,
+                "  fingerprint: names+PATH {}, names+values {} (compare with the last start)",
+                self.names_fingerprint(),
+                self.values_fingerprint()
+            );
+        } else {
+            // No variables: both fingerprints would be the same hash.
+            let _ = writeln!(out, "  fingerprint: PATH {} (compare with the last start)", self.names_fingerprint());
+        }
         out
     }
 }
@@ -316,7 +325,14 @@ fn short(h: Sha256) -> String {
 }
 
 /// Whether the daemon's effective uid may write `dir` (ACLs count).
-fn dir_writable_by_me(dir: &Path) -> bool {
+/// Whether the daemon's user owns `dir` or may write it (ACLs count): either
+/// way it can change what the directory holds.
+fn dir_controlled_by_me(dir: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let euid = unsafe { libc::geteuid() };
+    if std::fs::metadata(dir).is_ok_and(|m| m.uid() == euid) {
+        return true;
+    }
     let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else {
         return false;
     };
@@ -560,6 +576,25 @@ mod tests {
         assert!(r.contains("variables: A SECRET"), "{r}");
         assert!(!r.contains("=1") && !r.contains("=s"), "values never shown: {r}");
         assert!(r.contains(&one.names_fingerprint()) && r.contains(&one.values_fingerprint()), "{r}");
+    }
+
+    /// The report marks a missing entry user-writable when the user could
+    /// create it, and `--inherit-path` prints one fingerprint, not two equal ones.
+    #[test]
+    fn report_marks_missing_entries_and_path_mode_has_one_fingerprint() {
+        if uid() == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let venv = format!("{}/.venv/bin", d.path().display());
+        let path = format!("{venv}:/usr/bin");
+        let p = Inherited::from_env(InheritMode::Path, vec![], env(&[("PATH", &path)]), uid()).unwrap();
+        let r = p.report();
+        assert!(r.contains(&format!("{venv} (missing, user-writable)")), "{r}");
+        assert!(r.contains("    /usr/bin\n"), "{r}");
+        assert!(r.contains(&format!("fingerprint: PATH {} (", p.names_fingerprint())), "{r}");
+        assert!(!r.contains("names+values"), "{r}");
     }
 
     #[test]

@@ -1281,6 +1281,11 @@ mod tests {
         let out = clip_middle(&long, AUDIT_PATH_CHARS);
         assert!(out.starts_with("/tmp/ddd") && out.ends_with("/bin/devtool"), "{out}");
         assert!(out.contains("more chars hidden"), "{out}");
+        // The worst case: paths of PATH_MAX (4095 bytes, so a 4-digit hidden
+        // count) on both sides of `->`, plus the marker.
+        let max = format!("/{}", "d".repeat(4094));
+        let out = clip_middle(&max, AUDIT_PATH_CHARS);
+        assert!(out.contains("[4005 more chars hidden]"), "{out}");
         let entry = format!("{out} -> {out} (user-writable)");
         assert!(entry.chars().count() <= 256, "{}", entry.chars().count());
         assert_eq!(clip_middle("/usr/bin/x", AUDIT_PATH_CHARS), "/usr/bin/x");

@@ -1116,7 +1116,11 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                         reason
                     } else {
                         match path {
-                            Some(p) => format!("{reason}: {}", shown(&p.path.display().to_string())),
+                            Some(p) => format!(
+                                "{reason}: {}{}",
+                                shown_path(&p.path.display().to_string()),
+                                writable_tag(p, style)
+                            ),
                             None if o.is_shell => "shell not found in PATH".to_string(),
                             None => format!("{reason} (not found in PATH)"),
                         }
@@ -2704,6 +2708,21 @@ mod tests {
         assert!(resolve_detail(Some(&r), &st).ends_with("(user-writable)"));
     }
 
+    /// An opaque program's path carries the marker too (#101).
+    #[test]
+    fn opaque_program_is_marked_user_writable() {
+        let req = mk_req(ex(&["sh", "-c", "echo hi"]), false);
+        let mut views = plan_display(&req).expect("compiles");
+        let r = views[0].programs[0].resolved.as_mut().expect("sh resolves");
+        r.user_writable = true;
+        let st = style_for(true);
+        let mut buf = Vec::new();
+        write_resolve_block(&mut buf, &views, &st).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let line = out.lines().find(|l| l.contains("opaque — ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("/sh (user-writable)"), "{out}");
+    }
+
     #[test]
     fn inherit_line_names_the_flag_and_code_loading_names_only() {
         let st = style_for(true);
@@ -2878,6 +2897,25 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The longest `Resolves:` line with the `(user-writable)` marker: both
+    /// sides of `->` clipped at their maximum, the marker kept. The property
+    /// test above resolves real programs, which are never marked.
+    #[test]
+    fn user_writable_resolves_line_stays_bounded() {
+        let long = format!("/{}", "d".repeat(4094));
+        let mut r = Resolved::fake(&long);
+        r.canonical = Some(std::path::PathBuf::from(format!("/{}", "e".repeat(4094))));
+        r.user_writable = true;
+        for st in [style_for(false), style_for(true)] {
+            let mut buf = Vec::new();
+            write_resolves_line(&mut buf, &format!("{}x", "n".repeat(4000)), Some(&r), &st).unwrap();
+            let out = String::from_utf8(buf).unwrap();
+            let line = strip_csi(out.lines().next().unwrap());
+            assert!(line.ends_with("(user-writable)"), "{line}");
+            assert!(line.chars().count() <= PLAN_BOUND, "line of {} chars", line.chars().count());
         }
     }
 
