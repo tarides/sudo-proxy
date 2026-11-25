@@ -345,11 +345,9 @@ fn inherit_config(
             inh.code_loading.join(", ")
         ));
     }
-    eprintln!(
-        "sudo-proxy: {flag}: requests with no escalated step run with this PATH ({} entries)          and {} inherited variable(s)",
-        inh.path_entries.len(),
-        inh.vars.len()
-    );
+    // The startup report: PATH entries, inherited names (never values) and
+    // the fingerprints, so a changed dev shell is visible at each start.
+    eprint!("{}", inh.report());
     Some(Arc::new(inh))
 }
 

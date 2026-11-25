@@ -267,6 +267,14 @@ the cap stays covered by CI.
   *Operational note:* the ssh invocation sets no `StrictHostKeyChecking`, so
   first-contact MITM depends on the user's ssh config — document the requirement that
   remote hosts be in `known_hosts` before use, or pin `StrictHostKeyChecking=accept-new`.
+- **Inherited environment (#101, added after the audit).** `--inherit-path` /
+  `--inherit-env` are command-line only and refused with `--host`; only
+  requests with no escalated step inherit, and `compile_plan` refuses any
+  escalated leaf that would; the `sudo` process gets a cleared environment
+  (`TERM`, `LANG`, `LC_*`); the inherited `PATH` is checked at startup (owner
+  and write bits up to `/`); wildcards never match code-loading, terminal or
+  `SSH_AUTH_SOCK` names. (`inherit.rs`, `executor.rs` `build_command`,
+  `tests/inherit.rs`)
 - **Agent forwarding.** `forward_agent` defaults false; privileged+forward_agent
   hard-rejected; request-supplied `SSH_AUTH_SOCK` rejected; socket sourced from the
   daemon's own env. (`server.rs:549-556`, `executor.rs:263-266`)

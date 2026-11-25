@@ -17,6 +17,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
+use sha2::{Digest, Sha256};
+
 /// Which flag turned inheritance on (`--inherit-env` implies `--inherit-path`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InheritMode {
@@ -225,6 +227,100 @@ impl Inherited {
     pub fn has(&self, name: &str) -> bool {
         name == "PATH" || self.vars.contains_key(name)
     }
+
+    /// A short fingerprint of the inherited names and the `PATH` entries.
+    /// Goes to the terminal and to the audit startup record.
+    pub fn names_fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        feed(&mut h, &self.path);
+        for k in self.vars.keys() {
+            feed(&mut h, k);
+        }
+        short(h)
+    }
+
+    /// A short fingerprint of the inherited names *and values* (and `PATH`).
+    /// Shown on the daemon's terminal only, never in the audit record: the
+    /// audit log also goes to syslog, and a short hash of a low-entropy
+    /// secret can be brute-forced offline.
+    pub fn values_fingerprint(&self) -> String {
+        let mut h = Sha256::new();
+        feed(&mut h, &self.path);
+        for (k, v) in &self.vars {
+            feed(&mut h, k);
+            feed(&mut h, v);
+        }
+        short(h)
+    }
+
+    /// The startup report printed to the daemon's terminal: the patterns,
+    /// each `PATH` entry (marked user-writable or missing), the inherited
+    /// names without their values (code-loading ones flagged), the skipped
+    /// entries, and both fingerprints. Everything filesystem- or
+    /// environment-derived is escaped.
+    pub fn report(&self) -> String {
+        use std::fmt::Write;
+        let esc = crate::protocol::escape_dangerous;
+        let mut out = String::new();
+        let flag = self.mode.flag();
+        let _ = writeln!(out, "sudo-proxy: {flag}: requests with no escalated step run with:");
+        if self.mode == InheritMode::Env {
+            let pats: Vec<String> = self.patterns.iter().map(ToString::to_string).collect();
+            let _ = writeln!(out, "  patterns: {}", pats.join(","));
+        }
+        let _ = writeln!(out, "  PATH, in order:");
+        for e in &self.path_entries {
+            let mut tags = Vec::new();
+            if e.missing {
+                tags.push("missing");
+            } else if dir_writable_by_me(Path::new(&e.dir)) {
+                tags.push("user-writable");
+            }
+            let tags = if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) };
+            let _ = writeln!(out, "    {}{tags}", esc(&e.dir));
+        }
+        if self.mode == InheritMode::Env {
+            if self.vars.is_empty() {
+                let _ = writeln!(out, "  variables: none matched");
+            } else {
+                let names: Vec<String> = self
+                    .vars
+                    .keys()
+                    .map(|k| if self.code_loading.contains(k) { format!("{k} (code-loading)") } else { k.clone() })
+                    .collect();
+                let _ = writeln!(out, "  variables: {}", names.join(" "));
+            }
+            if !self.skipped.is_empty() {
+                let _ = writeln!(out, "  skipped: {}", self.skipped.join(" "));
+            }
+        }
+        let _ = writeln!(
+            out,
+            "  fingerprint: names+PATH {}, names+values {} (compare with the last start)",
+            self.names_fingerprint(),
+            self.values_fingerprint()
+        );
+        out
+    }
+}
+
+/// Hash one field, length-prefixed so field boundaries cannot shift.
+fn feed(h: &mut Sha256, s: &str) {
+    h.update((s.len() as u64).to_be_bytes());
+    h.update(s.as_bytes());
+}
+
+/// The first 12 hex digits of the digest.
+fn short(h: Sha256) -> String {
+    h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether the daemon's effective uid may write `dir` (ACLs count).
+fn dir_writable_by_me(dir: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
 }
 
 /// Check the daemon's `PATH` for `--inherit-path`, returning its entries.
@@ -445,6 +541,25 @@ mod tests {
 
         let p = Inherited::from_env(InheritMode::Path, vec![], e, uid()).unwrap();
         assert!(p.vars.is_empty() && p.skipped.is_empty());
+    }
+
+    #[test]
+    fn fingerprints_track_names_and_values_separately() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = d.path().display().to_string();
+        let build = |v: &str| {
+            let e = env(&[("PATH", &path), ("A", v), ("SECRET", "s")]);
+            Inherited::from_env(InheritMode::Env, parse_patterns("A,SECRET").unwrap(), e, uid()).unwrap()
+        };
+        let (one, two) = (build("1"), build("2"));
+        assert_eq!(one.names_fingerprint(), two.names_fingerprint());
+        assert_ne!(one.values_fingerprint(), two.values_fingerprint());
+        assert_eq!(one.names_fingerprint().len(), 12);
+        let r = one.report();
+        assert!(r.contains("variables: A SECRET"), "{r}");
+        assert!(!r.contains("=1") && !r.contains("=s"), "values never shown: {r}");
+        assert!(r.contains(&one.names_fingerprint()) && r.contains(&one.values_fingerprint()), "{r}");
     }
 
     #[test]

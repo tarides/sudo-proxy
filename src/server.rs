@@ -508,6 +508,22 @@ pub fn run(
     let audit = Arc::new(AuditLog::open(&config.audit).map_err(|e| {
         io::Error::new(e.kind(), format!("cannot open audit log: {e}"))
     })?);
+    // `--inherit-path` / `--inherit-env` (#101): a startup record, with the
+    // names-and-PATH fingerprint only (the values one stays on the terminal).
+    // No variable name is recorded: the patterns stay on the terminal.
+    if let Some(inh) = &config.inherit {
+        audit.record(&Event {
+            outcome: Some(Outcome::Startup),
+            detail: Some(format!(
+                "{} path_entries={} variables={} fingerprint={}",
+                inh.mode.flag(),
+                inh.path_entries.len(),
+                inh.vars.len(),
+                inh.names_fingerprint()
+            )),
+            ..Default::default()
+        });
+    }
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
     crate::executor::raise_fd_limit();
@@ -925,6 +941,10 @@ fn handle_connection(
         }
     };
     let views = prepared.views();
+    if prepared.inherit().is_some() {
+        ev.inherited = true;
+        ev.programs = audit_programs(views);
+    }
 
     // Strict no-shell policy: reject any opaque stage (a `Shell` node, or a
     // shell, inline-code interpreter or runner, directly or behind a wrapper)
@@ -1084,6 +1104,28 @@ fn handle_connection(
     audit.record(&ev.with_response(&resp));
 
     let _ = write_response(&mut stream, &resp);
+}
+
+/// Each step's programs as resolved and pinned, for the audit record of a
+/// request that runs with the daemon environment (#101): `path`, or
+/// `path -> canonical` when they differ, plus ` (user-writable)`.
+fn audit_programs(views: &[LeafView]) -> Vec<String> {
+    views
+        .iter()
+        .flat_map(|v| v.programs.iter())
+        .filter_map(|p| p.resolved.as_ref())
+        .map(|r| {
+            let path = r.path.display().to_string();
+            let mut s = match r.canonical() {
+                Some(c) if c != r.path => format!("{path} -> {}", c.display()),
+                _ => path,
+            };
+            if r.user_writable {
+                s.push_str(" (user-writable)");
+            }
+            s
+        })
+        .collect()
 }
 
 /// The strict `no_shell` policy's refusal, if any stage is opaque (a `Shell`

@@ -117,6 +117,10 @@ pub enum Outcome {
     Timeout,
     Ping,
     Stop,
+    /// The daemon started with `--inherit-path` / `--inherit-env` (#101);
+    /// `detail` names the flag, counts, and the names-and-`PATH`
+    /// fingerprint; never a variable name or value.
+    Startup,
     /// The prompt itself failed (I/O error on the terminal).
     PromptError,
     Rejected(Reject),
@@ -133,6 +137,7 @@ impl Outcome {
             Outcome::Timeout => "timeout".into(),
             Outcome::Ping => "ping".into(),
             Outcome::Stop => "stop".into(),
+            Outcome::Startup => "startup".into(),
             Outcome::PromptError => "prompt_error".into(),
             Outcome::Rejected(r) => format!("rejected:{}", r.as_str()),
         }
@@ -161,6 +166,12 @@ pub struct Event {
     pub detail: Option<String>,
     pub status: Option<Status>,
     pub exit_codes: Vec<i32>,
+    /// The request ran with the daemon environment (#101). Its variable
+    /// names and values are never recorded.
+    pub inherited: bool,
+    /// For an inheriting request, each step's programs as resolved and
+    /// pinned: `path` or `path -> canonical target`.
+    pub programs: Vec<String>,
 }
 
 impl Event {
@@ -196,6 +207,10 @@ struct Record<'a> {
     status: Option<Status>,
     #[serde(skip_serializing_if = "<[i32]>::is_empty")]
     exit_codes: &'a [i32],
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    inherited: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    programs: Vec<String>,
 }
 
 pub struct AuditLog {
@@ -258,6 +273,8 @@ impl AuditLog {
                 detail: ev.detail.as_deref().map(safe),
                 status: ev.status,
                 exit_codes: &ev.exit_codes,
+                inherited: ev.inherited,
+                programs: ev.programs.iter().map(|p| safe(p)).collect(),
             };
             if let Ok(mut json) = serde_json::to_string(&rec) {
                 json.push('\n');
@@ -345,6 +362,9 @@ fn human_line(time: &str, ev: &Event, outcome: Outcome) -> String {
     }
     if let Some(p) = ev.privileged {
         line.push_str(if p { " privileged" } else { " unprivileged" });
+    }
+    if ev.inherited {
+        line.push_str(" inherited-env");
     }
     line.push(' ');
     line.push_str(&outcome.label());

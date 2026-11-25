@@ -121,7 +121,36 @@ since `find` runs it from each match's directory. PATH entries that are not
 absolute are never searched.
 
 Pinning fixes which file runs, not its contents: a file the requester can
-write can still be rewritten in place (see the threat model, 3.7).
+write can still be rewritten in place (see the threat model, 3.7). The
+`Resolves:` lines mark such a program `(user-writable)`: the daemon's user
+may write the file, the directory it was found in, or its symlink target's
+directory. A PATH candidate is taken only if the daemon's user may execute it
+(an effective-UID access check, as `execvp` does), so a decoy without execute
+permission cannot make the prompt show one file while a wrapper's own lookup
+runs a later one. A long path is clipped in the middle, keeping its end.
+
+**Inherited environment (`--inherit-path`, `--inherit-env`, #101).** A daemon
+started by hand in a dev shell can hand that shell's `PATH`, and the
+variables `--inherit-env=PATTERN,…` names, to requests that have **no
+escalated step**. Such a request's programs are resolved, pinned and shown
+on the inherited `PATH` instead of the login one, by the same rules as
+above; a request with `privileged` or a `run-as` anywhere inherits nothing,
+in none of its steps. Both flags are command-line only, refused with
+`--host`, never passed by `sudo-proxy-mcp`, and exclude the `a` answer. At
+startup every `PATH` entry must be absolute and free of characters the
+prompt rejects, and every directory up to `/` must be owned by root or the
+daemon's user and not writable by group or others, except a root-owned
+sticky directory (`/nix/store`) or a directory the user owns whose group is
+the user's private group with no other member. Wildcards (`PREFIX*`, `*`)
+never match code-loading variables (`LD_*`, `PYTHONPATH`, `NODE_OPTIONS`,
+…), terminal and display variables, or `SSH_AUTH_SOCK`, which is never
+inherited. A request that inherits shows `Env: daemon environment (…)` and
+any code-loading names it carries, never values; the audit record says it
+inherited and lists the resolved programs, never names or values. The
+startup report lists the `PATH` entries and the inherited names, with two
+fingerprints to compare across starts. See the threat model for what
+remains (the dev shell's own trustworthiness, values returned in output,
+shebang interpreters).
 
 The escalator itself is not looked up on the daemon's PATH either, since that
 PATH often starts with directories the daemon's user can write
@@ -143,6 +172,8 @@ is skipped, never run. On Debian/Ubuntu `/usr/local/bin` is group-writable
 (command line only, not forwarded with `--host`) names `sudo` explicitly for
 layouts the list does not cover; only its form is checked (an absolute path
 to an executable file), not its ownership, and the daemon says so when it
-starts (GHSA-gx9w-4f7x-2gcp). The `env -C / -- true` probe runs with a
+starts (GHSA-gx9w-4f7x-2gcp). This also holds with `--inherit-path`: an
+inherited `PATH` decides what an unprivileged step's programs resolve to,
+never which escalator runs a root step. The `env -C / -- true` probe runs with a
 cleared environment and that fixed list as its `PATH`, so the `true` it runs
 is never taken from the daemon's `PATH` either.
