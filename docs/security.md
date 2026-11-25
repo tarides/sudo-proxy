@@ -92,7 +92,12 @@ PATH often starts with directories the daemon's user can write
 (`/run/wrappers/bin` followed by the default login PATH), and a candidate is
 used only if it and every directory above it are owned by root and not
 group/world-writable, and, for `sudo` / `pkexec`, the file is setuid. A
-candidate this user can write through an ACL is refused too. A planted file
+candidate this user can write through an ACL is refused too. A root-owned
+sticky directory (NixOS's `/nix/store`, `root:nixbld 1775`, where
+`/usr/bin/env` resolves) passes even though it is group-writable: others can
+add entries there but cannot rename or remove root's. Because others can add
+entries, every symlink on the path as found must be owned by root, so no one
+else can repoint it between the check and the spawn. A planted file
 is skipped, never run. On Debian/Ubuntu `/usr/local/bin` is group-writable
 (`root:staff 2775`), so a `sudo` installed there is skipped in favour of
 `/usr/bin/sudo`; `-v` prints which one the daemon uses. `--sudo-path PATH`

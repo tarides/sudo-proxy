@@ -3,6 +3,20 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Trusted helpers under `/nix/store` are accepted (NixOS `--pkexec`, 1.3.0)
+
+The trusted-helper check added for GHSA-gx9w-4f7x-2gcp refused any directory
+that is group- or world-writable. On NixOS `/usr/bin/env` resolves into
+`/nix/store` (`root:nixbld 1775`), so the `env` that `--pkexec` mode probes
+for `-C` was refused, and every escalated request under `--pkexec` failed
+with "pkexec mode needs an `env` that supports -C". The released 1.2.3 is not
+affected: it has no such probe, and `sudo` / `pkexec` come from
+`/run/wrappers/bin`. The check now accepts a root-owned sticky directory, as
+the `hosts.json` check already did: others can add entries there but cannot
+rename or remove root's. Since a directory on the search list can now hold
+other users' entries, every symlink on the helper's path as found must be
+root-owned, or it could be repointed between the check and the spawn.
+
 ## Unreleased — Unknown plan keys are rejected (#89, 1.3.0)
 
 Every plan object accepted and silently dropped keys it does not define. A
