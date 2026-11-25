@@ -38,6 +38,12 @@ struct Opts {
     /// `--allow-injectable-tty`: no `hosts.json` or environment equivalent,
     /// never forwarded by `--host`, never passed by `sudo-proxy-mcp`.
     sudo_path: Option<PathBuf>,
+    /// `--inherit-path` (#101). CLI only, like `--sudo-path`: no `hosts.json`
+    /// or environment equivalent, refused with `--host`, never passed by
+    /// `sudo-proxy-mcp`.
+    inherit_path: bool,
+    /// `--inherit-env=PATTERN,…` (#101), unparsed; implies `--inherit-path`.
+    inherit_env: Option<String>,
 }
 
 fn main() {
@@ -45,6 +51,12 @@ fn main() {
     let opts = parse_args(&args);
 
     if let Some(ref host) = opts.host {
+        // The flags describe the local daemon's environment; a remote daemon
+        // is started over ssh with a fixed command line and never gets them.
+        if opts.inherit_path || opts.inherit_env.is_some() {
+            eprintln!("error: --inherit-path / --inherit-env apply to a daemon started by hand in its dev shell; they are not forwarded with --host");
+            process::exit(1);
+        }
         if opts.sudo_path.is_some() {
             eprintln!("error: --sudo-path applies to the daemon; pass it on the remote host, not with --host");
             process::exit(1);
@@ -139,12 +151,20 @@ fn main() {
         eprintln!("sudo-proxy: ignoring hosts.json policy ({}): {why}", effects.join(", "));
     }
     let policy = policy.and_then(Result::ok);
-    let unattended_eligible = opts
+    let mut unattended_eligible = opts
         .unattended_eligible
         .unwrap_or_else(|| policy.as_ref().is_some_and(|p| p.unattended_eligible));
     let no_shell = opts
         .no_shell
         .unwrap_or_else(|| policy.as_ref().is_none_or(|p| p.no_shell));
+
+    let inherit = inherit_config(
+        opts.inherit_path,
+        opts.inherit_env.as_deref(),
+        opts.unattended_eligible,
+        &mut unattended_eligible,
+        no_shell,
+    );
 
     // GHSA-cpmp-67wf-gwmx: refuse a terminal other same-UID processes can
     // type into, unless overridden. Under --pkexec, privileged requests are
@@ -189,6 +209,7 @@ fn main() {
         unattended_eligible,
         no_shell,
         audit: audit_config(opts.audit_log, opts.no_audit_log, opts.no_syslog),
+        inherit,
         ..Default::default()
     };
 
@@ -284,6 +305,54 @@ fn tty_gate(allow: bool) -> Vec<String> {
     a.injectors
 }
 
+/// Build the `--inherit-path` / `--inherit-env` layer (#101) from the daemon's
+/// own environment, or exit with an error. The flags exclude the `a` answer:
+/// `--unattended-eligible` with them is an error, and a `hosts.json` that sets
+/// `unattended_eligible` is ignored with a message.
+fn inherit_config(
+    inherit_path: bool,
+    inherit_env: Option<&str>,
+    eligible_flag: Option<bool>,
+    unattended_eligible: &mut bool,
+    no_shell: bool,
+) -> Option<Arc<sudo_proxy::inherit::Inherited>> {
+    use sudo_proxy::inherit::{parse_patterns, InheritMode, Inherited};
+    let fail = |msg: String| -> ! {
+        eprintln!("error: {msg}");
+        process::exit(1);
+    };
+    let (mode, patterns) = match inherit_env {
+        Some(v) => (InheritMode::Env, parse_patterns(v).unwrap_or_else(|e| fail(e))),
+        None if inherit_path => (InheritMode::Path, Vec::new()),
+        None => return None,
+    };
+    let flag = mode.flag();
+    if eligible_flag == Some(true) {
+        fail(format!(
+            "{flag} excludes --unattended-eligible: every request with no escalated step              inherits, so each gets its own y/n"
+        ));
+    }
+    if *unattended_eligible {
+        eprintln!("sudo-proxy: ignoring hosts.json policy.unattended_eligible: {flag} excludes the `a` answer");
+        *unattended_eligible = false;
+    }
+    let uid = unsafe { libc::geteuid() };
+    let inh = Inherited::from_env(mode, patterns, std::env::vars_os(), uid)
+        .unwrap_or_else(|e| fail(format!("{flag}: {e}")));
+    if no_shell && !inh.code_loading.is_empty() {
+        fail(format!(
+            "{flag}: with no_shell on, code-loading variables cannot be inherited ({});              drop them from the patterns, or pass --allow-shell",
+            inh.code_loading.join(", ")
+        ));
+    }
+    eprintln!(
+        "sudo-proxy: {flag}: requests with no escalated step run with this PATH ({} entries)          and {} inherited variable(s)",
+        inh.path_entries.len(),
+        inh.vars.len()
+    );
+    Some(Arc::new(inh))
+}
+
 fn parse_args(args: &[String]) -> Opts {
     let mut socket = None;
     let mut host = None;
@@ -301,6 +370,19 @@ fn parse_args(args: &[String]) -> Opts {
     let mut no_syslog = false;
     let mut allow_injectable_tty = false;
     let mut sudo_path = None;
+    let mut inherit_path = false;
+    let mut inherit_env: Option<String> = None;
+    let mut set_inherit_env = |v: Option<&str>| match (v, &inherit_env) {
+        (_, Some(_)) => {
+            eprintln!("error: --inherit-env given twice; list every pattern in one comma-separated value");
+            std::process::exit(1);
+        }
+        (None, _) => {
+            eprintln!("error: --inherit-env requires a value (NAME, PREFIX* or *, comma-separated)");
+            std::process::exit(1);
+        }
+        (Some(v), None) => inherit_env = Some(v.to_string()),
+    };
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -347,9 +429,12 @@ fn parse_args(args: &[String]) -> Opts {
             s if s.starts_with("--sudo-path=") => {
                 sudo_path = s.strip_prefix("--sudo-path=").map(PathBuf::from);
             }
+            "--inherit-path" => inherit_path = true,
+            "--inherit-env" => set_inherit_env(iter.next().map(String::as_str)),
+            s if s.starts_with("--inherit-env=") => set_inherit_env(s.strip_prefix("--inherit-env=")),
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent] [--audit-log PATH | --no-audit-log] [--no-syslog] [--allow-injectable-tty] [--sudo-path PATH]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent] [--audit-log PATH | --no-audit-log] [--no-syslog] [--allow-injectable-tty] [--sudo-path PATH] [--inherit-path | --inherit-env PATTERN,…]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -386,6 +471,15 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              in a root-owned directory on a fixed list (never this process's");
                 eprintln!("                              PATH); PATH given here is not checked for ownership");
                 eprintln!("                              (no hosts.json equivalent; not forwarded with --host)");
+                eprintln!("  --inherit-path              Requests with no escalated step run with this process's PATH,");
+                eprintln!("                              and their programs are resolved on it. Refused at startup if an");
+                eprintln!("                              entry is relative or writable by anyone but you or root.");
+                eprintln!("                              Excludes --unattended-eligible (every request gets y/n)");
+                eprintln!("  --inherit-env PATTERN,…     As --inherit-path, plus the variables named: NAME, PREFIX* or *.");
+                eprintln!("                              Wildcards never match code-loading (LD_*, PYTHONPATH, …) or");
+                eprintln!("                              terminal variables; SSH_AUTH_SOCK is never inherited");
+                eprintln!("                              (both: command line only, for a daemon started by hand in its");
+                eprintln!("                              dev shell; not forwarded with --host)");
                 std::process::exit(0);
             }
             _ => {
@@ -409,6 +503,8 @@ fn parse_args(args: &[String]) -> Opts {
         no_syslog,
         allow_injectable_tty,
         sudo_path,
+        inherit_path,
+        inherit_env,
     }
 }
 

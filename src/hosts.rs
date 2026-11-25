@@ -219,9 +219,39 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let parent = std::fs::canonicalize(parent)
         .map_err(|e| format!("{}: {e}", parent.display()))?;
+    check_dir_chain(&parent, uid, stop_at, None)?;
+
+    let mut s = String::new();
+    file.read_to_string(&mut s)
+        .map_err(|e| format!("{shown}: {e}"))?;
+    Ok(serde_json::from_str::<HostsConfig>(&s)
+        .map(|c| c.policy)
+        .unwrap_or_default())
+}
+
+/// Check `start` (a canonical directory) and every directory above it, up to
+/// `stop_at` (canonicalized; up to `/` if `start` is not under it). Each must
+/// be owned by `uid` or root and not group- or world-writable, except:
+/// - a root-owned sticky directory such as `/tmp`, where others may add
+///   entries but cannot rename or remove existing ones, so nothing checked
+///   below it can be swapped out;
+/// - with `private_gid`, a directory owned by `uid` whose group is that gid
+///   and which is not world-writable: the daemon user's private group has no
+///   other member, so its group write bit grants no one else anything.
+///
+/// Shared by the `hosts.json` policy check and `--inherit-path`'s startup
+/// check on `PATH` entries (#101).
+pub fn check_dir_chain(
+    start: &Path,
+    uid: u32,
+    stop_at: Option<&Path>,
+    private_gid: Option<u32>,
+) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+
     let stop_at = stop_at.and_then(|p| std::fs::canonicalize(p).ok());
-    let stop_at = stop_at.filter(|s| parent.starts_with(s));
-    for dir in parent.ancestors() {
+    let stop_at = stop_at.filter(|s| start.starts_with(s));
+    for dir in start.ancestors() {
         let m = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         if m.uid() != uid && m.uid() != 0 {
             return Err(format!(
@@ -230,11 +260,10 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
                 m.uid()
             ));
         }
-        // A root-owned sticky directory (e.g. /tmp, 1777) is safe to pass
-        // through: others may add entries but cannot rename or remove ours,
-        // so the owner-private subtree below it cannot be swapped out.
         let root_sticky = m.uid() == 0 && m.mode() & 0o1000 != 0;
-        if m.mode() & 0o022 != 0 && !root_sticky {
+        let private_group = private_gid.is_some_and(|g| m.uid() == uid && m.gid() == g)
+            && m.mode() & 0o002 == 0;
+        if m.mode() & 0o022 != 0 && !root_sticky && !private_group {
             return Err(format!(
                 "{}: directory mode {:04o} is group/world-writable",
                 dir.display(),
@@ -245,13 +274,7 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
             break;
         }
     }
-
-    let mut s = String::new();
-    file.read_to_string(&mut s)
-        .map_err(|e| format!("{shown}: {e}"))?;
-    Ok(serde_json::from_str::<HostsConfig>(&s)
-        .map(|c| c.policy)
-        .unwrap_or_default())
+    Ok(())
 }
 
 /// A uid is valid if it's a non-empty ASCII-digit string of at most

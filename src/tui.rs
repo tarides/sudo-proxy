@@ -648,6 +648,7 @@ pub fn prompt_tty(
     write_plan_section(&mut tty_w, req, &st)?;
 
     write_env_line(&mut tty_w, req)?;
+    write_inherit_line(&mut tty_w, req.inherit().map(|i| &**i), &st)?;
 
     // Effective privilege, not the raw `privileged` flag: a plan that smuggles
     // a `RunAs` node is gated exactly like a top-level privileged request, so
@@ -784,6 +785,27 @@ fn write_request_meta<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -
         String::new()
     };
     writeln!(w, "Command: {bold}{}{reset}{agent_tag}", truncate_for_display(&command_summary(req)))
+}
+
+/// Write the fixed `Env:` line of a request that runs with the daemon
+/// environment (`--inherit-path` / `--inherit-env`, #101): which flag, and the
+/// code-loading variables it carries, if any. Values are never shown.
+fn write_inherit_line<W: Write>(
+    w: &mut W,
+    inherit: Option<&crate::inherit::Inherited>,
+    style: &Style,
+) -> io::Result<()> {
+    let Some(i) = inherit else {
+        return Ok(());
+    };
+    let Style { bold, reset, .. } = *style;
+    let loading = if i.code_loading.is_empty() {
+        String::new()
+    } else {
+        let names = clip(&i.code_loading.join(" "), MAX_DISPLAY_CMD_CHARS);
+        format!(" {bold}with code-loading {names}{reset}")
+    };
+    writeln!(w, "Env:     daemon environment ({}){loading}", i.mode.flag())
 }
 
 /// Write the `Env:` line, if the request sets any variable. Each `KEY=value` is
@@ -1083,6 +1105,13 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                 }
                 None if no_path => suffix.trim_start().to_string(),
                 None => format!("{}{suffix}", resolve_detail(path, style)),
+            };
+            // An `env` wrapper that sets or unsets an inherited name (#101).
+            let detail = if prog.overrides_inherited.is_empty() {
+                detail
+            } else {
+                let names = clip(&prog.overrides_inherited.join(" "), MAX_DISPLAY_LINE_CHARS);
+                format!("{detail} {bold}(overrides inherited {names}){reset}")
             };
             if seen.insert(format!("{name}\u{0}{detail}")) {
                 entries.push((name, detail));

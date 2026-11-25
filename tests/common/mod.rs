@@ -116,6 +116,8 @@ pub struct TestServerOpts {
     pub pkexec_only: bool,
     pub mode: Mode,
     pub max_in_flight: usize,
+    /// `--inherit-path` / `--inherit-env` (#101).
+    pub inherit: Option<Arc<sudo_proxy::inherit::Inherited>>,
 }
 
 impl Default for TestServerOpts {
@@ -126,6 +128,7 @@ impl Default for TestServerOpts {
             pkexec_only: false,
             mode: Mode::Local,
             max_in_flight: sudo_proxy::server::DEFAULT_MAX_IN_FLIGHT,
+            inherit: None,
         }
     }
 }
@@ -174,6 +177,7 @@ pub fn start_test_server(opts: TestServerOpts) -> TestServer {
             no_shell: opts.no_shell,
             max_in_flight: opts.max_in_flight,
             audit: audit_cfg,
+            inherit: opts.inherit,
         };
         // Coercion to Arc<dyn Trait> happens here at the function-argument
         // site, where the parameter type is known.

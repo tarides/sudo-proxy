@@ -3,6 +3,59 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — `--inherit-path` and `--inherit-env=PATTERN,…` (#101, 1.3.0)
+
+Two daemon flags, off by default and command-line only, for a daemon started
+by hand inside a dev shell (direnv, Nix). The design is the "Full design"
+section of the #101 design comment.
+
+- **Scope.** Only requests with no escalated step inherit; `privileged` or a
+  `run-as` anywhere means none of the request's steps do. The decision is made
+  once per request in the server (`effective_privileged()`) and passed to the
+  compilation; `compile_plan` refuses an escalated request or leaf that would
+  inherit (fail closed).
+- **Environment of a step**, built in the executor's `Direct` arm only: the
+  inherited variables, then the login defaults for names still unset, then
+  the request's `env` and `setenv` (allowlist unchanged). `PATH` is always the
+  inherited one. Programs, including those behind a wrapper, resolve on it.
+- **Patterns:** `NAME`, `PREFIX*`, `*`. Wildcards never match code-loading
+  variables (`wrappers::CODE_LOADING`), terminal and display variables, or
+  `SSH_AUTH_SOCK`, which is never inherited. Names that are not variable
+  names, or not UTF-8, are skipped.
+- **Startup refusals:** with `--host`; with `--unattended-eligible` (a
+  `hosts.json` `unattended_eligible` is ignored with a message); a malformed
+  `--inherit-env`, or one given twice; a code-loading variable under
+  `no_shell`; a `PATH` that is unset, empty, has an empty or relative entry,
+  a character the prompt rejects, or a directory up to `/` that is owned by
+  neither root nor the daemon's user, or is group/world-writable. Root-owned
+  sticky directories (`/nix/store`) pass, as in the `hosts.json` check, now
+  shared with it (`hosts::check_dir_chain`). **Departure from the posted
+  design:** a group-writable directory also passes when the daemon's user owns
+  it and its group is that user's private group with no other member (the
+  775 default on distributions with user private groups), since that group
+  bit grants no one else anything. Without this, a typical `~/.local/bin`
+  fails the check.
+- **Prompt:** `Env:     daemon environment (--inherit-env)` (or
+  `--inherit-path`), plus the code-loading names carried. An `env` wrapper
+  that sets or unsets an inherited name is marked `(overrides inherited …)`.
+  The server also forces `unattended_eligible` off when the flags are set.
+
+Changes for every daemon, from the same work:
+- An `env` wrapper that sets or unsets any code-loading variable
+  (`PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `DYLD_*`, …), not only
+  `LD_*`, `BASH_ENV`, `ENV` or `IFS`, now makes its stage opaque.
+- A `PATH` candidate is skipped unless the daemon's user can execute it (an
+  effective-UID access check on the pinned inode), as `execvp` does, instead
+  of accepting any file with an execute bit.
+
+Tests: `tests/inherit.rs` (the inherited `PATH` and variables reach an
+unprivileged step; nothing reaches any step of an escalated request, nor
+sudo's argv or environment; a `sudo` planted first on the inherited `PATH`
+never runs; every startup refusal; `sudo-proxy-mcp` never passes the flags),
+unit tests in `inherit.rs`, `wrappers.rs` and `executor.rs`. Still to come
+(the next PR): the user-writable marker, the startup report and its
+fingerprints, audit records and the documentation.
+
 ## Unreleased — Helpers run with a cleared environment (#101, 1.3.0)
 
 Two gaps left by 1.2.3 (GHSA-gx9w-4f7x-2gcp), closed before #101's
