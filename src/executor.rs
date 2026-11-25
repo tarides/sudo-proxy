@@ -206,9 +206,13 @@ impl Resolved {
             })
             .unwrap_or(false);
         let file = if proc_fd_available() { proc_path.as_path() } else { path.as_path() };
-        let user_writable = writable_by_me(file)
-            || path.parent().is_some_and(writable_by_me)
-            || canonical.as_deref().and_then(Path::parent).is_some_and(writable_by_me);
+        // Owning counts as writing: the owner can `chmod u+w` first, as the
+        // helper check (1.2.3) already treats ownership as control.
+        let euid = unsafe { libc::geteuid() };
+        let user_writable = st.st_uid == euid
+            || writable_by_me(file)
+            || path.parent().is_some_and(|d| controlled_by(d, euid))
+            || canonical.as_deref().and_then(Path::parent).is_some_and(|d| controlled_by(d, euid));
         Some(Resolved {
             path,
             canonical,
@@ -308,6 +312,13 @@ fn writable_by_me(path: &Path) -> bool {
         return false;
     };
     unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// Whether `euid` owns `dir` or may write it: either way it can change what
+/// the directory holds.
+fn controlled_by(dir: &Path, euid: u32) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(dir).is_ok_and(|m| m.uid() == euid) || writable_by_me(dir)
 }
 
 fn fd_path(fd: RawFd) -> PathBuf {
@@ -2298,6 +2309,27 @@ mod tests {
         let path = format!("{}:{}", a.display(), b.display());
         let r = resolve_on("tool", "/", &path).expect("resolves");
         assert_eq!(r.path, b.join("tool"), "group-only x bit is not executable by its owner");
+    }
+
+    /// A program the daemon's user owns is `user-writable` even when its mode
+    /// and its directory's deny writing: the owner can `chmod` both (#101).
+    #[test]
+    fn owned_read_only_program_is_user_writable() {
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("ro");
+        std::fs::create_dir(&dir).unwrap();
+        let tool = dir.join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o555)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let r = resolve_on("tool", "/", &dir.display().to_string());
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(r.expect("resolves").user_writable);
+        let sys = resolve_on("env", "/", "/usr/bin:/bin").expect("env");
+        assert!(!sys.user_writable, "{:?}", sys.path);
     }
 
     #[test]

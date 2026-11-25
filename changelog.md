@@ -6,17 +6,21 @@ for the assurance-ladder context behind the security-formalisation entries.
 ## Unreleased — What `--inherit-*` shows and records (#101, 1.3.0)
 
 - **`(user-writable)`.** A `Resolves:` entry is marked when the daemon's user
-  could replace what runs: it may write the file, the directory it was found
-  in, or the symlink target's directory (`Resolved::user_writable`, computed
-  at pin time). The one-line form names such a program even when it would
-  otherwise print nothing. This applies to every daemon.
+  could replace what runs: it owns or may write the file, the directory it
+  was found in, or the symlink target's directory (owning counts, since the
+  owner can `chmod u+w` first; `Resolved::user_writable`, computed at pin
+  time). The one-line form names such a program even when it would otherwise
+  print nothing, and an opaque program's row carries it too. This applies to
+  every daemon.
 - **Middle clipping.** A long `Resolves:` path is clipped in the middle
   (`…[N more chars hidden]…`), so its end and the `->` target stay visible;
   the marker is outside the clipped text.
 - **Startup report** on the daemon's terminal: the patterns, each `PATH` entry
-  (user-writable or missing), the inherited names, never values, with
-  code-loading ones flagged, the skipped entries, and two SHA-256
-  fingerprints (12 hex digits): names + `PATH`, and names + values. New
+  (missing, and user-writable when the user could change it or, if missing,
+  create it), the inherited names, never values, with code-loading ones
+  flagged, the skipped entries, and two SHA-256 fingerprints (12 hex
+  digits): names + `PATH`, and names + values (`--inherit-path` prints the
+  one `PATH` fingerprint). New
   dependency: `sha2` (`cargo deny check` passes).
 - **Audit:** a `startup` record with the flag, counts and the names-and-`PATH`
   fingerprint (the values fingerprint stays on the terminal: the log also goes

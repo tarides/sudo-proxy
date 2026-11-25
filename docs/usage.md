@@ -222,8 +222,9 @@ changing `.envrc`, restart the daemon.
 
 - **Startup checks.** Every `PATH` entry must be absolute, and every directory
   up to `/` owned by root or by you and not writable by group or others (a
-  root-owned sticky directory such as `/nix/store`, or one of yours whose
-  group is your private group, passes). An entry that does not exist yet, such
+  root-owned sticky directory such as `/nix/store` above the entry, or one of
+  yours whose group is your private group, passes; `/tmp` as an entry does
+  not, since anyone can add a program there). An entry that does not exist yet, such
   as `.venv/bin` before `uv sync`, is checked at its nearest existing
   directory and reported missing.
 - **Excluded names.** `PREFIX*` and `*` never match code-loading variables
@@ -232,8 +233,8 @@ changing `.envrc`, restart the daemon.
   them. With `no_shell` on, a code-loading variable cannot be inherited.
   `SSH_AUTH_SOCK` is never inherited; use `forward_agent`.
 - **What you see.** The daemon prints a startup report: the `PATH` entries,
-  the inherited names (never values), and two fingerprints to compare with
-  the last start. Each prompt says `Env:     daemon environment (…)`, and
+  the inherited names (never values), and fingerprints to compare with the
+  last start. Each prompt says `Env:     daemon environment (…)`, and
   marks a program you could have replaced `(user-writable)`.
 - **Not available:** the `a` answer (`--unattended-eligible` is refused), and
   `--host`: a daemon started over ssh has no dev shell. Reach a hand-started

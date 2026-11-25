@@ -123,8 +123,8 @@ absolute are never searched.
 Pinning fixes which file runs, not its contents: a file the requester can
 write can still be rewritten in place (see the threat model, 3.7). The
 `Resolves:` lines mark such a program `(user-writable)`: the daemon's user
-may write the file, the directory it was found in, or its symlink target's
-directory. A PATH candidate is taken only if the daemon's user may execute it
+owns or may write the file, the directory it was found in, or its symlink
+target's directory. A PATH candidate is taken only if the daemon's user may execute it
 (an effective-UID access check, as `execvp` does), so a decoy without execute
 permission cannot make the prompt show one file while a wrapper's own lookup
 runs a later one. A long path is clipped in the middle, keeping its end.
@@ -140,8 +140,10 @@ in none of its steps. Both flags are command-line only, refused with
 startup every `PATH` entry must be absolute and free of characters the
 prompt rejects, and every directory up to `/` must be owned by root or the
 daemon's user and not writable by group or others, except a root-owned
-sticky directory (`/nix/store`) or a directory the user owns whose group is
-the user's private group with no other member. Wildcards (`PREFIX*`, `*`)
+sticky directory above the entry (`/nix/store`, but not `/tmp` as the entry
+itself, where anyone could add a program) or a directory the user owns whose
+group is the user's private group: named after the user, with no other
+member. Wildcards (`PREFIX*`, `*`)
 never match code-loading variables (`LD_*`, `PYTHONPATH`, `NODE_OPTIONS`,
 …), terminal and display variables, or `SSH_AUTH_SOCK`, which is never
 inherited. A request that inherits shows `Env: daemon environment (…)` and

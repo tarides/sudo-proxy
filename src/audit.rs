@@ -347,7 +347,9 @@ fn safe(s: &str) -> String {
 }
 
 fn human_line(time: &str, ev: &Event, outcome: Outcome) -> String {
-    let mut line = format!("{time} [{}]", safe(&ev.id));
+    // Startup records have no request id.
+    let mut line =
+        if ev.id.is_empty() { time.to_string() } else { format!("{time} [{}]", safe(&ev.id)) };
     if let Some(uid) = ev.peer_uid {
         line.push_str(&format!(" uid={uid}"));
     }
