@@ -1096,17 +1096,29 @@ fn run_plan(prepared: &PreparedRequest, mode: EscalationMode, tty_lock: Option<&
     Response::ok_with_truncation(&req.id, stages, &stdout, stdout_truncated)
 }
 
+/// The `env` pkexec runs to re-enter the approved directory: a trusted one
+/// from the helper search list (GHSA-gx9w-4f7x-2gcp), passed by absolute
+/// path. A bare `env` would be looked up by pkexec on the PATH it is given,
+/// whose `/usr/local/bin` precedes `/usr/bin`.
+fn trusted_env() -> Result<&'static Path, String> {
+    static ENV: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+    ENV.get_or_init(|| crate::helper::find_trusted("env", false, crate::helper::HELPER_PATH))
+        .as_deref()
+        .map_err(Clone::clone)
+}
+
 /// Whether this host's `env` understands `-C DIR` (GNU coreutils ≥ 8.28,
-/// uutils). Probed once, on a trusted `env` (GHSA-gx9w-4f7x-2gcp), never one
-/// from the daemon's PATH; none found counts as no.
+/// uutils). Probed once, on the trusted `env` pkexec mode runs
+/// ([`trusted_env`]), never one from the daemon's PATH; none found counts
+/// as no.
 fn env_supports_chdir() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        let trusted = |name| crate::helper::find_trusted(name, false, crate::helper::HELPER_PATH);
-        let (Ok(env), Ok(truth)) = (trusted("env"), trusted("true")) else {
+        let truth = crate::helper::find_trusted("true", false, crate::helper::HELPER_PATH);
+        let (Ok(env), Ok(truth)) = (trusted_env(), truth) else {
             return false;
         };
-        env_chdir_probe(&env, &truth).status().is_ok_and(|s| s.success())
+        env_chdir_probe(env, &truth).status().is_ok_and(|s| s.success())
     })
 }
 
@@ -1455,8 +1467,10 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
                 // that looks like an option from being parsed by `env`, and
                 // `check_pkexec_leaves` has already refused an argv[0] that
                 // `env` would read as a `NAME=VALUE` assignment.
-                // (`pkexec --keep-cwd` exists only in polkit ≥ 121.)
-                c.arg("env");
+                // (`pkexec --keep-cwd` exists only in polkit ≥ 121.) The
+                // probed, trusted `env`, by absolute path: pkexec would look
+                // a bare name up on the PATH below.
+                c.arg(trusted_env()?);
                 c.arg("-C");
                 c.arg(&leaf.cwd);
                 c.arg("--");
@@ -2170,9 +2184,10 @@ mod tests {
         }
     }
 
-    /// Under pkexec an escalated leaf runs as `pkexec env -C DIR -- BIN args`,
-    /// so it keeps the approved cwd; `env` must support `-C`, and a program
-    /// path that `env` would take as `NAME=VALUE` is refused.
+    /// Under pkexec an escalated leaf runs as `pkexec ENV -C DIR -- BIN args`,
+    /// so it keeps the approved cwd; `ENV` is the trusted `env` by absolute
+    /// path, never a name pkexec would look up; `env` must support `-C`, and
+    /// a program path that `env` would take as `NAME=VALUE` is refused.
     #[test]
     fn pkexec_leaves_keep_cwd_through_env() {
         let mut l = leaf(&["id"], LeafRunAs::Root);
@@ -2180,11 +2195,12 @@ mod tests {
         // The program is the trusted absolute pkexec (GHSA-gx9w-4f7x-2gcp);
         // a host without one refuses, and the argv shape is checked where it
         // can be built.
-        if let Ok(pkexec) = crate::helper::pkexec() {
+        if let (Ok(pkexec), Ok(env)) = (crate::helper::pkexec(), trusted_env()) {
             let c = build_command(&l, EscalationMode::Pkexec).unwrap();
             let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
             assert_eq!(Path::new(c.get_program()), pkexec);
-            assert_eq!(args, ["env", "-C", "/srv", "--", "/usr/bin/id"]);
+            assert!(env.is_absolute(), "{env:?}");
+            assert_eq!(args, [&*env.to_string_lossy(), "-C", "/srv", "--", "/usr/bin/id"]);
         } else {
             assert!(build_command(&l, EscalationMode::Pkexec).is_err());
         }

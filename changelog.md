@@ -11,7 +11,14 @@ Two gaps left by 1.2.3 (GHSA-gx9w-4f7x-2gcp), closed before #101's
 - The `env -C / -- true` probe ran with the daemon's environment, so the
   trusted `env` looked `true` up on the daemon's `PATH`. A planted `true`
   could turn pkexec mode off or run code as the daemon's user. The probe now
-  runs with a cleared environment and `PATH` set to the helper search list.
+  runs with a cleared environment, and passes `env` a trusted `true` by
+  absolute path.
+- In pkexec mode, escalated leaves ran `pkexec env -C DIR -- …` with a bare
+  `env`, which pkexec looks up on the `PATH` it is given: the login default,
+  where `/usr/local/bin` (`root:staff 2775` on Debian/Ubuntu) precedes
+  `/usr/bin`. pkexec now gets the trusted `env` by absolute path, the one
+  the probe checked. Hardening rather than a new hole: whoever can write
+  `/usr/local/bin` can already plant a bare-named escalated program there.
 - The `sudo` process got the daemon's full environment. sudo's `env_reset`
   drops most of it, but `env_keep` passes some names on to the root command.
   **Behaviour change:** `sudo` now gets a cleared environment plus `TERM`,

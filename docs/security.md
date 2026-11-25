@@ -125,8 +125,9 @@ write can still be rewritten in place (see the threat model, 3.7).
 
 The escalator itself is not looked up on the daemon's PATH either, since that
 PATH often starts with directories the daemon's user can write
-(`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, the `env` probed for
-`-C`, and the `zenity` / `kdialog` dialogs are searched on a fixed list
+(`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, the `env` pkexec mode
+runs to keep the working directory (and the `true` its `-C` probe runs), and
+the `zenity` / `kdialog` dialogs are searched on a fixed list
 (`/run/wrappers/bin` followed by the default login PATH), and a candidate is
 used only if it and every directory above it are owned by root and not
 group/world-writable, and, for `sudo` / `pkexec`, the file is setuid. A
