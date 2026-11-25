@@ -1105,14 +1105,31 @@ fn env_supports_chdir() -> bool {
         let Ok(env) = crate::helper::find_trusted("env", false, crate::helper::HELPER_PATH) else {
             return false;
         };
-        Command::new(env)
-            .args(["-C", "/", "--", "true"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        env_chdir_probe(&env).status().is_ok_and(|s| s.success())
     })
+}
+
+/// The `env -C / -- true` probe, with a cleared environment and the helper
+/// search list as PATH: `env` looks `true` up itself, and the daemon's own
+/// PATH may hold user-writable directories (#101's `--inherit-path` makes it
+/// so on purpose), where a planted `true` could turn pkexec mode off or run
+/// code as the daemon's user.
+fn env_chdir_probe(env: &Path) -> Command {
+    let mut c = Command::new(env);
+    c.args(["-C", "/", "--", "true"])
+        .env_clear()
+        .env("PATH", crate::helper::HELPER_PATH)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    c
+}
+
+/// The daemon variables the `sudo` process receives: `TERM`, `LANG` and
+/// `LC_*`. Everything else is cleared before sudo runs (#101).
+fn sudo_env_keep(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|n| n == "TERM" || n == "LANG" || n.starts_with("LC_"))
 }
 
 /// Preconditions for running escalated leaves as `pkexec env -C DIR -- argv`:
@@ -1462,6 +1479,14 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
                 // command, not a sudo flag.
                 // Never the daemon's PATH (GHSA-gx9w-4f7x-2gcp).
                 let mut c = Command::new(crate::helper::sudo()?);
+                // The sudo process itself gets a cleared environment plus the
+                // few names a root command needs to render text. sudo's
+                // `env_reset` drops most of the daemon's environment, but
+                // `env_keep` passes some names (`DISPLAY`, …) on to the root
+                // command; nothing from the daemon's environment beyond these
+                // may reach it (#101).
+                c.env_clear();
+                c.envs(std::env::vars_os().filter(|(k, _)| sudo_env_keep(k)));
                 if let LeafRunAs::User(name) = escalated {
                     c.arg("-u");
                     c.arg(name);
@@ -2086,6 +2111,48 @@ mod tests {
             accepted: vec![],
             forward_agent: false,
             stage_id: 0,
+        }
+    }
+
+    /// The `env -C` probe runs with a cleared environment and the helper
+    /// search list as PATH, whatever the daemon's own environment holds (#101).
+    /// A stand-in `env` records the environment it was given.
+    #[test]
+    fn env_chdir_probe_clears_the_environment() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("env.out");
+        let fake = d.path().join("env");
+        std::fs::write(&fake, format!("#!/bin/sh\nexport -p >'{}'\n", out.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(env_chdir_probe(&fake).status().unwrap().success());
+        let seen = std::fs::read_to_string(&out).unwrap();
+        let names: Vec<&str> = seen
+            .lines()
+            .filter_map(|l| l.split_whitespace().nth(1))
+            .map(|kv| kv.split('=').next().unwrap())
+            .collect();
+        // The shell itself may export PWD (and OLDPWD/SHLVL); nothing else.
+        for n in &names {
+            assert!(
+                matches!(*n, "PATH" | "PWD" | "OLDPWD" | "SHLVL"),
+                "unexpected name in the probe's environment: {n}\n{seen}"
+            );
+        }
+        assert!(
+            seen.contains(&format!("PATH='{}'", crate::helper::HELPER_PATH))
+                || seen.contains(&format!("PATH=\"{}\"", crate::helper::HELPER_PATH)),
+            "PATH must be the helper search list: {seen}"
+        );
+    }
+
+    #[test]
+    fn sudo_env_keeps_only_terminal_and_locale_names() {
+        use std::ffi::OsStr;
+        for k in ["TERM", "LANG", "LC_ALL", "LC_CTYPE"] {
+            assert!(sudo_env_keep(OsStr::new(k)), "{k}");
+        }
+        for k in ["DISPLAY", "PATH", "HOME", "XAUTHORITY", "SSH_AUTH_SOCK", "LD_PRELOAD", "TERMINFO", "LANGUAGE", "XLC_X"] {
+            assert!(!sudo_env_keep(OsStr::new(k)), "{k}");
         }
     }
 

@@ -15,8 +15,11 @@ be a shell variable name (`[A-Za-z_][A-Za-z0-9_]*`). Anything else —
 including `LD_PRELOAD`, `LD_LIBRARY_PATH`, `PATH`, etc. — produces an
 error response; nothing is silently stripped. For pkexec and direct
 execution the process environment is cleared before applying the
-allowlist. For sudo mode the process environment is inherited, but
-sudo's own `env_reset` policy handles cleanup. `SSH_AUTH_SOCK` is
+allowlist. For sudo mode the `sudo` process gets a cleared environment
+plus `TERM`, `LANG` and `LC_*` from the daemon's, and the request's
+variables as `K=V` arguments; sudo's own `env_reset` policy then applies. So
+nothing else from the daemon's environment reaches a root command, not even
+the names sudo's `env_keep` would pass through (`DISPLAY`, …). `SSH_AUTH_SOCK` is
 rejected with a specific error; agent forwarding goes through the
 dedicated `forward_agent` field instead (see "SSH agent forwarding"
 in [usage.md](usage.md)).
@@ -139,4 +142,6 @@ is skipped, never run. On Debian/Ubuntu `/usr/local/bin` is group-writable
 (command line only, not forwarded with `--host`) names `sudo` explicitly for
 layouts the list does not cover; only its form is checked (an absolute path
 to an executable file), not its ownership, and the daemon says so when it
-starts (GHSA-gx9w-4f7x-2gcp).
+starts (GHSA-gx9w-4f7x-2gcp). The `env -C / -- true` probe runs with a
+cleared environment and that fixed list as its `PATH`, so the `true` it runs
+is never taken from the daemon's `PATH` either.
