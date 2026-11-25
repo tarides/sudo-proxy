@@ -85,6 +85,41 @@ directly, or as the command after `sudo --` / `pkexec env -C DIR --` — so
 neither `Command`, sudo's `secure_path`, nor `env` performs a second lookup
 that could pick a different file than the prompt showed (issue #62).
 
+The plan is compiled once per request, and each program is pinned when it is
+found (issue #105): the file is opened (`O_PATH`), and its `(dev, ino)` and
+canonical target (the `-> target` the prompt shows) come from that
+descriptor. The `no_shell` check, the prompt and the spawn all read this one
+resolution. If the request waited for the terminal behind another prompt or
+an escalated run, and a pin no longer holds when its turn comes, the plan is
+compiled again before the prompt (and `no_shell` applied to the new
+resolution), so the human approves what is there now. Just before each spawn
+the path must still name the same inode, otherwise the stage is refused
+("changed since it was approved") and nothing runs; in a pipe, no stage
+starts. This includes a binary that an earlier step of the same request
+replaced (`cargo build && ./target/debug/app`, `apt-get upgrade && systemctl
+restart …`): the human approved the old file, so such a step must be sent as
+a request of its own.
+
+A native (ELF) binary running as the daemon's user is executed through its
+descriptor (`/proc/self/fd/N`), so not even that last check leaves a window.
+Anything else, a `#!` script, a script without `#!` (which libc hands to
+`/bin/sh`) or a binfmt_misc format, is given to an interpreter by path, which
+a close-on-exec descriptor cannot serve, so it is spawned by path after the
+check; so is an escalated step, since `sudo` closes inherited descriptors.
+
+Programs run by a wrapper (`env X=1 tool`, `nice`, `timeout`, `xargs`,
+`find -exec`) are pinned too: the wrapper receives the pinned absolute path in
+place of the name (basename unchanged), so it never searches PATH, and a
+wrapped program that was not found is refused before the spawn, like an
+unfound argv[0], even behind a `find` that might match nothing. A pinned path
+containing `=` is refused behind `env`, which would read it as an assignment.
+A `find -execdir` / `-okdir` program named with a `/` is left as written,
+since `find` runs it from each match's directory. PATH entries that are not
+absolute are never searched.
+
+Pinning fixes which file runs, not its contents: a file the requester can
+write can still be rewritten in place (see the threat model, 3.7).
+
 The escalator itself is not looked up on the daemon's PATH either, since that
 PATH often starts with directories the daemon's user can write
 (`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, the `env` probed for

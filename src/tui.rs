@@ -1,12 +1,11 @@
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::time::Duration;
-use std::path::Path;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 
-use crate::executor::{plan_display, LeafPrivilege, LeafView};
+use crate::executor::{LeafPrivilege, LeafView, PreparedRequest, Resolved};
 use crate::protocol::{
     escape_dangerous, Plan, RedirTarget, Response, RunAs, Status, Stream, ValidatedRequest,
 };
@@ -558,7 +557,7 @@ pub enum PromptResult {
 pub trait Prompter: Send + Sync {
     fn prompt(
         &self,
-        req: &ValidatedRequest,
+        req: &PreparedRequest,
         eligible: bool,
         timeout: Duration,
     ) -> io::Result<PromptResult>;
@@ -574,7 +573,7 @@ pub struct TtyPrompter;
 impl Prompter for TtyPrompter {
     fn prompt(
         &self,
-        req: &ValidatedRequest,
+        req: &PreparedRequest,
         eligible: bool,
         timeout: Duration,
     ) -> io::Result<PromptResult> {
@@ -614,26 +613,20 @@ pub(crate) fn classify_key(key: Option<u8>, privileged: bool) -> PromptResult {
     }
 }
 
-/// The plan part of the prompt: the `Command:`/`Steps:`/`Resolves:` block, or
-/// one `⚠ invalid plan` line if the plan does not compile.
+/// The plan part of the prompt: the `Command:`/`Steps:`/`Resolves:` block.
 ///
-/// The daemon rejects a plan that does not compile before it prompts, so the
-/// error arm is unreachable through the server today. It is bounded anyway
-/// (G4.3, #90): `compile_plan` errors can quote request data, such as a setenv
-/// key of any length.
-fn write_plan_section<W: Write>(w: &mut W, req: &ValidatedRequest, style: &Style) -> io::Result<()> {
-    let Style { bold, reset, .. } = *style;
-    match plan_display(req) {
-        Ok(views) => write_plan_stages(w, &req.exec_plan(), &views, req.privileged, style),
-        Err(e) => writeln!(w, "{bold}⚠ invalid plan: {}{reset}", shown(&e)),
-    }
+/// It renders the request's own compiled views, the ones the `no_shell` check
+/// read and the executor will spawn (issue #105). A [`PreparedRequest`] exists
+/// only for a plan that compiled, so there is no error case to show.
+fn write_plan_section<W: Write>(w: &mut W, req: &PreparedRequest, style: &Style) -> io::Result<()> {
+    write_plan_stages(w, &req.exec_plan(), req.views(), req.privileged, style)
 }
 
 /// Display a privilege request on /dev/tty and ask for Y/N confirmation.
 /// `eligible` gates whether the session-scoped `a` answer is offered (only for
 /// unprivileged requests on a daemon whose `unattended_eligible` policy is set).
 pub fn prompt_tty(
-    req: &ValidatedRequest,
+    req: &PreparedRequest,
     eligible: bool,
     timeout: Duration,
 ) -> io::Result<PromptResult> {
@@ -872,7 +865,7 @@ fn write_plan_stages<W: Write>(
         && views[0].redirects.is_empty()
     {
         if let Some(name) = views[0].argv.first() {
-            return write_resolves_line(w, name, views[0].resolved_bin.as_deref(), style);
+            return write_resolves_line(w, name, views[0].resolved_bin.as_ref(), style);
         }
         return Ok(());
     }
@@ -1073,7 +1066,7 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                 (Some(v), false, false) => format!(" {dim}(run by {v}){reset}"),
                 (None, ..) => String::new(),
             };
-            let path = prog.resolved.as_deref().filter(|_| !no_path);
+            let path = prog.resolved.as_ref().filter(|_| !no_path);
             let detail = match view.opaque_reason.as_ref().filter(|o| o.at == i) {
                 Some(o) => {
                     let reason = shown(&o.reason);
@@ -1081,7 +1074,7 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
                         reason
                     } else {
                         match path {
-                            Some(p) => format!("{reason}: {}", shown(&p.display().to_string())),
+                            Some(p) => format!("{reason}: {}", shown(&p.path.display().to_string())),
                             None if o.is_shell => "shell not found in PATH".to_string(),
                             None => format!("{reason} (not found in PATH)"),
                         }
@@ -1122,15 +1115,17 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
 /// through `ValidatedRequest::validate`); the resolved path is built from the
 /// validated `argv[0]`/cwd and the constant login PATH, so escaping it is
 /// defence in depth. Comparisons use the raw strings.
-fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
+fn resolve_detail(resolved: Option<&Resolved>, style: &Style) -> String {
     let Style { bold, dim, reset, .. } = *style;
     let resolved = match resolved {
-        Some(p) => p,
+        Some(r) => r,
         None => return format!("{bold}(not found in PATH){reset}"),
     };
-    let resolved_str = resolved.display().to_string();
-    match std::fs::canonicalize(resolved) {
-        Ok(canonical) => {
+    let resolved_str = resolved.path.display().to_string();
+    // The canonical target read through the pinned descriptor when the plan
+    // was compiled (issue #105), not a fresh `canonicalize` of the path.
+    match resolved.canonical() {
+        Some(canonical) => {
             let canonical_str = canonical.display().to_string();
             // Compared unclipped, shown clipped (G4.3).
             if canonical_str != resolved_str {
@@ -1143,7 +1138,7 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
                 shown(&resolved_str)
             }
         }
-        Err(_) => format!(
+        None => format!(
             "{} {dim}(canonicalize failed){reset}",
             shown(&resolved_str)
         ),
@@ -1152,8 +1147,8 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
 
 /// Write the `Resolves:` line for a command name, given the plan's own
 /// resolution of it (`resolve_command` — the file the executor will spawn,
-/// never a fresh lookup), then `canonicalize`s the result
-/// so symlink redirection — including `/usr/local/bin/foo -> /tmp/evil`
+/// never a fresh lookup), with the canonical target read from the same pin
+/// (issue #105), so symlink redirection — including `/usr/local/bin/foo -> /tmp/evil`
 /// when the absolute path was supplied directly — is visible.
 ///
 /// Display rules:
@@ -1171,24 +1166,24 @@ fn resolve_detail(resolved: Option<&Path>, style: &Style) -> String {
 fn write_resolves_line<W: Write>(
     w: &mut W,
     cmd_name: &str,
-    resolved: Option<&Path>,
+    resolved: Option<&Resolved>,
     style: &Style,
 ) -> io::Result<()> {
     let Style { bold, dim, reset, .. } = *style;
     let resolved = match resolved {
-        Some(p) => p,
+        Some(r) => r,
         None => {
             return writeln!(w, "Resolves: {bold}(not found in PATH){reset}");
         }
     };
-    let resolved_full = resolved.display().to_string();
+    let resolved_full = resolved.path.display().to_string();
     // Branch on the raw, unclipped strings; show them escaped (#86), then
     // clipped (G4.3): neither step may change which rule applies.
     let resolved_differs = resolved_full != *cmd_name;
     let resolved_shown = shown(&resolved_full);
 
-    match std::fs::canonicalize(resolved) {
-        Ok(canonical) => {
+    match resolved.canonical() {
+        Some(canonical) => {
             let canonical_full = canonical.display().to_string();
             let canonical_differs = canonical_full != resolved_full;
             let resolved_str = &resolved_shown;
@@ -1206,7 +1201,7 @@ fn write_resolves_line<W: Write>(
                 ),
             }
         }
-        Err(_) => writeln!(
+        None => writeln!(
             w,
             "Resolves: {resolved_shown} {dim}(canonicalize failed){reset}"
         ),
@@ -1400,6 +1395,7 @@ fn read_key_timeout(file: &File, timeout: Duration) -> io::Result<Option<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::plan_display;
 
     // === Property: the session grant is set only by an interactive `a` keypress
     //
@@ -1451,7 +1447,7 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         let st = Style { bold: "B", dim: "D", reset: "R", root: "ROOT", root_boundary: "RB", user: "USR" };
         let resolved = crate::executor::resolve_command(cmd_name, "/");
-        write_resolves_line(&mut buf, cmd_name, resolved.as_deref(), &st).expect("write");
+        write_resolves_line(&mut buf, cmd_name, resolved.as_ref(), &st).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
 
@@ -2294,7 +2290,7 @@ mod tests {
         );
         let cmd = command_summary(&req);
         assert_eq!(cmd, "(cd /nonexistent-sudo-proxy-dir && (echo body-ran))");
-        let resp = crate::executor::exec_direct(&req, &std::collections::HashMap::new());
+        let resp = crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
         let via_plan =
             String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
         assert!(!via_plan.contains("body-ran"), "executor ran the body: {via_plan:?}");
@@ -2429,7 +2425,7 @@ mod tests {
         let mut rng = crate::prop::Rng::new(0xD15B_1A7E_u64);
         for _ in 0..150 {
             let req = mk_req(random_runnable(&mut rng, 4), false);
-            let resp = crate::executor::exec_direct(&req, &std::collections::HashMap::new());
+            let resp = crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
             let via_plan =
                 String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
             let cmd = command_summary(&req);
@@ -2484,49 +2480,14 @@ mod tests {
         out
     }
 
-    /// The plan section exactly as `prompt_tty` writes it, for a plan that
-    /// compiles (the `⚠ invalid plan` arm has its own test).
+    /// The plan section exactly as `prompt_tty` writes it.
     fn plan_output(req: &ValidatedRequest, style: &Style) -> String {
-        assert!(plan_display(req).is_ok(), "compiles");
-        plan_section(req, style)
-    }
-
-    fn plan_section(req: &ValidatedRequest, style: &Style) -> String {
+        let prepared = crate::executor::prepare(req, &std::collections::HashMap::new()).expect("compiles");
         let mut buf = Vec::new();
-        write_plan_section(&mut buf, req, style).expect("write");
+        write_plan_section(&mut buf, &prepared, style).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
 
-    /// Issue #90: a plan that does not compile shows one `⚠ invalid plan`
-    /// line, and that line is bounded although the error quotes request data
-    /// (here a 10 000-char setenv key: a valid name, but not allowlisted).
-    #[test]
-    fn invalid_plan_line_is_bounded() {
-        let key = "A".repeat(10_000);
-        let req = mk_req(
-            Plan::Setenv {
-                key: key.clone(),
-                value: "x".into(),
-                body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
-            },
-            false,
-        );
-        let err = plan_display(&req).err().expect("setenv key is not allowlisted");
-        assert!(err.contains(&key), "the error quotes the key: unbounded without the clip");
-        let label = "⚠ invalid plan: ";
-        for st in [style_for(true), style_for(false)] {
-            let out = plan_section(&req, &st);
-            assert_eq!(out.lines().count(), 1, "one line: {out:?}");
-            let line = strip_csi(out.trim_end_matches('\n'));
-            assert!(
-                line.starts_with(&format!("{label}environment variable not allowed: AAA")),
-                "{line:.80}"
-            );
-            assert!(line.ends_with(" more chars hidden]"), "marker: …{}", &line[line.len() - 40..]);
-            let n = line.chars().count();
-            assert!(n <= label.chars().count() + MAX_DISPLAY_LINE_CHARS + MARKER_MAX, "{n} chars");
-        }
-    }
 
     /// The `Steps:` lines and the `Resolves:` lines (block rows included) of a
     /// rendered plan, escapes stripped.
@@ -2826,12 +2787,13 @@ mod tests {
             assert!(text.contains("->"), "canonical arm not taken: {text:?}");
         };
 
-        let detail = resolve_detail(Some(&link), &style);
+        let pinned = crate::executor::resolve_command(link.to_str().unwrap(), "/").expect("resolves");
+        let detail = resolve_detail(Some(&pinned), &style);
         check(&detail);
         assert!(!detail.contains('\n'), "raw newline: {detail:?}");
 
         let mut out = Vec::new();
-        write_resolves_line(&mut out, link.to_str().unwrap(), Some(&link), &style).unwrap();
+        write_resolves_line(&mut out, link.to_str().unwrap(), Some(&pinned), &style).unwrap();
         let line = String::from_utf8(out).unwrap();
         check(&line);
         assert_eq!(line.matches('\n').count(), 1, "raw newline: {line:?}");

@@ -109,10 +109,10 @@ Functional but minimal.
 - MCP resources: known hosts list (`sudo-proxy://hosts`)
 - Dynamic MCP instructions with known hosts and install guidance
 - `--pkexec` mode and `pkexec-cache` tool (see [pkexec.md](pkexec.md))
+- Each program resolved once per request and pinned by inode from the `no_shell` check to the spawn (#105)
 
 **Not yet implemented:**
 - Command/argument allowlisting (needs policy framework)
-- Inode pinning for TOCTOU on resolved paths
 - Risk scoring display
 - Per-session socket isolation
 

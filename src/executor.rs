@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::{Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -122,40 +123,184 @@ pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
 /// user-writable directories (GHSA-gx9w-4f7x-2gcp), so helpers go through
 /// [`crate::helper`]. Kept for tests that probe the environment.
 pub fn which(name: &str) -> Option<PathBuf> {
-    if name.contains('/') {
-        let p = PathBuf::from(name);
-        if p.is_file() {
-            return Some(p);
-        }
-        return None;
+    resolve_on(name, "", &std::env::var("PATH").unwrap_or_default()).map(|r| r.path)
+}
+
+/// A program resolved once for a request and pinned (issue #105).
+///
+/// The file is opened (`O_PATH`) when it is found, and that descriptor is the
+/// pin: `(dev, ino)` and the canonical target both come from it, not from a
+/// second lookup of the path. The policy check, the prompt and the spawn all
+/// read this one value. At spawn the path must still name the same inode
+/// ([`Resolved::still_pinned`]), and a direct binary is executed through the
+/// descriptor itself, so a file swapped in after approval never runs.
+#[derive(Clone, Debug)]
+pub struct Resolved {
+    /// The path found (`PATH` dir + name, or the leaf cwd + a name with `/`).
+    pub path: PathBuf,
+    /// The pinned file's real path, read through the descriptor. `None` when
+    /// it cannot be (no `/proc`): the prompt then says `(canonicalize
+    /// failed)` rather than showing a second lookup of the path.
+    pub canonical: Option<PathBuf>,
+    pub dev: u64,
+    pub ino: u64,
+    /// A native (ELF) binary, which the kernel runs from the descriptor
+    /// itself. Anything else (a `#!` script, a script without `#!` that
+    /// `execvp` hands to `/bin/sh`, a binfmt_misc format) makes the kernel or
+    /// libc pass an interpreter a path, and the close-on-exec descriptor's
+    /// path no longer opens once that interpreter runs. Those are spawned by
+    /// path after the identity check.
+    pub native: bool,
+    fd: Arc<OwnedFd>,
+}
+
+/// Same file found at the same path. The descriptor is not compared.
+impl PartialEq for Resolved {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.dev == other.dev && self.ino == other.ino
     }
-    search_path(name, &std::env::var("PATH").unwrap_or_default())
+}
+
+impl Eq for Resolved {}
+
+impl Resolved {
+    /// Open `path` and pin it if it is a regular file (and, when `need_exec`,
+    /// has an execute bit). Symlinks are followed: the pin is their target.
+    fn open(path: PathBuf, need_exec: bool) -> Option<Resolved> {
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+        let raw = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_CLOEXEC) };
+        if raw < 0 {
+            return None;
+        }
+        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
+            return None;
+        }
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return None;
+        }
+        if need_exec && st.st_mode & 0o111 == 0 {
+            return None;
+        }
+        let proc_path = fd_path(fd.as_raw_fd());
+        // Through the descriptor, so it describes the pinned inode even if the
+        // path changes now.
+        let canonical = std::fs::read_link(&proc_path).ok();
+        let native = std::fs::File::open(&proc_path)
+            .and_then(|f| {
+                let mut magic = [0u8; 4];
+                std::os::unix::fs::FileExt::read_exact_at(&f, &mut magic, 0)?;
+                Ok(magic == *b"\x7fELF")
+            })
+            .unwrap_or(false);
+        Some(Resolved {
+            path,
+            canonical,
+            dev: st.st_dev as u64,
+            ino: st.st_ino as u64,
+            native,
+            fd: Arc::new(fd),
+        })
+    }
+
+    /// The canonical target, if it could be read.
+    pub fn canonical(&self) -> Option<&Path> {
+        self.canonical.as_deref()
+    }
+
+    /// The path still names the pinned file (`stat` follows symlinks, as the
+    /// exec would).
+    pub fn still_pinned(&self) -> bool {
+        std::fs::metadata(&self.path).is_ok_and(|m| m.dev() == self.dev && m.ino() == self.ino)
+    }
+
+    /// The path to `exec` that runs exactly the pinned inode, when there is
+    /// one: `/proc/self/fd/N`, for a native binary while `/proc` is mounted. In
+    /// the forked child the descriptor is still open (`O_CLOEXEC` closes it
+    /// only once the exec has succeeded), so the kernel opens the pinned
+    /// file, whatever the original path names by then.
+    fn exec_path(&self) -> Option<PathBuf> {
+        (self.native && proc_fd_available()).then(|| fd_path(self.fd.as_raw_fd()))
+    }
+
+    /// A resolution for unit tests that build leaves by hand: pinned to
+    /// `/dev/null`, so it is never executed through the descriptor.
+    #[cfg(test)]
+    pub(crate) fn fake(path: &str) -> Resolved {
+        let f = File::open("/dev/null").unwrap();
+        Resolved {
+            path: PathBuf::from(path),
+            canonical: Some(PathBuf::from(path)),
+            dev: 0,
+            ino: 0,
+            native: false,
+            fd: Arc::new(OwnedFd::from(f)),
+        }
+    }
+}
+
+/// The soft `RLIMIT_NOFILE` the daemon started with, if [`raise_fd_limit`]
+/// raised it; children get it back (see [`restore_fd_limit`]).
+static STARTUP_NOFILE: OnceLock<libc::rlimit> = OnceLock::new();
+
+/// Raise the soft open-file limit to the hard one. A prepared request holds
+/// one descriptor per program it runs until it finishes (issue #105), and up
+/// to `max_in_flight` requests of up to `MAX_PLAN_NODES` nodes each can wait
+/// at once, which can exceed the usual soft limit of 1024. Called once at
+/// daemon start.
+pub fn raise_fd_limit() {
+    let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 || lim.rlim_cur >= lim.rlim_max {
+        return;
+    }
+    let raised = libc::rlimit { rlim_cur: lim.rlim_max, rlim_max: lim.rlim_max };
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
+        let _ = STARTUP_NOFILE.set(lim);
+    }
+}
+
+/// In a forked child, before exec: put back the soft open-file limit the
+/// daemon started with, so a program that still uses `select()` does not see
+/// descriptors past `FD_SETSIZE`. Only `setrlimit` (async-signal-safe).
+fn restore_fd_limit() {
+    if let Some(lim) = STARTUP_NOFILE.get() {
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_NOFILE, lim);
+        }
+    }
+}
+
+fn fd_path(fd: RawFd) -> PathBuf {
+    PathBuf::from(format!("/proc/self/fd/{fd}"))
+}
+
+fn proc_fd_available() -> bool {
+    static CACHE: OnceLock<bool> = OnceLock::new();
+    *CACHE.get_or_init(|| Path::new("/proc/self/fd").is_dir())
 }
 
 /// Resolve a requested command's `argv[0]` exactly as its child would: a bare
-/// name is searched on the child's PATH (always [`DEFAULT_LOGIN_PATH`] — no
-/// request can set PATH), and a name containing `/` is taken relative to the
-/// leaf's working directory, where the child starts. The prompt shows this
-/// result and the executor spawns it, so the two cannot name different files
-/// (issue #62).
-pub fn resolve_command(name: &str, cwd: &str) -> Option<PathBuf> {
-    if name.contains('/') {
-        let p = Path::new(cwd).join(name);
-        return p.is_file().then_some(p);
-    }
-    search_path(name, DEFAULT_LOGIN_PATH)
+/// name is searched on the child's PATH ([`DEFAULT_LOGIN_PATH`] — no request
+/// can set PATH), and a name containing `/` is taken relative to the leaf's
+/// working directory, where the child starts. The result is pinned (see
+/// [`Resolved`]): the prompt shows it and the executor spawns it, so the two
+/// cannot name different files (issues #62, #105).
+pub fn resolve_command(name: &str, cwd: &str) -> Option<Resolved> {
+    resolve_on(name, cwd, DEFAULT_LOGIN_PATH)
 }
 
-fn search_path(name: &str, path_var: &str) -> Option<PathBuf> {
-    for dir in path_var.split(':') {
-        let candidate = Path::new(dir).join(name);
-        if let Ok(meta) = candidate.metadata() {
-            if meta.is_file() && (meta.permissions().mode() & 0o111 != 0) {
-                return Some(candidate);
-            }
-        }
+/// [`resolve_command`] with an explicit search PATH. Entries that are empty
+/// or relative are skipped: they would resolve against the daemon's working
+/// directory, while the child (and a wrapper it runs) starts in the leaf's.
+fn resolve_on(name: &str, cwd: &str, path_var: &str) -> Option<Resolved> {
+    if name.contains('/') {
+        return Resolved::open(Path::new(cwd).join(name), false);
     }
-    None
+    path_var
+        .split(':')
+        .filter(|dir| dir.starts_with('/'))
+        .find_map(|dir| Resolved::open(Path::new(dir).join(name), true))
 }
 
 /// True if the basename of `p` names a shell interpreter (see
@@ -177,27 +322,29 @@ pub enum EscalationMode {
     Pkexec,
 }
 
-/// Execute a request's plan under pkexec (local/graphical mode).
-pub fn exec_pkexec(
-    req: &ValidatedRequest,
-    env: &HashMap<String, String>,
-    tty_lock: &Mutex<()>,
-) -> Response {
-    run_plan(req, env, EscalationMode::Pkexec, Some(tty_lock))
+/// Execute a prepared request's plan under pkexec (local/graphical mode).
+pub fn exec_pkexec(req: &PreparedRequest, tty_lock: &Mutex<()>) -> Response {
+    run_plan(req, EscalationMode::Pkexec, Some(tty_lock))
 }
 
-/// Execute a request's plan under sudo (remote/TUI mode).
-pub fn exec_sudo(
-    req: &ValidatedRequest,
-    env: &HashMap<String, String>,
-    tty_lock: &Mutex<()>,
-) -> Response {
-    run_plan(req, env, EscalationMode::Sudo, Some(tty_lock))
+/// Execute a prepared request's plan under sudo (remote/TUI mode).
+pub fn exec_sudo(req: &PreparedRequest, tty_lock: &Mutex<()>) -> Response {
+    run_plan(req, EscalationMode::Sudo, Some(tty_lock))
 }
 
-/// Execute a request's plan directly as the current user (no escalation).
-pub fn exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Response {
-    run_plan(req, env, EscalationMode::Direct, None)
+/// Execute a prepared request's plan directly as the current user (no
+/// escalation).
+pub fn exec_direct(req: &PreparedRequest) -> Response {
+    run_plan(req, EscalationMode::Direct, None)
+}
+
+/// [`prepare`] then [`exec_direct`]: for callers (tests, tools) that have no
+/// prompt between the two. The daemon prepares once and passes the result.
+pub fn prepare_and_exec_direct(req: &ValidatedRequest, env: &HashMap<String, String>) -> Response {
+    match prepare(req, env) {
+        Ok(p) => exec_direct(&p),
+        Err(e) => Response::error(&req.id, &format!("invalid plan: {e}")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,10 +431,11 @@ struct LeafPlan {
     opaque: Option<Opacity>,
     /// The programs the leaf runs: `argv[0]`, then each program a wrapper runs.
     programs: Vec<ProgramHop>,
-    /// `argv[0]` resolved by [`resolve_command`]. The prompt displays it and
-    /// [`build_command`] spawns it, so the two can never disagree; `None` means
-    /// the stage is refused at spawn rather than looked up again.
-    resolved_bin: Option<PathBuf>,
+    /// `argv[0]` resolved and pinned once (see [`Resolved`]). The `no_shell`
+    /// check and the prompt read it and [`build_command`] spawns it, so they
+    /// can never disagree; `None` means the stage is refused at spawn rather
+    /// than looked up again.
+    resolved_bin: Option<Resolved>,
     /// Exit codes treated as success (besides 0) for seq short-circuiting.
     accepted: Vec<i32>,
     forward_agent: bool,
@@ -313,6 +461,8 @@ enum SeqNode {
 struct Ctx {
     env: HashMap<String, String>,
     cwd: String,
+    /// The PATH bare program names are resolved on.
+    lookup_path: String,
     runas: LeafRunAs,
     accepted: Vec<i32>,
     forward_agent: bool,
@@ -346,6 +496,7 @@ fn compile_plan(req: &ValidatedRequest, env: &HashMap<String, String>) -> Result
     let ctx = Ctx {
         env: env.clone(),
         cwd: "/".to_string(),
+        lookup_path: DEFAULT_LOGIN_PATH.to_string(),
         runas: ambient,
         accepted: Vec::new(),
         forward_agent: req.forward_agent,
@@ -543,12 +694,16 @@ fn apply_redirect(ctx: &mut Ctx, stream: Stream, target: &RedirTarget) -> Result
 pub struct ProgramHop {
     /// The program word as written in argv.
     pub name: String,
-    /// Its resolution (`resolve_command`). For `argv[0]` this is the leaf's
-    /// `resolved_bin`. `None` when not found, and always `None` when
-    /// `runtime_lookup` is set.
-    pub resolved: Option<PathBuf>,
+    /// Index of that word in the leaf's argv.
+    pub argv_index: usize,
+    /// Its pinned resolution (`resolve_command`). For `argv[0]` this is the
+    /// leaf's `resolved_bin`. `None` when not found, and always `None` when
+    /// `runtime_lookup` or `applet` is set.
+    pub resolved: Option<Resolved>,
     /// The wrapper (as written) that runs it; `None` for `argv[0]`.
     pub via: Option<String>,
+    /// That wrapper's index in the leaf's argv.
+    pub via_index: Option<usize>,
     /// An inner program of an escalated leaf: the wrapper looks it up at run
     /// time on the escalated PATH (sudo's `secure_path`, pkexec's environment),
     /// not the PATH the daemon resolves with, so no path is shown.
@@ -582,19 +737,39 @@ fn hop_cwd(cwd: &str, chdir: Option<&str>) -> String {
 }
 
 /// Append a resolved leaf to the list and return its index (= stage id).
+///
+/// Every program the leaf runs is resolved here, once (issue #105): the
+/// opacity decision, the prompt and the spawn all read these pins.
 fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> usize {
-    let resolved_bin = argv.first().and_then(|name| resolve_command(name, &ctx.cwd));
+    let resolve = |i: usize, chdir: Option<&str>| -> Option<Resolved> {
+        resolve_on(&argv[i], &hop_cwd(&ctx.cwd, chdir), &ctx.lookup_path)
+    };
+    let resolved_bin = argv.first().and_then(|_| resolve(0, None));
+    // The walk asks for the canonical name of each hop's binary; remember each
+    // resolution it makes so the hop list below reuses it instead of looking
+    // the name up again.
+    // (argv index, `env -C` dir) -> resolution.
+    type Seen = Vec<((usize, Option<String>), Option<Resolved>)>;
+    let seen: std::cell::RefCell<Seen> = std::cell::RefCell::new(Vec::new());
+    let lookup = |i: usize, chdir: Option<&str>| -> Option<Resolved> {
+        if i == 0 {
+            return resolved_bin.clone();
+        }
+        let key = (i, chdir.map(str::to_string));
+        if let Some((_, r)) = seen.borrow().iter().find(|(k, _)| *k == key) {
+            return r.clone();
+        }
+        let r = resolve(i, chdir);
+        seen.borrow_mut().push((key, r.clone()));
+        r
+    };
     // Decide opacity here, the one place every leaf is created, so the
     // prompt, the resolve block and the `no_shell` policy all read the same
     // value. The canonical name of each hop's binary catches a renamed
     // symlink (`/bin/sh -> dash`, `innocuous -> bash`, `innocuous -> env`).
     let canonical = |i: usize, chdir: Option<&str>| -> Option<String> {
-        let path = if i == 0 {
-            resolved_bin.clone()
-        } else {
-            resolve_command(&argv[i], &hop_cwd(&ctx.cwd, chdir))
-        }?;
-        let c = std::fs::canonicalize(path).ok()?;
+        let r = lookup(i, chdir)?;
+        let c = r.canonical()?;
         c.file_name().and_then(|n| n.to_str()).map(str::to_string)
     };
     let (hops, reason) = crate::wrappers::unwrap(&argv, canonical);
@@ -620,12 +795,14 @@ fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafP
             } else if escalated || h.applet {
                 None
             } else {
-                resolve_command(&name, &hop_cwd(&ctx.cwd, h.chdir.as_deref()))
+                lookup(h.argv_index, h.chdir.as_deref())
             };
             ProgramHop {
                 name,
+                argv_index: h.argv_index,
                 resolved,
                 via: h.via.map(|p| argv[hops[p].argv_index].clone()),
+                via_index: h.via.map(|p| hops[p].argv_index),
                 runtime_lookup: inner && escalated && !h.applet,
                 applet: h.applet,
             }
@@ -697,8 +874,8 @@ pub struct LeafView {
     pub stage_id: usize,
     pub argv: Vec<String>,
     pub privilege: LeafPrivilege,
-    /// `argv[0]` resolved through PATH.
-    pub resolved_bin: Option<PathBuf>,
+    /// `argv[0]` resolved through PATH, pinned (the spawn runs this file).
+    pub resolved_bin: Option<Resolved>,
     /// True for an opaque leaf (see `opaque_reason`) — rendered "opaque", and
     /// rejected under the `no_shell` policy.
     pub opaque: bool,
@@ -713,15 +890,62 @@ pub struct LeafView {
     pub in_pipe: bool,
 }
 
-/// Compile a request's plan purely for display at the approval prompt. Uses an
-/// empty env (the environment affects execution, not the rendered structure),
-/// so the only errors are structural — the same ones the executor would hit.
+/// A request compiled once, with every program it runs resolved and pinned
+/// (issue #105). The `no_shell` check, the pkexec decision and the prompt read
+/// its [`views`](PreparedRequest::views); `exec_*` run its leaves. Nothing
+/// downstream compiles the plan or looks a program up again, so the file the
+/// human approved is the file that runs.
+pub struct PreparedRequest<'a> {
+    req: &'a ValidatedRequest,
+    compiled: Compiled,
+    views: Vec<LeafView>,
+}
+
+impl<'a> PreparedRequest<'a> {
+    pub fn request(&self) -> &'a ValidatedRequest {
+        self.req
+    }
+
+    /// Every pinned program's path still names the pinned file.
+    pub fn pins_current(&self) -> bool {
+        self.compiled.leaves.iter().all(|l| check_pins(l).is_ok())
+    }
+
+    pub fn views(&self) -> &[LeafView] {
+        &self.views
+    }
+}
+
+impl std::ops::Deref for PreparedRequest<'_> {
+    type Target = ValidatedRequest;
+    fn deref(&self) -> &ValidatedRequest {
+        self.req
+    }
+}
+
+/// Compile `req` with the environment its leaves will run with, resolving
+/// and pinning every program. The only errors are structural: a plan that
+/// fails here is never shown or run.
+pub fn prepare<'a>(
+    req: &'a ValidatedRequest,
+    env: &HashMap<String, String>,
+) -> Result<PreparedRequest<'a>, String> {
+    let compiled = compile_plan(req, env)?;
+    let views = leaf_views(&compiled);
+    Ok(PreparedRequest { req, compiled, views })
+}
+
+/// The prompt's view of a request with no environment: the structure and
+/// resolutions are those [`prepare`] gives (the environment cannot change
+/// either, since no request can set PATH). For display-only callers and tests.
 pub fn plan_display(req: &ValidatedRequest) -> Result<Vec<LeafView>, String> {
-    let empty = HashMap::new();
-    let compiled = compile_plan(req, &empty)?;
+    prepare(req, &HashMap::new()).map(|p| p.views)
+}
+
+fn leaf_views(compiled: &Compiled) -> Vec<LeafView> {
     let mut in_pipe = vec![false; compiled.leaves.len()];
     mark_pipe_members(&compiled.seq, &mut in_pipe);
-    Ok(compiled
+    compiled
         .leaves
         .iter()
         .map(|l| LeafView {
@@ -739,7 +963,7 @@ pub fn plan_display(req: &ValidatedRequest) -> Result<Vec<LeafView>, String> {
             redirects: summarize_redirects(l),
             in_pipe: in_pipe[l.stage_id],
         })
-        .collect())
+        .collect()
 }
 
 fn mark_pipe_members(node: &SeqNode, in_pipe: &mut [bool]) {
@@ -822,16 +1046,9 @@ struct StepStatus {
     success: bool,
 }
 
-fn run_plan(
-    req: &ValidatedRequest,
-    env: &HashMap<String, String>,
-    mode: EscalationMode,
-    tty_lock: Option<&Mutex<()>>,
-) -> Response {
-    let compiled = match compile_plan(req, env) {
-        Ok(c) => c,
-        Err(e) => return Response::error(&req.id, &format!("invalid plan: {e}")),
-    };
+fn run_plan(prepared: &PreparedRequest, mode: EscalationMode, tty_lock: Option<&Mutex<()>>) -> Response {
+    let req = prepared.req;
+    let compiled = &prepared.compiled;
     if mode == EscalationMode::Pkexec {
         if let Err(e) = check_pkexec_leaves(&compiled.leaves, env_supports_chdir()) {
             return Response::error(&req.id, &e);
@@ -1083,10 +1300,16 @@ fn run_one(
                 libc::setsid();
             }
             libc::umask(0o077);
+            restore_fd_limit();
             Ok(())
         });
     }
 
+    // Last, after the redirects are open (a FIFO can block), so the window
+    // between the check and the exec is as short as it can be.
+    if let Err(e) = check_pins(leaf) {
+        return spawn_err(e);
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return spawn_err(format!("failed to execute command: {e}")),
@@ -1168,15 +1391,25 @@ fn spawn_err(msg: String) -> RunResult {
 /// looked up again (by `Command`, `sudo`'s `secure_path`, or `env`), so the
 /// file that runs is the file the human approved (issue #62). An unresolved
 /// name is refused here instead of being searched for a second time.
+///
+/// A direct leaf runs the pinned descriptor itself when it can
+/// ([`Resolved::exec_path`]), and each program a wrapper runs is named by its
+/// pinned absolute path ([`spawn_argv`]), so the wrapper never searches PATH
+/// either (issue #105). The caller checks the pins ([`check_pins`]) just
+/// before the spawn.
 fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, String> {
-    let program = leaf_program(leaf)
+    let resolved = leaf
+        .resolved_bin
+        .as_ref()
         .ok_or_else(|| format!("command not found: {}", leaf.argv[0]))?;
+    let program = resolved.path.as_path();
     Ok(match &leaf.runas {
         LeafRunAs::Direct => {
-            let mut c = Command::new(program);
+            let argv = spawn_argv(leaf)?;
+            let mut c = Command::new(resolved.exec_path().as_deref().unwrap_or(program));
             // Keep the requested argv[0] (multi-call binaries dispatch on it).
-            c.arg0(&leaf.argv[0]);
-            c.args(&leaf.argv[1..]);
+            c.arg0(&argv[0]);
+            c.args(&argv[1..]);
             c.env_clear();
             for (k, v) in &leaf.env {
                 c.env(k, v);
@@ -1248,7 +1481,111 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
 
 /// The file a leaf will execute: its prompt-displayed resolution.
 fn leaf_program(leaf: &LeafPlan) -> Option<&Path> {
-    leaf.resolved_bin.as_deref()
+    leaf.resolved_bin.as_ref().map(|r| r.path.as_path())
+}
+
+/// The argv a direct leaf is spawned with: as written, except that each
+/// program a wrapper runs (`env X=1 just`, `nice make`, `timeout 5 tofu`) is
+/// replaced by its pinned absolute path, whose basename is the same word, so
+/// the wrapper does not look it up again on PATH (issue #105). Left alone:
+/// applets, which their dispatcher picks by name; and a `find -execdir` /
+/// `-okdir` program containing `/`, which `find` runs from each match's
+/// directory rather than from the leaf's (a bare name is still pinned: `find`
+/// looks it up on PATH).
+///
+/// In a transparent leaf, a wrapped program that was not found is refused
+/// here, as an unresolved `argv[0]` is, instead of letting the wrapper search
+/// for it later. So is a path containing `=` behind `env`, which would read
+/// it as an assignment. An opaque leaf keeps such a word as written: the
+/// prompt already says it cannot show what that leaf runs.
+fn spawn_argv(leaf: &LeafPlan) -> Result<Vec<String>, String> {
+    let mut argv = leaf.argv.clone();
+    for prog in leaf.programs.iter().filter(|p| p.argv_index != 0 && !p.applet && !p.runtime_lookup) {
+        if runs_from_match_dir(leaf, prog) {
+            continue;
+        }
+        let via = prog.via.as_deref().unwrap_or("");
+        match &prog.resolved {
+            Some(r) => {
+                let path = r.path.to_string_lossy();
+                if path.contains('=') && via_kind_is(leaf, prog, crate::wrappers::Kind::Env) {
+                    if leaf.opaque.is_some() {
+                        continue;
+                    }
+                    return Err(format!(
+                        "stage {}: {} run by {via} resolves to a path containing '=': {path}",
+                        leaf.stage_id, prog.name
+                    ));
+                }
+                argv[prog.argv_index] = path.into_owned();
+            }
+            None if leaf.opaque.is_some() => {}
+            None => {
+                return Err(format!(
+                    "stage {}: command not found: {} (run by {via})",
+                    leaf.stage_id, prog.name
+                ))
+            }
+        }
+    }
+    Ok(argv)
+}
+
+/// The wrapper that runs `prog` is of `kind`, by its name as written or by
+/// the canonical name of its pinned binary (`innocuous -> env`).
+fn via_kind_is(leaf: &LeafPlan, prog: &ProgramHop, kind: crate::wrappers::Kind) -> bool {
+    let Some(at) = prog.via_index else { return false };
+    let is = |name: &str| {
+        matches!(crate::wrappers::classify(name), crate::wrappers::Class::Wrapper(w) if w.kind == kind)
+    };
+    let canonical = leaf
+        .programs
+        .iter()
+        .find(|p| p.argv_index == at)
+        .and_then(|p| p.resolved.as_ref())
+        .and_then(|r| r.canonical())
+        .and_then(|c| c.to_str());
+    is(&leaf.argv[at]) || canonical.is_some_and(is)
+}
+
+/// A `find -execdir` / `-okdir` program named with a `/`: `find` runs it
+/// relative to each matched file's directory, which is not known here.
+fn runs_from_match_dir(leaf: &LeafPlan, prog: &ProgramHop) -> bool {
+    prog.name.contains('/')
+        && via_kind_is(leaf, prog, crate::wrappers::Kind::FindExec)
+        && matches!(
+            leaf.argv.get(prog.argv_index.wrapping_sub(1)).map(String::as_str),
+            Some("-execdir" | "-okdir")
+        )
+}
+
+/// Refuse to spawn a leaf when a program it runs is no longer the file that
+/// was resolved, checked and shown (issue #105): its path now names another
+/// inode (a file renamed over it, a symlink retargeted, a file removed).
+///
+/// That includes a binary replaced by an earlier step of the same request
+/// (`cargo build && ./target/debug/app`, `apt-get upgrade && systemctl …`):
+/// the human approved the old file, so the new one is not run. Such a step
+/// goes in a request of its own.
+fn check_pins(leaf: &LeafPlan) -> Result<(), String> {
+    let hops = leaf
+        .programs
+        .iter()
+        .filter(|p| p.argv_index != 0)
+        .filter_map(|p| p.resolved.as_ref().map(|r| (p.name.as_str(), r)));
+    let argv0 = leaf.resolved_bin.as_ref().map(|r| (leaf.argv[0].as_str(), r));
+    for (name, r) in argv0.into_iter().chain(hops) {
+        if !r.still_pinned() {
+            return Err(format!(
+                "stage {}: {name} changed since it was approved ({}); not run. \
+                 If an earlier step of this request rebuilt or upgraded it, \
+                 run it in a separate request",
+                leaf.stage_id,
+                r.path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn open_out(path: &str, append: bool) -> std::io::Result<File> {
@@ -1356,6 +1693,15 @@ fn run_pipe(
     outcomes: &mut [Outcome],
 ) -> StepStatus {
     let n = indices.len();
+    // Every refusal a stage can meet before its spawn (pins, an unresolved
+    // program, the wrapped-program checks, a missing escalator), for every
+    // stage before any starts: a stage refused later would leave the earlier
+    // ones killed part-way. The pins are checked again just before each
+    // spawn.
+    let preflight = |leaf: &LeafPlan| check_pins(leaf).and_then(|()| build_command(leaf, mode).map(drop));
+    if let Some(e) = indices.iter().find_map(|&li| preflight(&leaves[li]).err()) {
+        return spawn_error_status(e);
+    }
     let mut children: Vec<Child> = Vec::with_capacity(n);
     let mut prev_stdout: Option<Stdio> = None;
 
@@ -1406,10 +1752,15 @@ fn run_pipe(
             cmd.pre_exec(|| {
                 libc::setsid();
                 libc::umask(0o077);
+                restore_fd_limit();
                 Ok(())
             });
         }
 
+        if let Err(e) = check_pins(leaf) {
+            let _guard = KillOnDrop::new(children);
+            return spawn_error_status(e);
+        }
         match cmd.spawn() {
             Ok(mut child) => {
                 if !is_last {
@@ -1713,6 +2064,7 @@ impl Drop for KillOnDrop {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     fn pid_alive(pid: u32) -> bool {
@@ -1730,7 +2082,7 @@ mod tests {
             stderr: ErrSpec::Capture,
             opaque: None,
             programs: vec![],
-            resolved_bin: Some(PathBuf::from(format!("/usr/bin/{}", argv[0]))),
+            resolved_bin: Some(Resolved::fake(&format!("/usr/bin/{}", argv[0]))),
             accepted: vec![],
             forward_agent: false,
             stage_id: 0,
@@ -1764,7 +2116,7 @@ mod tests {
         // The check covers the path actually handed to `env`: a relative name
         // resolved under a `chdir` containing '=' is refused too.
         let mut l = leaf(&["./tool"], LeafRunAs::Root);
-        l.resolved_bin = Some(PathBuf::from("/opt/a=b/tool"));
+        l.resolved_bin = Some(Resolved::fake("/opt/a=b/tool"));
         assert!(check_pkexec_leaves(&[l], true).unwrap_err().contains("'='"));
     }
 
@@ -2037,7 +2389,7 @@ mod tests {
             stderr: ErrSpec::Capture,
             opaque: None,
             programs: vec![],
-            resolved_bin: Some(PathBuf::from("/usr/sbin/sysctl")),
+            resolved_bin: Some(Resolved::fake("/usr/sbin/sysctl")),
             accepted: Vec::new(),
             forward_agent: false,
             stage_id: 0,
@@ -2121,10 +2473,10 @@ mod tests {
         assert_eq!(resolve_command("only-here-62", "/"), None);
         // …while a system binary resolves on the child's default PATH.
         let sh = resolve_command("sh", "/").expect("sh on default PATH");
-        assert!(DEFAULT_LOGIN_PATH.split(':').any(|d| sh.parent() == Some(Path::new(d))));
+        assert!(DEFAULT_LOGIN_PATH.split(':').any(|d| sh.path.parent() == Some(Path::new(d))));
         // A relative name resolves against the leaf cwd.
         let cwd = dir.to_str().unwrap();
-        assert_eq!(resolve_command("bin/only-here-62", cwd), Some(dir.join("bin/only-here-62")));
+        assert_eq!(resolve_command("bin/only-here-62", cwd).map(|r| r.path), Some(dir.join("bin/only-here-62")));
         assert_eq!(resolve_command("./bin/only-here-62", "/"), None);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2289,5 +2641,100 @@ mod tests {
         let names: Vec<&str> = views[0].programs.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, [link.as_str(), "true"]);
         assert_eq!(views[0].programs[1].via.as_deref(), Some(link.as_str()));
+    }
+
+    /// Issue #105: the pin is the file found, its `(dev, ino)` from the
+    /// descriptor, and its canonical target read through that descriptor.
+    #[test]
+    fn resolution_pins_the_inode_it_found() {
+        let r = resolve_command("true", "/").expect("true on the login PATH");
+        let m = std::fs::metadata(&r.path).unwrap();
+        assert_eq!((r.dev, r.ino), (m.dev(), m.ino()));
+        assert_eq!(r.canonical().unwrap(), std::fs::canonicalize(&r.path).unwrap());
+        assert!(r.still_pinned());
+
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("tool");
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        let r = resolve_command("./tool", dir.path().to_str().unwrap()).unwrap();
+        assert!(!r.native, "a #! script is not run from its descriptor");
+        std::fs::rename(&tool, dir.path().join("moved")).unwrap();
+        std::fs::write(&tool, "#!/bin/sh\n").unwrap();
+        assert!(!r.still_pinned(), "another inode at the path");
+    }
+
+    /// A direct, non-script leaf is executed through its pinned descriptor;
+    /// argv[0] is the requested word.
+    #[test]
+    fn direct_binary_execs_its_descriptor() {
+        let Some(r) = resolve_command("true", "/").filter(|r| r.native) else { return };
+        if !proc_fd_available() {
+            return;
+        }
+        let mut l = leaf(&["true"], LeafRunAs::Direct);
+        l.resolved_bin = Some(r);
+        let c = build_command(&l, EscalationMode::Direct).unwrap();
+        assert!(c.get_program().to_str().unwrap().starts_with("/proc/self/fd/"), "{c:?}");
+    }
+
+    fn hop(name: &str, argv_index: usize, resolved: Option<Resolved>) -> ProgramHop {
+        ProgramHop {
+            name: name.into(),
+            argv_index,
+            resolved,
+            via: Some("env".into()),
+            via_index: Some(0),
+            runtime_lookup: false,
+            applet: false,
+        }
+    }
+
+    /// A wrapped program is spawned under its pinned path (same basename); a
+    /// missing one, or one whose path `env` would read as an assignment, is
+    /// refused in a transparent leaf and left as written in an opaque one.
+    #[test]
+    fn spawn_argv_names_wrapped_programs_by_path() {
+        let mut l = leaf(&["env", "X=1", "just", "deploy"], LeafRunAs::Direct);
+        l.programs = vec![hop("env", 0, None), hop("just", 2, Some(Resolved::fake("/opt/bin/just")))];
+        assert_eq!(spawn_argv(&l).unwrap(), ["env", "X=1", "/opt/bin/just", "deploy"]);
+
+        l.programs[1].applet = true;
+        assert_eq!(spawn_argv(&l).unwrap()[2], "just", "applets keep their name");
+        l.programs[1].applet = false;
+
+        l.programs[1].resolved = None;
+        let err = spawn_argv(&l).unwrap_err();
+        assert!(err.contains("command not found: just (run by env)"), "{err}");
+
+        l.programs[1].resolved = Some(Resolved::fake("/opt/a=b/just"));
+        assert!(spawn_argv(&l).unwrap_err().contains("'='"));
+
+        // Only `env` reads a word with '=' as an assignment.
+        let mut n = leaf(&["nice", "just"], LeafRunAs::Direct);
+        n.programs = vec![hop("nice", 0, None), hop("just", 1, Some(Resolved::fake("/opt/a=b/just")))];
+        assert_eq!(spawn_argv(&n).unwrap(), ["nice", "/opt/a=b/just"]);
+
+        l.opaque = Some(Opacity { at: 1, reason: "r".into(), is_shell: false, names_program: true });
+        assert_eq!(spawn_argv(&l).unwrap()[2], "just");
+        l.programs[1].resolved = None;
+        assert_eq!(spawn_argv(&l).unwrap()[2], "just");
+    }
+
+    /// `find -execdir ./x` runs `./x` from each match's directory, so the word
+    /// is kept (and a missing one at the leaf cwd is not refused); a bare name
+    /// is still pinned, since `find` looks it up on PATH.
+    #[test]
+    fn spawn_argv_keeps_execdir_relative_programs() {
+        let mut l = leaf(&["find", ".", "-execdir", "./configure", ";"], LeafRunAs::Direct);
+        l.programs = vec![hop("find", 0, None), hop("./configure", 3, None)];
+        assert_eq!(spawn_argv(&l).unwrap()[3], "./configure");
+
+        let mut l = leaf(&["find", ".", "-execdir", "make", ";"], LeafRunAs::Direct);
+        l.programs = vec![hop("find", 0, None), hop("make", 3, Some(Resolved::fake("/usr/bin/make")))];
+        assert_eq!(spawn_argv(&l).unwrap()[3], "/usr/bin/make");
+
+        let mut l = leaf(&["find", ".", "-exec", "./tool", ";"], LeafRunAs::Direct);
+        l.programs = vec![hop("find", 0, None), hop("./tool", 3, Some(Resolved::fake("/srv/./tool")))];
+        assert_eq!(spawn_argv(&l).unwrap()[3], "/srv/./tool", "-exec runs from the leaf cwd");
     }
 }

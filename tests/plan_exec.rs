@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use sudo_proxy::executor::exec_direct;
+use sudo_proxy::executor::prepare_and_exec_direct;
 use sudo_proxy::protocol::{
     Plan, RedirTarget, Request, Status, Stream, ValidatedRequest, WriteMode,
 };
@@ -49,7 +49,7 @@ fn pipe_inside_run_runs_and_aggregates() {
             },
         ],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     // Three Run leaves → three stages, in pre-order.
     assert_eq!(resp.stages.len(), 3, "stages: {:?}", resp.stages);
@@ -72,7 +72,7 @@ fn redirect_stdout_to_file_truncate() {
         },
         body: Box::new(exec(&["printf", "hello-file"])),
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     let written = std::fs::read_to_string(&path).expect("read redirect file");
     assert_eq!(written, "hello-file");
@@ -93,7 +93,7 @@ fn redirect_stdout_append() {
         },
         body: Box::new(exec(&["printf", "more"])),
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "seed-more");
 }
@@ -106,7 +106,7 @@ fn setenv_is_visible_to_the_stage() {
         value: "xyz-sentinel".into(),
         body: Box::new(exec(&["sh", "-c", "printf %s \"$LANG\""])),
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(decode_stdout(&resp), "xyz-sentinel");
 }
@@ -120,7 +120,7 @@ fn run_short_circuits_on_failure() {
             exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.stages[0].exit_code, 1, "false exits 1");
@@ -137,7 +137,7 @@ fn seq_runs_every_step_despite_failure() {
     let plan = Plan::Seq {
         steps: vec![exec(&["false"]), exec(&["sh", "-c", "printf ran-anyway"])],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.stages[0].exit_code, 1, "false exits 1");
@@ -161,7 +161,7 @@ fn accepted_exit_codes_allow_run_to_continue() {
             exec(&["sh", "-c", "printf continued"]),
         ],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert!(
         decode_stdout(&resp).contains("continued"),
@@ -178,7 +178,7 @@ fn alt_short_circuits_on_success() {
             exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.stages[0].exit_code, 0, "true exits 0");
@@ -198,7 +198,7 @@ fn alt_runs_fallback_on_failure() {
     let plan = Plan::Alt {
         steps: vec![exec(&["false"]), exec(&["sh", "-c", "printf fallback"])],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.stages[0].exit_code, 1, "false exits 1");
@@ -214,7 +214,7 @@ fn alt_all_fail_runs_every_step() {
     let plan = Plan::Alt {
         steps: vec![exec(&["false"]), exec(&["false"])],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.stages[0].exit_code, 1);
@@ -234,7 +234,7 @@ fn accepted_exit_code_stops_alt() {
             exec(&["sh", "-c", "printf SHOULD_NOT_RUN"]),
         ],
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(
         resp.stages[1].exit_code, -1,
@@ -266,7 +266,7 @@ fn command_oneliner_matches_executor_for_privilege_free_plan() {
     let req = make_plan_req(plan);
 
     // 1. Via the plan executor.
-    let resp = exec_direct(&req, &HashMap::new());
+    let resp = prepare_and_exec_direct(&req, &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     let via_plan = decode_stdout(&resp);
 
@@ -292,7 +292,7 @@ fn system_escape_hatch_runs() {
         shell: sudo_proxy::protocol::ShellProc::Sh,
         script: "printf hatch-ran".into(),
     };
-    let resp = exec_direct(&make_plan_req(plan), &HashMap::new());
+    let resp = prepare_and_exec_direct(&make_plan_req(plan), &HashMap::new());
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(resp.stages.len(), 1);
     assert_eq!(decode_stdout(&resp), "hatch-ran");

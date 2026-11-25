@@ -83,6 +83,7 @@ invariant at a given boundary are omitted.
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
 | Tampering | Executed command differs from the validated/shown argv (shell injection). | No shell on the privileged path; `Command::new(argv[0]).args(…)`. | G3.1 |
+| Tampering | The file that runs differs from the one checked and shown: renamed over, a symlink retargeted, or the same name added to an earlier `PATH` directory between the prompt and the spawn (up to 60 s, plus time queued behind another prompt). | Each program is resolved once per request and pinned: path, `(dev, ino)` and canonical target, all from one `O_PATH` descriptor. The `no_shell` check, the prompt and the spawn read that pin. The spawn is refused if the path now names another inode; a direct binary is executed through its descriptor (`/proc/self/fd/N`); a program run by a wrapper is passed to it by its pinned absolute path, so the wrapper never searches `PATH`. **Residual:** see 3.7 below. | G4.2 / #105 |
 | Elevation | Environment-based escalation (`LD_PRELOAD`, `IFS`, `BASH_ENV`); agent-socket abuse. | Hard-reject env allowlist; `privileged + forward_agent` rejected; request `SSH_AUTH_SOCK` rejected. | G3.2 |
 | Info disclosure | Child inherits the socket fd or secrets. | Execution isolation: cwd `/`, umask 0077, stdin null, no fd inheritance. | A2 (assumption), G3.x |
 | DoS | Runaway child floods output. | 16 MiB per-stream output cap. | G6.4 |
@@ -146,8 +147,11 @@ A  A root command runs that the human did NOT approve
 │   │        [startup refusal of injectable terminals; children without a
 │   │         controlling tty → A1 / GHSA-cpmp-67wf-gwmx
 │   │         · blocked for detected terminals (residual: undetected ones)]
-│   └─ 3.6 Shell or inline code behind a wrapper (env sh -c, python3 -c)
-│            [wrapper-aware unwrap → G4.7 · mitigated; residual: awk/sed/script interpreters]
+│   ├─ 3.6 Shell or inline code behind a wrapper (env sh -c, python3 -c)
+│   │        [wrapper-aware unwrap → G4.7 · mitigated; residual: awk/sed/script interpreters]
+│   └─ 3.7 Swap the approved file between the prompt and the spawn
+│            [resolved once and pinned by inode → G4.2 / #105 · blocked;
+│             residual: contents changed in place, script / escalated exec window]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
@@ -199,6 +203,19 @@ is unaccounted for. The residuals — already on record and accepted — are:
   (U+00A0, U+2000–200A, U+3000) remain accepted after #86: they are printable,
   and `shquote` single-quotes any non-ASCII token, so they cannot sit next to an
   operator.
+- **3.7 — what pinning does not cover (#105).** Pinning fixes *which file*
+  runs, not what is in it: a file the requester can write can be rewritten in
+  place (same inode) after the prompt, and its new contents run. A `#!` script
+  cannot be executed through a close-on-exec descriptor (the interpreter gets
+  a path that no longer opens), and `sudo` closes inherited descriptors, so a
+  script and an escalated step are spawned by path after the `(dev, ino)`
+  check, leaving a short window between the check and the exec. Today bare
+  names resolve on the root-owned login `PATH`, so both cases need a `./name`
+  in a directory the requester can write, where rewriting the file is already
+  possible. Programs the approved program looks up itself (a script's
+  commands, `just` recipes, `#!/usr/bin/env x`) are not shown and not pinned,
+  and neither is a `find -execdir` / `-okdir` program named with a `/`, which
+  `find` runs from each match's directory.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no
   `StrictHostKeyChecking`; safety depends on the remote being in `known_hosts`
   first, or configuring `StrictHostKeyChecking=accept-new`.
