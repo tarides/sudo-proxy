@@ -91,6 +91,10 @@ PATH often starts with directories the daemon's user can write
 by the default login PATH), and a candidate is used only if it and every
 directory above it are owned by root and not group/world-writable, and, for
 `sudo` / `pkexec`, the file is setuid. A planted file is skipped, never run.
-`--sudo-path PATH` (command line only) names `sudo` explicitly for layouts
-the list does not cover; it is not checked, and the daemon says so when it
-starts (GHSA-gx9w-4f7x-2gcp).
+A candidate this user can write through an ACL is refused too. On
+Debian/Ubuntu `/usr/local/bin` is group-writable (`root:staff 2775`), so a
+`sudo` installed there is skipped in favour of `/usr/bin/sudo`; `-v` prints
+which one the daemon uses. `--sudo-path PATH` (command line only) names
+`sudo` explicitly for layouts the list does not cover; only its form is
+checked (an absolute path to an executable file), not its ownership, and the
+daemon says so when it starts (GHSA-gx9w-4f7x-2gcp).

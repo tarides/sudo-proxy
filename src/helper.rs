@@ -129,6 +129,9 @@ pub fn check_trusted(path: &Path, setuid: bool) -> Result<(), String> {
     if setuid && meta.mode() & 0o4000 == 0 {
         return Err(format!("{shown}: not setuid"));
     }
+    if writable_by_me(&real) {
+        return Err(format!("{shown}: writable by this user (ACL?)"));
+    }
     for start in [path, real.as_path()] {
         for dir in start
             .ancestors()
@@ -150,9 +153,30 @@ pub fn check_trusted(path: &Path, setuid: bool) -> Result<(), String> {
                     m.mode() & 0o7777
                 ));
             }
+            if writable_by_me(dir) {
+                return Err(format!(
+                    "{shown}: directory {} writable by this user (ACL?)",
+                    dir.display()
+                ));
+            }
         }
     }
     Ok(())
+}
+
+/// Whether the daemon's effective uid may write `path`, by the kernel's own
+/// answer, so a POSIX ACL granting this user write access is seen even when
+/// the mode bits look safe. Root may write anything, and owns these files
+/// anyway, so the check is skipped there.
+fn writable_by_me(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    if unsafe { libc::geteuid() } == 0 {
+        return false;
+    }
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return true;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
 }
 
 #[cfg(test)]

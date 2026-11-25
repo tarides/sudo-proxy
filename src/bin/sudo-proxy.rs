@@ -252,7 +252,13 @@ fn parse_args(args: &[String]) -> Opts {
             "--no-unattended-eligible" => unattended_eligible = Some(false),
             "--forward-agent" => forward_agent = true,
             "--allow-injectable-tty" => allow_injectable_tty = true,
-            "--sudo-path" => sudo_path = iter.next().map(PathBuf::from),
+            "--sudo-path" => match iter.next() {
+                Some(v) => sudo_path = Some(PathBuf::from(v)),
+                None => {
+                    eprintln!("error: --sudo-path requires a value");
+                    std::process::exit(1);
+                }
+            },
             s if s.starts_with("--sudo-path=") => {
                 sudo_path = s.strip_prefix("--sudo-path=").map(PathBuf::from);
             }
