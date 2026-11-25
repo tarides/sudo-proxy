@@ -3,6 +3,20 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## v1.2.3 — unreleased (security release)
+
+A patch release on top of v1.2.2 with one security fix, and nothing else:
+
+- **GHSA-gx9w-4f7x-2gcp** (high): the daemon no longer looks up `sudo`,
+  `pkexec`, or its GUI dialogs on its own `PATH`, where a same-UID process
+  could plant one (e.g. in `~/.cargo/bin`). It uses the first setuid-root
+  `sudo`/`pkexec` in a root-owned directory on a fixed list
+  (`/run/wrappers/bin` + the default login PATH). `--sudo-path PATH` names it
+  explicitly for other layouts.
+
+**Upgrade note:** if `sudo` on your host is not in one of those directories,
+start the daemon with `--sudo-path`; it warns at startup when none is found.
+
 ## v1.2.2 — 2026-11-21 (security release)
 
 A patch release on top of v1.2.1 with one security fix and one backported

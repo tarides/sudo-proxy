@@ -12,6 +12,7 @@ pub mod cli;
 pub mod datetime;
 pub mod executor;
 pub mod gui;
+pub mod helper;
 pub mod hosts;
 #[cfg(feature = "mcp")]
 pub mod mcp;

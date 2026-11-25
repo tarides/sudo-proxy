@@ -22,6 +22,11 @@ struct Opts {
     /// file, then restart the daemon through `sudo-proxy-mcp`, which never
     /// passes this flag.
     allow_injectable_tty: bool,
+    /// `--sudo-path` (GHSA-gx9w-4f7x-2gcp): the `sudo` to run instead of the
+    /// trusted one found on the fixed helper path. CLI only, like
+    /// `--allow-injectable-tty`: no `hosts.json` or environment equivalent,
+    /// never forwarded by `--host`, never passed by `sudo-proxy-mcp`.
+    sudo_path: Option<PathBuf>,
 }
 
 fn main() {
@@ -29,6 +34,10 @@ fn main() {
     let opts = parse_args(&args);
 
     if let Some(ref host) = opts.host {
+        if opts.sudo_path.is_some() {
+            eprintln!("error: --sudo-path applies to the daemon; pass it on the remote host, not with --host");
+            process::exit(1);
+        }
         if let Err(e) = server::validate_host(host) {
             eprintln!("error: {e}");
             process::exit(1);
@@ -111,6 +120,29 @@ fn main() {
     if !opts.pkexec {
         let reasons = tty_gate(opts.allow_injectable_tty);
         sudo_proxy::tui::set_injectable_tty_warning(reasons);
+    }
+
+    // GHSA-gx9w-4f7x-2gcp: resolve the escalator now, never on our own PATH,
+    // and say which file it is.
+    if let Some(ref p) = opts.sudo_path {
+        if let Err(e) = sudo_proxy::helper::set_sudo_override(p) {
+            eprintln!("error: {e}");
+            process::exit(1);
+        }
+        eprintln!(
+            "sudo-proxy: WARNING: running {} as sudo (--sudo-path; not checked for root ownership)",
+            p.display()
+        );
+    }
+    let (name, escalator) = if opts.pkexec {
+        ("pkexec", sudo_proxy::helper::pkexec())
+    } else {
+        ("sudo", sudo_proxy::helper::sudo())
+    };
+    match escalator {
+        Ok(p) if opts.verbose => eprintln!("sudo-proxy: {name}: {}", p.display()),
+        Ok(_) => {}
+        Err(e) => eprintln!("sudo-proxy: warning: {e}; privileged requests will fail"),
     }
 
     let config = server::ServerConfig {
@@ -198,6 +230,7 @@ fn parse_args(args: &[String]) -> Opts {
     let mut unattended_eligible: Option<bool> = None;
     let mut forward_agent = false;
     let mut allow_injectable_tty = false;
+    let mut sudo_path = None;
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
         match arg.as_str() {
@@ -219,9 +252,13 @@ fn parse_args(args: &[String]) -> Opts {
             "--no-unattended-eligible" => unattended_eligible = Some(false),
             "--forward-agent" => forward_agent = true,
             "--allow-injectable-tty" => allow_injectable_tty = true,
+            "--sudo-path" => sudo_path = iter.next().map(PathBuf::from),
+            s if s.starts_with("--sudo-path=") => {
+                sudo_path = s.strip_prefix("--sudo-path=").map(PathBuf::from);
+            }
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent] [--allow-injectable-tty]");
+                eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--unattended-eligible] [--forward-agent] [--allow-injectable-tty] [--sudo-path PATH]");
                 eprintln!();
                 eprintln!("Privileged command execution proxy.");
                 eprintln!("Listens on a Unix socket for JSON requests and executes them via pkexec or sudo.");
@@ -243,6 +280,9 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              terminal (tmux/screen, kitty/wezterm remote control, X11, …) and");
                 eprintln!("                              so answer the prompt; every prompt then shows a warning");
                 eprintln!("                              (no hosts.json equivalent: whoever starts the daemon decides)");
+                eprintln!("  --sudo-path PATH            Run PATH as sudo. Without it, sudo is the first setuid-root sudo");
+                eprintln!("                              in a root-owned directory on a fixed list (never this process's");
+                eprintln!("                              PATH); PATH given here is not checked (no hosts.json equivalent)");
                 std::process::exit(0);
             }
             _ => {
@@ -260,6 +300,7 @@ fn parse_args(args: &[String]) -> Opts {
         unattended_eligible,
         forward_agent,
         allow_injectable_tty,
+        sudo_path,
     }
 }
 

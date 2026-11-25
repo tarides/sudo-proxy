@@ -83,3 +83,14 @@ resolved path, directly or as the program after `sudo` / `pkexec` (and in the
 `sh -c` string of a multi-stage pkexec pipeline), so neither `Command`, sudo's
 `secure_path`, nor `sh` performs a second lookup that could pick a different
 file than the prompt showed (issue #62).
+
+The escalator itself is not looked up on the daemon's PATH either, since that
+PATH often starts with directories the daemon's user can write
+(`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, and the `zenity` /
+`kdialog` dialogs are searched on a fixed list (`/run/wrappers/bin` followed
+by the default login PATH), and a candidate is used only if it and every
+directory above it are owned by root and not group/world-writable, and, for
+`sudo` / `pkexec`, the file is setuid. A planted file is skipped, never run.
+`--sudo-path PATH` (command line only) names `sudo` explicitly for layouts
+the list does not cover; it is not checked, and the daemon says so when it
+starts (GHSA-gx9w-4f7x-2gcp).

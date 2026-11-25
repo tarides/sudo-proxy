@@ -113,8 +113,10 @@ pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
 }
 
 /// Resolve a command name to an absolute path by searching the **daemon's**
-/// PATH. Only for the daemon's own helpers (zenity, kdialog), never for a
-/// requested command — see [`resolve_command`].
+/// PATH. Not for a requested command (see [`resolve_command`]), and not for
+/// a program the daemon runs itself either: that PATH may hold
+/// user-writable directories (GHSA-gx9w-4f7x-2gcp), so helpers go through
+/// [`crate::helper`]. Kept for tests that probe the environment.
 pub fn which(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -197,7 +199,11 @@ pub fn exec_pkexec(
         Err(e) => return Response::error(&req.id, &e),
     };
     let shell_cmd = pipeline_to_shell(&resolved, env);
-    let mut cmd = Command::new("pkexec");
+    let pkexec = match crate::helper::pkexec() {
+        Ok(p) => p,
+        Err(e) => return Response::error(&req.id, &e),
+    };
+    let mut cmd = Command::new(pkexec);
     cmd.args(["sh", "-c", &shell_cmd]);
     cmd.current_dir("/");
     cmd.stdin(Stdio::null());
@@ -254,7 +260,11 @@ fn exec_pkexec_stage(
         Ok(a) => a,
         Err(e) => return Response::error(id, &e),
     };
-    let mut cmd = Command::new("pkexec");
+    let pkexec = match crate::helper::pkexec() {
+        Ok(p) => p,
+        Err(e) => return Response::error(id, &e),
+    };
+    let mut cmd = Command::new(pkexec);
     for arg in &argv {
         cmd.arg(arg);
     }
@@ -289,7 +299,11 @@ fn exec_sudo_stage(
         Ok(a) => a,
         Err(e) => return Response::error(id, &e),
     };
-    let mut cmd = Command::new("sudo");
+    let sudo = match crate::helper::sudo() {
+        Ok(p) => p,
+        Err(e) => return Response::error(id, &e),
+    };
+    let mut cmd = Command::new(sudo);
     for (k, v) in env {
         cmd.arg(format!("{k}={v}"));
     }
@@ -471,6 +485,13 @@ fn exec_pipeline(
         Ok(r) => r,
         Err(e) => return Response::error(&req.id, &e),
     };
+    let sudo = match mode {
+        EscalationMode::Sudo => match crate::helper::sudo() {
+            Ok(p) => Some(p),
+            Err(e) => return Response::error(&req.id, &e),
+        },
+        EscalationMode::Direct => None,
+    };
 
     let mut children: Vec<Child> = Vec::with_capacity(n);
     let mut prev_stdout: Option<Stdio> = None;
@@ -481,7 +502,7 @@ fn exec_pipeline(
 
         let mut cmd = match mode {
             EscalationMode::Sudo => {
-                let mut c = Command::new("sudo");
+                let mut c = Command::new(sudo.expect("resolved above"));
                 for (k, v) in env {
                     c.arg(format!("{k}={v}"));
                 }
