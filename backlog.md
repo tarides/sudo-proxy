@@ -467,3 +467,13 @@ Long-horizon: prove the daemon's logic refines an abstract approval spec, with
 trust assumptions (`/dev/tty`, `sudo`, kernel, SSH) stated explicitly as the
 boundary of the proof. Value even unrealised: forces a complete enumeration of
 what is trusted-by-assumption.
+
+## Flaky `env_chdir_probe_clears_the_environment`
+
+Failed once in the full `cargo test` run while preparing v1.3.0-rc.1, then
+passed alone and in three full runs. It panics at the `status().unwrap()`
+right after writing and `chmod`ing the fake `env` script
+(`src/executor.rs`), which looks like `ETXTBSY`: another test's fork inherits
+the script's write fd before it is closed. Fix by retrying on `ETXTBSY` or
+writing the script before any test forks (as the other fake-binary tests do,
+if they do). Captured follow-up, not active work.
