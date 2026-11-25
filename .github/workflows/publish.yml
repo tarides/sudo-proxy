@@ -6,6 +6,9 @@ name: Publish
 # the `io.github.tarides` namespace from the repo owner. release.yml builds the
 # static tarball + GitHub release on the same tag, in parallel.
 #
+# A pre-release version (one with a `-`, e.g. 1.3.0-rc.1) is published to
+# crates.io only; the MCP Registry steps are skipped.
+#
 # Also runnable via workflow_dispatch (e.g. to (re)register the server when the
 # crate is already published). The crate publish is skipped when the version in
 # Cargo.toml is already on crates.io, so re-runs are safe.
@@ -37,6 +40,14 @@ jobs:
           VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing sudo-proxy $VERSION"
+          # A SemVer pre-release (1.3.0-rc.1) goes to crates.io, where cargo
+          # installs it only when asked for by version, but not to the MCP
+          # Registry, whose listings would show it as the current version.
+          case "$VERSION" in
+            *-*) echo "prerelease=true" >> "$GITHUB_OUTPUT"
+                 echo "Pre-release: the MCP Registry steps are skipped" ;;
+            *)   echo "prerelease=false" >> "$GITHUB_OUTPUT" ;;
+          esac
 
       # crates.io Trusted Publishing: exchange the OIDC token for a short-lived
       # publish token (configured at crates.io -> sudo-proxy -> Trusted Publishing).
@@ -79,6 +90,7 @@ jobs:
       # compute and inject the hash. The registry validates the URL with a HEAD
       # request at publish time, so the asset must be live before we publish.
       - name: Wait for MCPB asset and inject sha256 into server.json
+        if: steps.ver.outputs.prerelease != 'true'
         run: |
           URL=$(jq -r '.packages[] | select(.registryType=="mcpb") | .identifier' server.json)
           echo "MCPB asset: $URL"
@@ -100,11 +112,14 @@ jobs:
           mv server.json.tmp server.json
 
       - name: Install mcp-publisher
+        if: steps.ver.outputs.prerelease != 'true'
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Authenticate to MCP Registry
+        if: steps.ver.outputs.prerelease != 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish server to MCP Registry
+        if: steps.ver.outputs.prerelease != 'true'
         run: ./mcp-publisher publish

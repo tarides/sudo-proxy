@@ -72,10 +72,15 @@ jobs:
       - name: Create GitHub Release
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
+          # A SemVer pre-release tag (v1.3.0-rc.1) is marked as such, so
+          # GitHub does not show it as the latest release.
+          PRE=()
+          case "$TAG" in *-*) PRE=(--prerelease) ;; esac
           gh release create "$TAG" \
             "$TARBALL" "${TARBALL}.sig" \
             "$MCPB" "${MCPB}.sig" \
             --title "$TAG" \
-            --generate-notes
+            --generate-notes \
+            "${PRE[@]}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
