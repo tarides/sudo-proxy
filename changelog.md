@@ -3,6 +3,18 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Pre-release tags publish as pre-releases (#113, 1.3.0)
+
+- A tag whose version has a SemVer pre-release part (`v1.3.0-rc.1`) creates
+  the GitHub release with `--prerelease`, publishes the crate to crates.io
+  (cargo installs a pre-release only when asked for by version), and skips
+  the MCP Registry, which would list it as the latest version.
+- Both release workflows fail unless the tag is `v<Cargo.toml version>`:
+  `release.yml` decides "pre-release" from the tag and `publish.yml` from
+  `Cargo.toml`, so a mismatch could publish an untagged stable crate.
+- CLAUDE.md documents the convention, and that `.claude-plugin/plugin.json`
+  stays at the last stable version during a pre-release.
+
 ## Unreleased — What `--inherit-*` shows and records (#101, 1.3.0)
 
 - **`(user-writable)`.** A `Resolves:` entry is marked when the daemon's user

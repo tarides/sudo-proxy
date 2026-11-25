@@ -6,32 +6,44 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## 1.3.0 critical path: #101, then `v1.3.0-rc.1`
+## Tag `v1.3.0-rc.1`
 
 Tracked in [#89](https://github.com/tarides/sudo-proxy/issues/89) (release
-plan). Done before this: 1.2.3 (GHSA-gx9w-4f7x-2gcp, helpers never looked up
-on the daemon's PATH), merged into `main` in #106; #107 (root-owned sticky
-directories accepted in the helper check, so `--pkexec` works on NixOS);
-#105 (each program resolved once and pinned, #108).
+plan). Everything planned for the rc is on `main`: 1.2.3
+(GHSA-gx9w-4f7x-2gcp) in #106, #107, #105 (#108), and #101 (`--inherit-path`
+/ `--inherit-env`, rebase-merged from stack #109–#111, Fable-reviewed). #113
+made pre-release tags safe: a version with a `-` publishes to crates.io and a
+GitHub release marked pre-release, skips the MCP Registry, and both release
+workflows fail unless the tag is `v<Cargo.toml version>` (see CLAUDE.md,
+"Pre-releases").
 
-1. **#101: `--inherit-path` / `--inherit-env=PATTERN,…`.** The design was
-   reviewed twice and posted on #101
-   ([comment](https://github.com/tarides/sudo-proxy/issues/101#issuecomment-7161219003),
-   "Full design" section); that comment is the spec. It includes two changes
-   outside the flags: the `env -C` probe (`env_supports_chdir`) clears its
-   environment and sets `PATH` to `HELPER_PATH`, and the `sudo` process gets a
-   cleared environment (`TERM`, `LANG`, `LC_*` only) for every daemon, with a
-   changelog note. #105 left the seam: `Ctx::lookup_path` in `executor.rs`
-   (the login PATH today) is what `--inherit-path` sets for requests with no
-   escalated step; `resolve_on` already skips non-absolute PATH entries.
-2. **Tag `v1.3.0-rc.1`** (release flow: version bump in `Cargo.toml` and the
-   three JSON files, tag). The #101 reporter tests it; also run `--pkexec` on
-   a real NixOS host, since #107 was only reproduced in a container.
+1. **Changelog:** gather the `## Unreleased — … (1.3.0)` entries under one
+   `1.3.0-rc.1` heading.
+2. **Version bump** to `1.3.0-rc.1`: `Cargo.toml` (+ `Cargo.lock`),
+   `server.json` (both `version` fields and the mcpb URL),
+   `packaging/mcpb/manifest.json`. **Not** `.claude-plugin/plugin.json`: it
+   stays at 1.2.3 until 1.3.0 (the plugin installs from `main`).
+3. **Run CI's commands locally** before tagging (crates.io cannot be undone):
+   clippy `-D warnings`, both release builds, tests skipping the flaky burst
+   test, `cargo audit` with CI's `--ignore` list, `cargo deny`,
+   `cargo publish --dry-run`.
+4. **Tag and push** `v1.3.0-rc.1` on `main`. `main` requires linear history
+   (an admin `gh pr merge --merge` bypasses it; `gh stack merge` does not).
+   Check the release: tarball, `.mcpb`, both `.sig`, marked pre-release; the
+   publish run skipped the MCP Registry.
+5. **After:** ask the #101 reporter to test it (`cargo install sudo-proxy
+   --version 1.3.0-rc.1`), then close #101; run `--pkexec` on a real NixOS
+   host, since #107 was only reproduced in a container.
 
 Housekeeping: the remote daemons on the registered hosts still run an older
 version until restarted (binaries are 1.2.3). Local branches `release/1.2.3`,
 `merge/release-1.2.3` and `fix/helper-sticky-dirs` are merged and can be
 deleted.
+
+Known gaps left from the #101 review (low; pick up if they matter): the
+`PATH` check ignores ACLs on directories; a symlink reached inside a
+user-owned symlink's target is not ownership-checked;
+`tests/inherit.rs::mcp_never_passes_the_flags` greps the source.
 
 ## Automate the manual end-to-end tests through a pty
 
