@@ -5,12 +5,20 @@
 # Log the argv exactly as received, then
 # run the command as the invoking user. Nothing is ever escalated.
 #
+# The daemon runs sudo with a cleared environment (TERM, LANG and LC_* only),
+# so the log cannot be named by a variable: the harness copies this file into
+# its temp directory, and the log is `sudo.log` next to the copy. The
+# environment sudo received is written to `sudo.env` (last call wins), with the
+# `export -p` builtin since PATH is unset here.
+#
 # Log format: one record per invocation, each argument NUL-terminated, then a
 # newline. Argv cannot contain a newline (the daemon rejects one), so records
 # never split. Records come from sequential leaves; concurrent pipeline stages
 # could interleave the two writes below.
 set -eu
-{ printf '%s\000' "$@"; printf '\n'; } >>"${SUDO_SHIM_LOG:?}"
+here=${0%/*}
+{ printf '%s\000' "$@"; printf '\n'; } >>"$here/sudo.log"
+export -p >"$here/sudo.env"
 
 if [ "${1-}" = "-u" ]; then
     shift 2

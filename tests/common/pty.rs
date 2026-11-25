@@ -105,6 +105,11 @@ impl PtyDaemon {
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(*mode)).unwrap();
         }
 
+        // The stand-in logs next to itself (the daemon clears sudo's
+        // environment), so each daemon gets its own copy.
+        let sudo_shim = dir.path().join("sudo");
+        std::fs::copy(shims.join("sudo"), &sudo_shim).expect("copy sudo shim");
+
         let (master, slave) = open_pty();
         let slave_fd = slave.as_raw_fd();
 
@@ -116,7 +121,7 @@ impl PtyDaemon {
             // GHSA-gx9w-4f7x-2gcp: the daemon never takes `sudo` from its
             // PATH, so the stand-in is named explicitly.
             .arg("--sudo-path")
-            .arg(shims.join("sudo"))
+            .arg(&sudo_shim)
             .args(&opts.args);
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
         let mut daemon_path: Vec<String> =
@@ -127,7 +132,6 @@ impl PtyDaemon {
             .env("HOME", dir.path().join("home"))
             .env("XDG_CONFIG_HOME", dir.path().join("config"))
             .env("XDG_RUNTIME_DIR", dir.path())
-            .env("SUDO_SHIM_LOG", dir.path().join("sudo.log"))
             .env("SUDO_PROXY_NO_BELL", "1")
             .env("SUDO_PROXY_NO_BLINK", "1");
         if !opts.color {

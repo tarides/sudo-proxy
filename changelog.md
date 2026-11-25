@@ -3,6 +3,28 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — Helpers run with a cleared environment (#101, 1.3.0)
+
+Two gaps left by 1.2.3 (GHSA-gx9w-4f7x-2gcp), closed before #101's
+`--inherit-path` makes the daemon's `PATH` user-writable on purpose:
+
+- The `env -C / -- true` probe ran with the daemon's environment, so the
+  trusted `env` looked `true` up on the daemon's `PATH`. A planted `true`
+  could turn pkexec mode off or run code as the daemon's user. The probe now
+  runs with a cleared environment and `PATH` set to the helper search list.
+- The `sudo` process got the daemon's full environment. sudo's `env_reset`
+  drops most of it, but `env_keep` passes some names on to the root command.
+  **Behaviour change:** `sudo` now gets a cleared environment plus `TERM`,
+  `LANG` and `LC_*` only, so root commands no longer receive `DISPLAY` or
+  the other names sudo's `env_keep` let through. The request's own variables
+  still go on sudo's command line as `K=V`.
+
+Tests: an executor unit test runs the probe through a stand-in `env` and
+checks the environment it received; `tests/escalator_stub.rs` checks that the
+sudo process gets only `TERM`, `LANG` and `LC_*` (a negative control without
+the clearing fails). The test `sudo` shim now logs next to its own copy, since
+it can no longer be told where through its environment.
+
 ## Unreleased — Each program is resolved once and pinned (#105, 1.3.0)
 
 A request's plan was compiled, and every program in it looked up, three
