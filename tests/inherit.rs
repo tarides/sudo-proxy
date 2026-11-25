@@ -25,11 +25,8 @@ const LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbi
 
 struct Setup {
     _dir: tempfile::TempDir,
-    root: PathBuf,
     /// The dev shell's bin directory, first on the inherited PATH.
     bin: PathBuf,
-    /// A `sudo` planted first on both this process's PATH and the inherited one.
-    plant_log: PathBuf,
     /// The stand-in `sudo` (`tests/shims/sudo`), copied here.
     sudo_dir: PathBuf,
     path: String,
@@ -55,8 +52,6 @@ fn setup() -> &'static Setup {
         mkdir755(&bin);
         // A dev-shell tool, found only on the inherited PATH.
         script(&bin.join("devtool"), "exec env");
-        let plant_log = root.join("plant.log");
-        script(&bin.join("sudo"), &format!("echo planted >> '{}'\nexit 97", plant_log.display()));
 
         let sudo_dir = root.join("sudo");
         mkdir755(&sudo_dir);
@@ -69,7 +64,7 @@ fn setup() -> &'static Setup {
         std::env::set_var("PATH", &path);
         std::env::set_var("REPO_ROOT", "/repo");
         std::env::set_var("TF_VAR_region", "eu");
-        Setup { _dir: dir, root, bin, plant_log, sudo_dir, path }
+        Setup { _dir: dir, bin, sudo_dir, path }
     })
 }
 
@@ -145,8 +140,8 @@ fn without_the_flags_the_login_path_is_used() {
 }
 
 /// `gen | sudo tee`: a request with any escalated step inherits nothing, in
-/// none of its steps, and the planted `sudo` first on the inherited PATH never
-/// runs.
+/// none of its steps. (A `sudo` planted on the daemon's PATH is covered by
+/// `tests/escalator_stub.rs`; here the stand-in is named directly.)
 #[test]
 fn escalated_request_gets_nothing_inherited() {
     let s = setup();
@@ -175,8 +170,6 @@ fn escalated_request_gets_nothing_inherited() {
         assert!(!argv.contains(n), "sudo argv carries {n}: {argv:?}");
         assert!(!senv.contains(n), "sudo environment carries {n}: {senv}");
     }
-    assert!(!s.plant_log.exists(), "the sudo planted on the inherited PATH ran");
-    assert!(s.root.exists());
 }
 
 #[test]
@@ -253,6 +246,7 @@ fn startup_refusals() {
     let path = [("PATH", "/usr/bin:/bin")];
     refused(&path, &["--host", "example", "--inherit-path"], "not forwarded with --host");
     refused(&path, &["--host", "example", "--inherit-env=A"], "not forwarded with --host");
+    refused(&path, &["--inherit-env", "A", "--host", "example"], "not forwarded with --host");
     refused(&path, &["--inherit-env", "A", "--inherit-env", "B"], "given twice");
     refused(&path, &["--inherit-env"], "requires a value");
     refused(&path, &["--inherit-env="], "needs a value");
@@ -277,6 +271,9 @@ fn startup_refusals() {
     if unsafe { libc::geteuid() } != 0 {
         refused(&[("PATH", &ww_path)], &["--inherit-path"], "group/world-writable");
     }
+    // A sticky world-writable directory is refused as an entry (anyone can
+    // add a program there), though it is fine above one.
+    refused(&[("PATH", "/tmp:/usr/bin")], &["--inherit-path"], "lets others add programs");
 }
 
 /// Neither launcher can carry the flags: `sudo-proxy-mcp` builds a fixed

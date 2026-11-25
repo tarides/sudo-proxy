@@ -850,7 +850,11 @@ pub fn env_rejected(name: &str) -> bool {
 }
 
 /// Prefixes of names that make a program load code other than its own.
-pub const CODE_LOADING_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+/// `GIT_CONFIG*` covers `GIT_CONFIG_PARAMETERS`, `GIT_CONFIG_GLOBAL`,
+/// `GIT_CONFIG_SYSTEM` and `GIT_CONFIG_KEY_n`/`VALUE_n`, which can set
+/// `core.sshCommand` or `core.pager` and so run a command like
+/// `GIT_SSH_COMMAND` does.
+pub const CODE_LOADING_PREFIXES: &[&str] = &["LD_", "DYLD_", "GIT_CONFIG"];
 
 /// Names that make a program load code other than its own: a dynamic loader,
 /// a shell's startup file, or a language runtime's module path or options.
@@ -861,16 +865,20 @@ pub const CODE_LOADING: &[&str] = &[
     "NIX_LD",
     "NIX_LD_LIBRARY_PATH",
     "GCONV_PATH",
+    "GLIBC_TUNABLES",
     "BASH_ENV",
     "ENV",
     "IFS",
     "PYTHONPATH",
     "PYTHONSTARTUP",
     "PYTHONHOME",
+    "PYTHONUSERBASE",
     "NODE_OPTIONS",
     "NODE_PATH",
     "PERL5OPT",
     "PERL5LIB",
+    "PERLLIB",
+    "PERL5DB",
     "RUBYOPT",
     "RUBYLIB",
     "JAVA_TOOL_OPTIONS",
@@ -1338,7 +1346,17 @@ mod tests {
     /// loader and shell names (#101), and an ordinary name stays transparent.
     #[test]
     fn env_setting_a_code_loading_name_is_opaque() {
-        for var in ["PYTHONPATH", "NODE_OPTIONS", "GIT_SSH_COMMAND", "DYLD_INSERT_LIBRARIES", "NIX_LD"] {
+        for var in [
+            "PYTHONPATH",
+            "NODE_OPTIONS",
+            "GIT_SSH_COMMAND",
+            "GIT_CONFIG_PARAMETERS",
+            "GIT_CONFIG_KEY_0",
+            "GLIBC_TUNABLES",
+            "PERLLIB",
+            "DYLD_INSERT_LIBRARIES",
+            "NIX_LD",
+        ] {
             let set = format!("{var}=x");
             assert_eq!(
                 run(&["env", &set, "true"]).1,

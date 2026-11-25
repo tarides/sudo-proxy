@@ -28,10 +28,13 @@ section of the #101 design comment.
   `no_shell`; a `PATH` that is unset, empty, has an empty or relative entry,
   a character the prompt rejects, or a directory up to `/` that is owned by
   neither root nor the daemon's user, or is group/world-writable. Root-owned
-  sticky directories (`/nix/store`) pass, as in the `hosts.json` check, now
-  shared with it (`hosts::check_dir_chain`). **Departure from the posted
-  design:** a group-writable directory also passes when the daemon's user owns
-  it and its group is that user's private group with no other member (the
+  sticky directories (`/nix/store`) pass above an entry, as in the
+  `hosts.json` check, now shared with it (`hosts::check_dir_chain`), but not
+  as the entry itself, nor as the directory a missing entry would be created
+  in: a sticky bit stops others replacing entries, not adding them, so `/tmp`
+  on `PATH` is refused. **Departure from the posted design:** a group-writable
+  directory also passes when the daemon's user owns it and its group is that
+  user's private group: named after the user, with no other member (the
   775 default on distributions with user private groups), since that group
   bit grants no one else anything. Without this, a typical `~/.local/bin`
   fails the check.
@@ -42,7 +45,7 @@ section of the #101 design comment.
 
 Changes for every daemon, from the same work:
 - An `env` wrapper that sets or unsets any code-loading variable
-  (`PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `DYLD_*`, …), not only
+  (`PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, `GIT_CONFIG_*`, `DYLD_*`, …), not only
   `LD_*`, `BASH_ENV`, `ENV` or `IFS`, now makes its stage opaque.
 - A `PATH` candidate is skipped unless the daemon's user can execute it (an
   effective-UID access check on the pinned inode), as `execvp` does, instead

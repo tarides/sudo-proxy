@@ -302,14 +302,29 @@ fn check_entry(dir: &Path, uid: u32, private_gid: Option<u32>) -> Result<bool, S
     if !meta.is_dir() {
         return Err(format!("{} is not a directory", existing.display()));
     }
+    // The directory programs are found in (or, for a missing entry, the one
+    // it would be created in) gets no sticky exception: a sticky bit stops
+    // others renaming entries that exist, not adding new ones, and a new
+    // program there is exactly what a lookup would find. The exception holds
+    // only for the directories above it, as with `/nix/store/<hash>/bin`.
+    if meta.mode() & 0o1000 != 0 && meta.mode() & 0o022 != 0 {
+        return Err(format!(
+            "{}: directory mode {:04o} lets others add programs (sticky does not prevent that)",
+            existing.display(),
+            meta.mode() & 0o7777
+        ));
+    }
     let real = std::fs::canonicalize(existing).map_err(|e| format!("{}: {e}", existing.display()))?;
     crate::hosts::check_dir_chain(&real, uid, None, private_gid)?;
     Ok(missing)
 }
 
-/// The daemon user's private group: the primary group of `uid`, if no other
-/// user belongs to it, either as a listed member or as their own primary
-/// group. Its group write bit then grants no one else anything, so a
+/// The daemon user's private group: the primary group of `uid`, if it has
+/// the user's own name (the user-private-group convention) and no other user
+/// belongs to it, either as a listed member or as their own primary group.
+/// The name test does not rely on enumeration: `getpwent` lists only local
+/// accounts under sssd/LDAP, where a shared primary group such as `users`
+/// would otherwise look private. Its group write bit then grants no one else anything, so a
 /// directory owned by `uid` with that group (mode 775, the usual default on
 /// distributions with user private groups) is as safe as a 755 one.
 pub fn user_private_gid(uid: u32) -> Option<u32> {
@@ -324,7 +339,7 @@ pub fn user_private_gid(uid: u32) -> Option<u32> {
         let gid = (*pw).pw_gid;
         let name = std::ffi::CStr::from_ptr((*pw).pw_name).to_owned();
         let gr = libc::getgrgid(gid);
-        if gr.is_null() {
+        if gr.is_null() || std::ffi::CStr::from_ptr((*gr).gr_name) != name.as_c_str() {
             return None;
         }
         let mut mem = (*gr).gr_mem;
@@ -486,13 +501,23 @@ mod tests {
     }
 
     #[test]
-    fn root_sticky_directory_passes() {
+    fn root_sticky_directory_passes_above_the_entry_only() {
         // /tmp is root-owned and sticky (1777) on any normal host.
         use std::os::unix::fs::MetadataExt;
         let m = std::fs::metadata("/tmp").unwrap();
-        if m.uid() != 0 || m.mode() & 0o1000 == 0 {
+        if m.uid() != 0 || m.mode() & 0o1000 == 0 || m.mode() & 0o002 == 0 {
             return;
         }
-        assert!(check_path("/tmp", uid()).is_ok());
+        // As an ancestor: others cannot replace what is below it.
+        let d = tempfile::tempdir_in("/tmp").unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(check_path(&d.path().display().to_string(), uid()).is_ok());
+        // As the entry, or as where a missing entry would be created: anyone
+        // can add a program there.
+        let err = check_path("/tmp", uid()).unwrap_err();
+        assert!(err.contains("lets others add programs"), "{err}");
+        let missing = format!("/tmp/sp-missing-{}/bin", uuid::Uuid::new_v4());
+        let err = check_path(&missing, uid()).unwrap_err();
+        assert!(err.contains("lets others add programs"), "{err}");
     }
 }
