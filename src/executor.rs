@@ -117,8 +117,10 @@ pub fn apply_login_env_defaults(env: &mut HashMap<String, String>) {
 }
 
 /// Resolve a command name to an absolute path by searching the **daemon's**
-/// PATH. For locating helper tools the daemon itself runs (zenity, kdialog);
-/// never for a requested command — see [`resolve_command`].
+/// PATH. Not for a requested command (see [`resolve_command`]), and not for
+/// a program the daemon runs itself either: that PATH may hold
+/// user-writable directories (GHSA-gx9w-4f7x-2gcp), so helpers go through
+/// [`crate::helper`]. Kept for tests that probe the environment.
 pub fn which(name: &str) -> Option<PathBuf> {
     if name.contains('/') {
         let p = PathBuf::from(name);
@@ -878,11 +880,15 @@ fn run_plan(
 }
 
 /// Whether this host's `env` understands `-C DIR` (GNU coreutils ≥ 8.28,
-/// uutils). Probed once.
+/// uutils). Probed once, on a trusted `env` (GHSA-gx9w-4f7x-2gcp), never one
+/// from the daemon's PATH; none found counts as no.
 fn env_supports_chdir() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        Command::new("env")
+        let Ok(env) = crate::helper::find_trusted("env", false, crate::helper::HELPER_PATH) else {
+            return false;
+        };
+        Command::new(env)
             .args(["-C", "/", "--", "true"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -1185,7 +1191,8 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
         }
         escalated => match mode {
             EscalationMode::Pkexec => {
-                let mut c = Command::new("pkexec");
+                // Never the daemon's PATH (GHSA-gx9w-4f7x-2gcp).
+                let mut c = Command::new(crate::helper::pkexec()?);
                 if let LeafRunAs::User(name) = escalated {
                     c.arg("--user");
                     c.arg(name);
@@ -1220,7 +1227,8 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
                 // sudo: `sudo [-u user] K=V … -- argv`. The `--` stops option
                 // parsing so an argv[0] beginning with `-` is treated as the
                 // command, not a sudo flag.
-                let mut c = Command::new("sudo");
+                // Never the daemon's PATH (GHSA-gx9w-4f7x-2gcp).
+                let mut c = Command::new(crate::helper::sudo()?);
                 if let LeafRunAs::User(name) = escalated {
                     c.arg("-u");
                     c.arg(name);
@@ -1736,10 +1744,17 @@ mod tests {
     fn pkexec_leaves_keep_cwd_through_env() {
         let mut l = leaf(&["id"], LeafRunAs::Root);
         l.cwd = "/srv".into();
-        let c = build_command(&l, EscalationMode::Pkexec).unwrap();
-        let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
-        assert_eq!(c.get_program(), "pkexec");
-        assert_eq!(args, ["env", "-C", "/srv", "--", "/usr/bin/id"]);
+        // The program is the trusted absolute pkexec (GHSA-gx9w-4f7x-2gcp);
+        // a host without one refuses, and the argv shape is checked where it
+        // can be built.
+        if let Ok(pkexec) = crate::helper::pkexec() {
+            let c = build_command(&l, EscalationMode::Pkexec).unwrap();
+            let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            assert_eq!(Path::new(c.get_program()), pkexec);
+            assert_eq!(args, ["env", "-C", "/srv", "--", "/usr/bin/id"]);
+        } else {
+            assert!(build_command(&l, EscalationMode::Pkexec).is_err());
+        }
 
         let ok = [leaf(&["id"], LeafRunAs::Root), leaf(&["A=B"], LeafRunAs::Direct)];
         assert!(check_pkexec_leaves(&ok, true).is_ok());
@@ -2028,9 +2043,17 @@ mod tests {
             stage_id: 0,
         };
 
-        // Root under sudo: `sudo -- /usr/sbin/sysctl -w …`, no shell.
+        // Root under sudo: `sudo -- /usr/sbin/sysctl -w …`, no shell. The
+        // program is the trusted, absolute `sudo` (GHSA-gx9w-4f7x-2gcp); a host
+        // with none (a CI container) refuses instead.
+        let Ok(sudo) = crate::helper::sudo() else {
+            let err = build_command(&leaf(LeafRunAs::Root), EscalationMode::Sudo).unwrap_err();
+            assert!(err.contains("sudo"), "{err}");
+            return;
+        };
         let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Sudo).unwrap();
-        assert_eq!(c.get_program().to_str().unwrap(), "sudo");
+        assert!(sudo.is_absolute());
+        assert_eq!(Path::new(c.get_program()), sudo);
         let args: Vec<String> = c
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -2051,9 +2074,17 @@ mod tests {
         assert_eq!(&args[0], "-u");
         assert_eq!(&args[1], "alice");
 
-        // Pkexec root: `pkexec sysctl …` (no shell).
-        let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec).unwrap();
-        assert_eq!(c.get_program().to_str().unwrap(), "pkexec");
+        // Pkexec root: `pkexec env -C / -- sysctl …` (no shell), from the
+        // trusted absolute `pkexec` when there is one.
+        match crate::helper::pkexec() {
+            Ok(pkexec) => {
+                let c = build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec).unwrap();
+                assert_eq!(Path::new(c.get_program()), pkexec);
+            }
+            Err(_) => {
+                assert!(build_command(&leaf(LeafRunAs::Root), EscalationMode::Pkexec).is_err());
+            }
+        }
 
         // Direct leaf: the program is the resolved binary, argv[0] unchanged.
         let c = build_command(&leaf(LeafRunAs::Direct), EscalationMode::Direct).unwrap();

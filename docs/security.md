@@ -84,3 +84,19 @@ relative to the stage's `chdir`. The executor then spawns that resolved path —
 directly, or as the command after `sudo --` / `pkexec env -C DIR --` — so
 neither `Command`, sudo's `secure_path`, nor `env` performs a second lookup
 that could pick a different file than the prompt showed (issue #62).
+
+The escalator itself is not looked up on the daemon's PATH either, since that
+PATH often starts with directories the daemon's user can write
+(`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, the `env` probed for
+`-C`, and the `zenity` / `kdialog` dialogs are searched on a fixed list
+(`/run/wrappers/bin` followed by the default login PATH), and a candidate is
+used only if it and every directory above it are owned by root and not
+group/world-writable, and, for `sudo` / `pkexec`, the file is setuid. A
+candidate this user can write through an ACL is refused too. A planted file
+is skipped, never run. On Debian/Ubuntu `/usr/local/bin` is group-writable
+(`root:staff 2775`), so a `sudo` installed there is skipped in favour of
+`/usr/bin/sudo`; `-v` prints which one the daemon uses. `--sudo-path PATH`
+(command line only, not forwarded with `--host`) names `sudo` explicitly for
+layouts the list does not cover; only its form is checked (an absolute path
+to an executable file), not its ownership, and the daemon says so when it
+starts (GHSA-gx9w-4f7x-2gcp).
