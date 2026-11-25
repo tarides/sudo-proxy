@@ -14,6 +14,17 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # The tag must name the Cargo.toml version (publish.yml checks the same):
+      # this workflow decides "pre-release" from the tag, publish.yml from
+      # Cargo.toml, and asset names come from the tag.
+      - name: Check the tag matches Cargo.toml
+        run: |
+          VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$GITHUB_REF" != "refs/tags/v$VERSION" ]; then
+            echo "tag ${GITHUB_REF#refs/tags/} does not match Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
+
       - name: Install Rust toolchain + MUSL target
         run: |
           rustup toolchain install stable --profile minimal

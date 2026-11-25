@@ -38,6 +38,14 @@ jobs:
         id: ver
         run: |
           VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          # On a tag, the tag must name this version: the two workflows decide
+          # "pre-release" from different sources (this one from Cargo.toml,
+          # release.yml from the tag), and a mismatch would publish the
+          # crate under a version nobody tagged, irreversibly.
+          if [[ "$GITHUB_REF" == refs/tags/* && "$GITHUB_REF" != "refs/tags/v$VERSION" ]]; then
+            echo "tag ${GITHUB_REF#refs/tags/} does not match Cargo.toml version $VERSION" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Releasing sudo-proxy $VERSION"
           # A SemVer pre-release (1.3.0-rc.1) goes to crates.io, where cargo
