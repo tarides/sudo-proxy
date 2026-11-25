@@ -11,9 +11,12 @@
 //! the fixed [`HELPER_PATH`] and a candidate is accepted only if no principal
 //! other than root could have put it there: the file and every directory
 //! leading to it, both as found and after resolving symlinks, are owned by
-//! root and not group/world-writable. For `sudo` and `pkexec`, which cannot
-//! work otherwise, the file must also be setuid. A same-UID, non-root process
-//! cannot produce such a file.
+//! root and not group/world-writable. A root-owned sticky directory is the
+//! exception (others may add entries there but not replace root's), which
+//! admits NixOS's `/nix/store`; any symlink on the path as found must then be
+//! root's too. For `sudo` and `pkexec`, which cannot work otherwise, the file
+//! must also be setuid. A same-UID, non-root process cannot produce such a
+//! file.
 //!
 //! `--sudo-path` (CLI only) overrides the `sudo` lookup for layouts the
 //! search does not cover, and for test stand-ins; it is not trust-checked and
@@ -132,6 +135,24 @@ pub fn check_trusted(path: &Path, setuid: bool) -> Result<(), String> {
     if writable_by_me(&real) {
         return Err(format!("{shown}: writable by this user (ACL?)"));
     }
+    // A root-owned sticky directory may be writable by others: they can add
+    // entries but not rename or remove root's. That is what admits NixOS,
+    // whose `/usr/bin/env` resolves into `/nix/store` (root:nixbld 1775).
+    // The price: someone else may own an entry *on the path as spelled*, a
+    // symlink they could repoint after this check, since the daemon spawns
+    // the spelled path. So every component of the spelled path that is a
+    // symlink must be root's too. Components of the resolved path are real
+    // directories, already required to be root's.
+    for comp in path.ancestors().filter(|d| !d.as_os_str().is_empty()) {
+        let l = std::fs::symlink_metadata(comp).map_err(|e| format!("{}: {e}", comp.display()))?;
+        if l.file_type().is_symlink() && l.uid() != 0 {
+            return Err(format!(
+                "{shown}: symlink {} owned by uid {}, not root",
+                comp.display(),
+                l.uid()
+            ));
+        }
+    }
     for start in [path, real.as_path()] {
         for dir in start
             .ancestors()
@@ -139,29 +160,36 @@ pub fn check_trusted(path: &Path, setuid: bool) -> Result<(), String> {
             .filter(|d| !d.as_os_str().is_empty())
         {
             let m = std::fs::metadata(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            if m.uid() != 0 {
-                return Err(format!(
-                    "{shown}: directory {} owned by uid {}, not root",
-                    dir.display(),
-                    m.uid()
-                ));
-            }
-            if m.mode() & 0o022 != 0 {
-                return Err(format!(
-                    "{shown}: directory {} mode {:04o} is group/world-writable",
-                    dir.display(),
-                    m.mode() & 0o7777
-                ));
-            }
-            if writable_by_me(dir) {
-                return Err(format!(
-                    "{shown}: directory {} writable by this user (ACL?)",
-                    dir.display()
-                ));
+            if let Some(why) = dir_verdict(m.uid(), m.mode(), || writable_by_me(dir)) {
+                return Err(format!("{shown}: directory {} {why}", dir.display()));
             }
         }
     }
     Ok(())
+}
+
+/// Why a directory on a helper's path is not trusted, or `None` if it is.
+/// It must be owned by root and writable by no one else, by mode bits or
+/// (asked of the kernel, so ACLs count) by this user. The exception is a
+/// root-owned sticky directory, where others may add entries but cannot
+/// rename or remove root's, so what is checked below it stays put.
+fn dir_verdict(uid: u32, mode: u32, writable_by_me: impl FnOnce() -> bool) -> Option<String> {
+    if uid != 0 {
+        return Some(format!("owned by uid {uid}, not root"));
+    }
+    if mode & 0o1000 != 0 {
+        return None;
+    }
+    if mode & 0o022 != 0 {
+        return Some(format!(
+            "mode {:04o} is group/world-writable",
+            mode & 0o7777
+        ));
+    }
+    if writable_by_me() {
+        return Some("writable by this user (ACL?)".to_string());
+    }
+    None
 }
 
 /// Whether the daemon's effective uid may write `path`, by the kernel's own
@@ -247,6 +275,52 @@ mod tests {
         };
         let err = check_trusted(&sh, true).unwrap_err();
         assert!(err.contains("not setuid"), "{err}");
+    }
+
+    /// NixOS: `/usr/bin/env` resolves into `/nix/store`, root-owned 1775.
+    /// Before this exception every helper there was refused, which made
+    /// `--pkexec` refuse every escalated request (its `env -C` probe failed).
+    #[test]
+    fn root_sticky_directory_is_trusted_even_if_group_writable() {
+        assert_eq!(dir_verdict(0, 0o41775, || true), None); // /nix/store
+        assert_eq!(dir_verdict(0, 0o41777, || true), None); // /tmp
+    }
+
+    #[test]
+    fn non_sticky_writable_directory_is_refused() {
+        assert!(dir_verdict(0, 0o40775, || false)
+            .unwrap()
+            .contains("group/world-writable"));
+        assert!(dir_verdict(0, 0o40757, || false)
+            .unwrap()
+            .contains("group/world-writable"));
+        assert!(dir_verdict(0, 0o40755, || true).unwrap().contains("ACL"));
+        assert_eq!(dir_verdict(0, 0o40755, || false), None);
+    }
+
+    #[test]
+    fn sticky_directory_not_owned_by_root_is_refused() {
+        assert!(dir_verdict(1000, 0o41777, || true)
+            .unwrap()
+            .contains("not root"));
+    }
+
+    /// The sticky exception lets others add entries to a directory on the
+    /// search list. A symlink they own there, pointing at the real helper,
+    /// would resolve to a trusted file, then be repointed before the spawn.
+    #[test]
+    fn user_owned_symlink_to_trusted_helper_is_refused() {
+        if running_as_root() {
+            return;
+        }
+        let Ok(sh) = find_trusted("sh", false, HELPER_PATH) else {
+            return;
+        };
+        let d = tempfile::tempdir().unwrap();
+        let link = d.path().join("sh");
+        std::os::unix::fs::symlink(&sh, &link).unwrap();
+        let err = check_trusted(&link, false).unwrap_err();
+        assert!(err.contains("symlink") && err.contains("not root"), "{err}");
     }
 
     #[test]
