@@ -3,7 +3,7 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
-## v1.2.3 — unreleased (security release)
+## v1.2.3 — 2026-11-25 (security release)
 
 A patch release on top of v1.2.2 with one security fix, and nothing else:
 
