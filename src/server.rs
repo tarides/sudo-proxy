@@ -772,8 +772,9 @@ fn handle_connection(
     ev.requester = req.requester.clone();
 
     // Validate before anything privileged can touch the request. `exec_*` and
-    // `prompter.prompt` accept only `&ValidatedRequest`, so this conversion is
-    // the single, type-enforced gate between the wire and dispatch. `req` is
+    // `prompter.prompt` accept only a `PreparedRequest`, which is built only
+    // from a `&ValidatedRequest`, so this conversion is the single,
+    // type-enforced gate between the wire and dispatch. `req` is
     // shadowed by the validated value; field reads below go through its `Deref`.
     let req_id = req.id.clone();
     let req = match ValidatedRequest::validate(req) {
@@ -885,18 +886,22 @@ fn handle_connection(
         crate::protocol::Action::Exec => {}
     }
 
-    // Reject a structurally-invalid plan (e.g. redirect of a composite, a
-    // disallowed setenv) before prompting — the human should never be asked to
-    // approve something the executor cannot run. Cheap compile; the executor
-    // compiles again at run time.
-    let views = match crate::executor::plan_display(&req) {
-        Ok(v) => v,
+    // Compile the plan once, resolving and pinning every program it runs
+    // (issue #105). The `no_shell` check, the pkexec decision, the prompt and
+    // the executor all read this one value; nothing below compiles the plan
+    // or looks a program up again. A structurally-invalid plan (e.g. redirect
+    // of a composite, a disallowed setenv) is rejected here, before
+    // prompting: the human should never be asked to approve something the
+    // executor cannot run.
+    let prepared = match crate::executor::prepare(&req, &env) {
+        Ok(p) => p,
         Err(msg) => {
             let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
             reject(&mut stream, &ev, Reject::InvalidPlan, resp);
             return;
         }
     };
+    let views = prepared.views();
 
     // Strict no-shell policy: reject any opaque stage (a `Shell` node, or a
     // shell, inline-code interpreter or runner, directly or behind a wrapper)
@@ -954,12 +959,12 @@ fn handle_connection(
     // multi-step plan, a redirected step, or a plan privileged only through
     // `run-as` — takes the TUI prompt and runs through sudo. The predicate
     // reads the same `views` the prompt renders.
-    let use_pkexec = delegate_to_pkexec(pkexec_only, mode, req.privileged, &views);
+    let use_pkexec = delegate_to_pkexec(pkexec_only, mode, req.privileged, views);
 
     let (resp, outcome) = if effective_privileged {
         if use_pkexec {
             // --pkexec: pkexec itself handles auth and approval; no TTY lock.
-            (exec_pkexec(&req, &env, &tty_lock), Outcome::Pkexec)
+            (exec_pkexec(&prepared, &tty_lock), Outcome::Pkexec)
         } else {
             // The TTY lock is shared with `executor::ForegroundGuard`, so a
             // prompt blocks until any in-flight exec has released the
@@ -970,11 +975,11 @@ fn handle_connection(
             // by ForegroundGuard for the swap.
             let prompt_result = {
                 let _g = lock_recover(&tty_lock);
-                prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
+                prompter.prompt(&prepared, unattended_eligible, PROMPT_TIMEOUT)
             };
             match prompt_result {
                 Ok(tui::PromptResult::Approved) => {
-                    (exec_sudo(&req, &env, &tty_lock), Outcome::Approved)
+                    (exec_sudo(&prepared, &tty_lock), Outcome::Approved)
                 }
                 // The TUI never emits ApprovedAlways for privileged
                 // requests; treat defensively as denial if it ever
@@ -1005,7 +1010,7 @@ fn handle_connection(
         if let Ok(_g) = tty_lock.try_lock() {
             let _ = tui::display_banner(&req);
         }
-        (exec_direct(&req, &env), Outcome::Unattended)
+        (exec_direct(&prepared), Outcome::Unattended)
     } else {
         // Default unprivileged path: prompt every command. `a` is offered only
         // when eligible; on an eligible daemon an `a` press approves this
@@ -1013,10 +1018,10 @@ fn handle_connection(
         // `a` degrades to approve-once and grants nothing.
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
-            prompter.prompt(&req, unattended_eligible, PROMPT_TIMEOUT)
+            prompter.prompt(&prepared, unattended_eligible, PROMPT_TIMEOUT)
         };
         match prompt_result {
-            Ok(tui::PromptResult::Approved) => (exec_direct(&req, &env), Outcome::Approved),
+            Ok(tui::PromptResult::Approved) => (exec_direct(&prepared), Outcome::Approved),
             Ok(tui::PromptResult::ApprovedAlways) => {
                 // Grant the session only when eligible — never persisted, no
                 // hosts.json write. Barrier 1 (eligibility) gates barrier 2.
@@ -1027,7 +1032,7 @@ fn handle_connection(
                 } else {
                     Outcome::Approved
                 };
-                (exec_direct(&req, &env), outcome)
+                (exec_direct(&prepared), outcome)
             }
             Ok(tui::PromptResult::Denied) => (Response::denied(&req.id), Outcome::Denied),
             Ok(tui::PromptResult::Timeout) => (Response::timeout(&req.id), Outcome::Timeout),

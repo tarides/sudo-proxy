@@ -10,7 +10,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Mutex;
 
-use sudo_proxy::executor::{apply_login_env_defaults, exec_sudo};
+use sudo_proxy::executor::{apply_login_env_defaults, exec_sudo, prepare};
 use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 
 mod common;
@@ -65,12 +65,14 @@ fn every_sudo_spawn_uses_the_resolved_escalator_not_path() {
     let lock = Mutex::new(());
 
     // Single stage (exec_sudo_stage).
-    let resp = exec_sudo(&privileged(vec![vec!["echo", "one"]]), &env, &lock);
+    let req = privileged(vec![vec!["echo", "one"]]);
+    let resp = exec_sudo(&prepare(&req, &env).unwrap(), &lock);
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::b64_decode(resp.stdout.as_deref().unwrap_or("")), b"one\n");
 
     // Multi-stage (exec_pipeline, one sudo per stage).
-    let resp = exec_sudo(&privileged(vec![vec!["echo", "two"], vec!["cat"]]), &env, &lock);
+    let req = privileged(vec![vec!["echo", "two"], vec!["cat"]]);
+    let resp = exec_sudo(&prepare(&req, &env).unwrap(), &lock);
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::b64_decode(resp.stdout.as_deref().unwrap_or("")), b"two\n");
 

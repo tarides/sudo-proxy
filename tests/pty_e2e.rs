@@ -113,7 +113,7 @@ fn privileged_goes_through_sudo_with_literal_argv() {
     // Assert only on the `-u` target and the argv after `--`: the `K=V`
     // part carries the runner's HOME/USER. The command is the path the prompt
     // resolved, so sudo's `secure_path` never gets a second lookup (#62).
-    let echo = sudo_proxy::executor::resolve_command("echo", "/").expect("echo on default PATH");
+    let echo = sudo_proxy::executor::resolve_command("echo", "/").expect("echo on default PATH").path;
     let echo = echo.to_str().unwrap();
     let log = d.shim_log();
     assert_eq!(log.len(), 2, "one sudo spawn per privileged step: {log:?}");
@@ -144,7 +144,7 @@ fn resolves_line_names_the_binary_that_runs() {
     let mut d = PtyDaemon::spawn(PtyOpts { extra_path: vec![bin.clone()], ..Default::default() });
 
     // `id`: the prompt names the system binary, and that is what runs.
-    let real_id = sudo_proxy::executor::resolve_command("id", "/").expect("id on default PATH");
+    let real_id = sudo_proxy::executor::resolve_command("id", "/").expect("id on default PATH").path;
     let h = d.request_async(&req("pty-62-id", &["id"], "issue 62"));
     let prompt = d.answer(b'y');
     assert!(prompt.contains(&format!("Resolves: {}", real_id.display())), "prompt: {prompt}");

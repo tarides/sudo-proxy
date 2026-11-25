@@ -3,9 +3,9 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use crate::executor::plan_display;
+use crate::executor::PreparedRequest;
 use crate::helper::{find_trusted, HELPER_PATH};
-use crate::protocol::{escape_dangerous, ValidatedRequest};
+use crate::protocol::escape_dangerous;
 use crate::tui::{self, pipeline_join, Prompter, PromptResult};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -18,7 +18,7 @@ impl Prompter for GuiPrompter {
     // fallback path.
     fn prompt(
         &self,
-        req: &ValidatedRequest,
+        req: &PreparedRequest,
         eligible: bool,
         _timeout: Duration,
     ) -> io::Result<PromptResult> {
@@ -28,7 +28,7 @@ impl Prompter for GuiPrompter {
 
 /// Show a Y/N confirmation dialog for a command request.
 /// Auto-detects: zenity → kdialog → TUI (/dev/tty) fallback.
-pub fn prompt_gui(req: &ValidatedRequest, eligible: bool) -> io::Result<PromptResult> {
+pub fn prompt_gui(req: &PreparedRequest, eligible: bool) -> io::Result<PromptResult> {
     let text = format_prompt_text(req);
 
     // The dialog answers the approval, so it is found like an escalator:
@@ -49,7 +49,7 @@ pub fn prompt_gui(req: &ValidatedRequest, eligible: bool) -> io::Result<PromptRe
     tui::prompt_tty(req, eligible, PROMPT_TIMEOUT)
 }
 
-fn format_prompt_text(req: &ValidatedRequest) -> String {
+fn format_prompt_text(req: &PreparedRequest) -> String {
     let mut lines = Vec::new();
     // Same disclosure as the TUI header (issue #25); plain text, no styling.
     if req.requester_is_ai() {
@@ -67,13 +67,13 @@ fn format_prompt_text(req: &ValidatedRequest) -> String {
         lines.push(format!("Reason: {}", req.reason));
     }
     lines.push(format!("Command: {}", pipeline_join(&req.pipeline)));
-    // Each stage's resolution comes from the same compiled plan the executor
-    // spawns from, so the dialog names the files that will run (issue #62).
+    // Each stage's resolution is the pinned one the executor spawns (issues
+    // #62, #105), so the dialog names the files that will run.
     let mut seen = std::collections::HashSet::new();
-    for view in plan_display(req).unwrap_or_default() {
+    for view in req.views() {
         let Some(cmd_name) = view.argv.first() else { continue };
         let shown = match &view.resolved_bin {
-            Some(p) => p.display().to_string(),
+            Some(r) => r.path.display().to_string(),
             None => "(not found in PATH)".to_string(),
         };
         if shown != *cmd_name && seen.insert((cmd_name.clone(), shown.clone())) {

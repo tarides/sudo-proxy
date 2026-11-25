@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use sudo_proxy::executor::{apply_login_env_defaults, exec_direct, exec_timeout, MAX_OUTPUT_BYTES};
+use sudo_proxy::executor::{apply_login_env_defaults, exec_timeout, prepare_and_exec_direct, MAX_OUTPUT_BYTES};
 use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 
 // Pulled in for the shared `which_or_skip` / `b64_decode` helpers only;
@@ -11,8 +11,9 @@ use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 // `common::` rather than glob-importing it.
 mod common;
 
-// Every test here feeds the request straight to `exec_direct`, which now takes
-// `&ValidatedRequest`, so validate at construction — exercising the typestate.
+// Every test here feeds the request straight to `prepare_and_exec_direct`,
+// which takes `&ValidatedRequest`, so validate at construction — exercising
+// the typestate.
 fn make_req(pipeline: Vec<Vec<&str>>) -> ValidatedRequest {
     let req = Request {
         id: format!("exec-{}", uuid::Uuid::new_v4()),
@@ -53,7 +54,7 @@ fn stdout_is_capped_at_max_output_bytes() {
     ]]);
 
     let start = Instant::now();
-    let resp = exec_direct(&req, &HashMap::new());
+    let resp = prepare_and_exec_direct(&req, &HashMap::new());
     let elapsed = start.elapsed();
 
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
@@ -90,7 +91,7 @@ fn long_running_child_killed_after_timeout() {
 
     let req = make_req(vec![vec!["sleep", "30"]]);
     let start = Instant::now();
-    let resp = exec_direct(&req, &HashMap::new());
+    let resp = prepare_and_exec_direct(&req, &HashMap::new());
     let elapsed = start.elapsed();
 
     assert_eq!(resp.status, Status::Error);
@@ -129,7 +130,7 @@ fn pipeline_timeout_kills_all_stages() {
     ]);
 
     let start = Instant::now();
-    let resp = exec_direct(&req, &HashMap::new());
+    let resp = prepare_and_exec_direct(&req, &HashMap::new());
     let elapsed = start.elapsed();
 
     assert_eq!(resp.status, Status::Error);
@@ -162,7 +163,7 @@ fn pipeline_timeout_kills_all_stages() {
 #[test]
 fn pipeline_succeeds_without_guard_interference() {
     let req = make_req(vec![vec!["echo", "hi"], vec!["wc", "-c"]]);
-    let resp = exec_direct(&req, &HashMap::new());
+    let resp = prepare_and_exec_direct(&req, &HashMap::new());
     assert_eq!(resp.status, Status::Ok);
     assert_eq!(resp.stages.len(), 2);
     assert_eq!(resp.exit_code(), 0);
@@ -215,7 +216,7 @@ fn exec_direct_sees_login_env_defaults() {
     let req = make_req(vec![vec!["env"]]);
     let mut env = HashMap::new();
     apply_login_env_defaults(&mut env);
-    let resp = exec_direct(&req, &env);
+    let resp = prepare_and_exec_direct(&req, &env);
 
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
     let stdout = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or("")))
@@ -248,7 +249,7 @@ impl Drop for EnvRestore {
 fn unprivileged_child_has_no_controlling_terminal() {
     let mut env = std::collections::HashMap::new();
     apply_login_env_defaults(&mut env);
-    let resp = exec_direct(&make_req(vec![vec!["cat", "/proc/self/stat"]]), &env);
+    let resp = prepare_and_exec_direct(&make_req(vec![vec!["cat", "/proc/self/stat"]]), &env);
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
     let out = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or(""))).to_string();
     let pid: &str = out.split_whitespace().next().unwrap();

@@ -13,8 +13,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use sudo_proxy::executor::PreparedRequest;
 use sudo_proxy::mode::Mode;
-use sudo_proxy::protocol::{Request, Response, Status, ValidatedRequest};
+use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server;
 use sudo_proxy::tui::{Prompter, PromptResult, ResultSink};
 use tempfile::TempDir;
@@ -66,7 +67,7 @@ impl ScriptedPrompter {
 impl Prompter for ScriptedPrompter {
     fn prompt(
         &self,
-        req: &ValidatedRequest,
+        req: &PreparedRequest,
         _eligible: bool,
         _timeout: Duration,
     ) -> std::io::Result<PromptResult> {

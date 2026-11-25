@@ -85,6 +85,23 @@ directly, or as the command after `sudo --` / `pkexec env -C DIR --` — so
 neither `Command`, sudo's `secure_path`, nor `env` performs a second lookup
 that could pick a different file than the prompt showed (issue #62).
 
+The plan is compiled once per request, and each program is pinned when it is
+found (issue #105): the file is opened (`O_PATH`), and its `(dev, ino)` and
+canonical target (the `-> target` the prompt shows) come from that
+descriptor. The `no_shell` check, the prompt and the spawn all read this one
+resolution. Just before each spawn the path must still name the same inode,
+otherwise the stage is refused ("changed since it was approved") and nothing
+runs. A binary running as the daemon's user is executed through its
+descriptor (`/proc/self/fd/N`), so not even that last check leaves a window.
+Programs run by a wrapper (`env X=1 tool`, `nice`, `timeout`) are pinned
+too: the wrapper receives the pinned absolute path in place of the name
+(basename unchanged), so it never searches PATH, and a wrapped program that
+was not found is refused before the spawn, like an unfound argv[0]. A `#!`
+script and an escalated step are spawned by path after the check (a script
+cannot run from a close-on-exec descriptor, and `sudo` closes inherited
+ones). Pinning fixes which file runs, not its contents: a file the requester
+can write can still be rewritten in place (see the threat model, 3.7).
+
 The escalator itself is not looked up on the daemon's PATH either, since that
 PATH often starts with directories the daemon's user can write
 (`~/.cargo/bin`, `~/.local/bin`). `sudo`, `pkexec`, the `env` probed for
