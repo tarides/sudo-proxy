@@ -1115,9 +1115,11 @@ fn audit_programs(views: &[LeafView]) -> Vec<String> {
         .flat_map(|v| v.programs.iter())
         .filter_map(|p| p.resolved.as_ref())
         .map(|r| {
-            let path = r.path.display().to_string();
+            let path = clip_middle(&r.path.display().to_string(), AUDIT_PATH_CHARS);
             let mut s = match r.canonical() {
-                Some(c) if c != r.path => format!("{path} -> {}", c.display()),
+                Some(c) if c != r.path => {
+                    format!("{path} -> {}", clip_middle(&c.display().to_string(), AUDIT_PATH_CHARS))
+                }
                 _ => path,
             };
             if r.user_writable {
@@ -1126,6 +1128,25 @@ fn audit_programs(views: &[LeafView]) -> Vec<String> {
             s
         })
         .collect()
+}
+
+/// Each path in an audit `programs` entry is kept to this many chars (plus
+/// the clip marker), so `path -> target (user-writable)` fits the audit log's
+/// 256-char field bound and the marker is never the part cut.
+const AUDIT_PATH_CHARS: usize = 90;
+
+/// Clip `s` to `max` chars in the middle, keeping its start and its end (the
+/// program's name), with an explicit marker between them.
+fn clip_middle(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    let tail = max / 2;
+    let head = max - tail;
+    let start: String = s.chars().take(head).collect();
+    let end: String = s.chars().skip(n - tail).collect();
+    format!("{start}…[{} more chars hidden]…{end}", n - head - tail)
 }
 
 /// The strict `no_shell` policy's refusal, if any stage is opaque (a `Shell`
@@ -1251,6 +1272,19 @@ fn read_request_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long path in an audit `programs` entry is clipped in the middle, so
+    /// the program's name and the `(user-writable)` marker survive (#101).
+    #[test]
+    fn audit_program_paths_are_clipped_in_the_middle() {
+        let long = format!("/tmp/{}/bin/devtool", "d".repeat(300));
+        let out = clip_middle(&long, AUDIT_PATH_CHARS);
+        assert!(out.starts_with("/tmp/ddd") && out.ends_with("/bin/devtool"), "{out}");
+        assert!(out.contains("more chars hidden"), "{out}");
+        let entry = format!("{out} -> {out} (user-writable)");
+        assert!(entry.chars().count() <= 256, "{}", entry.chars().count());
+        assert_eq!(clip_middle("/usr/bin/x", AUDIT_PATH_CHARS), "/usr/bin/x");
+    }
     use crate::prop::Rng;
     use std::sync::{Arc, Mutex};
 
