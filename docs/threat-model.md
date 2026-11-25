@@ -76,7 +76,7 @@ invariant at a given boundary are omitted.
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
 | Spoofing | A same-UID process **types the answer itself**: synthetic keystrokes into the approval terminal (`tmux send-keys`, `screen -X stuff`, kitty/wezterm remote control, Konsole D-Bus, X11 XTEST, `TIOCSTI`). The typical requester (an agent) has a same-UID shell, so A1 reaches this as A2. | The daemon refuses to start in a terminal that accepts such input (`ttyguard`: multiplexer `TERM`/`$TMUX`/`$STY`/`$ZELLIJ`, remote-control emulators, VS Code, Emacs, X11 without Wayland) unless started with `--allow-injectable-tty`, which puts a warning line in every prompt. There is deliberately no `hosts.json` equivalent, since an agent can write that file and restart the daemon through MCP. Unprivileged children run in their own session, with no controlling terminal, so they cannot `TIOCSTI` into the prompt. Legacy `TIOCSTI` is reported at startup. `sudo-proxy-mcp` scrubs the launcher's terminal variables from the window it spawns. | A1 (assumption, now checked) / GHSA-cpmp-67wf-gwmx |
-| Elevation | Wrapper (`env`, `nice`, `timeout`, `coreutils`…) or inline interpreter hides a shell from the opaque flag and `no_shell`; `env LD_PRELOAD=…` injects code into a vouched program. | Wrapper-aware unwrap; unparsable wrapper, PATH change, rejected env name or unknown runner → opaque. | G4.7 |
+| Elevation | Wrapper (`env`, `nice`, `timeout`, `coreutils`…) or inline interpreter hides a shell from the opaque flag and `no_shell`; `env LD_PRELOAD=…` injects code into a vouched program. | Wrapper-aware unwrap; unparsable wrapper, PATH change, a code-loading env name (`LD_*`, `DYLD_*`, `BASH_ENV`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, …; `wrappers::CODE_LOADING`) or unknown runner → opaque. The same names, inherited from the daemon's environment with `--inherit-env`, are never matched by a wildcard; named exactly, they are listed on the prompt's `Env:` line and refused at startup under `no_shell` (#101). | G4.7 |
 
 ### B4 — daemon → exec → root (A1)
 
@@ -84,8 +84,9 @@ invariant at a given boundary are omitted.
 |--------|--------|---------|-----|
 | Tampering | Executed command differs from the validated/shown argv (shell injection). | No shell on the privileged path; `Command::new(argv[0]).args(…)`. | G3.1 |
 | Tampering | The file that runs differs from the one checked and shown: renamed over, a symlink retargeted, or the same name added to an earlier `PATH` directory between the prompt and the spawn (up to 60 s, plus time queued behind another prompt). | Each program is resolved once per request and pinned: path, `(dev, ino)` and canonical target, all from one `O_PATH` descriptor. The `no_shell` check, the prompt and the spawn read that pin. The spawn is refused if the path now names another inode; a direct binary is executed through its descriptor (`/proc/self/fd/N`); a program run by a wrapper is passed to it by its pinned absolute path, so the wrapper never searches `PATH`. **Residual:** see 3.7 below. | G4.2 / #105 |
-| Elevation | Environment-based escalation (`LD_PRELOAD`, `IFS`, `BASH_ENV`); agent-socket abuse. | Hard-reject env allowlist; `privileged + forward_agent` rejected; request `SSH_AUTH_SOCK` rejected. | G3.2 |
-| Info disclosure | Child inherits the socket fd or secrets. | Execution isolation: cwd `/`, umask 0077, stdin null, no fd inheritance. | A2 (assumption), G3.x |
+| Elevation | Environment-based escalation (`LD_PRELOAD`, `IFS`, `BASH_ENV`); agent-socket abuse. | Hard-reject env allowlist for the request's `env` and `setenv`; `privileged + forward_agent` rejected; request `SSH_AUTH_SOCK` rejected. The daemon's own environment reaches a step only by operator opt-in (`--inherit-path` / `--inherit-env`, command line only, #101), and only for a request with no escalated step, in the executor's `Direct` arm; the `sudo` process gets a cleared environment (`TERM`, `LANG`, `LC_*`), so nothing from it reaches a root step. | G3.2 |
+| Tampering | With `--inherit-path`, an inherited variable or a user-writable `PATH` directory (`.venv/bin`, `~/.cargo/bin`) substitutes the code an approved unprivileged step runs. | Startup check of every `PATH` entry (absolute, owned by root or the daemon's user, not writable by group or others except a root-owned sticky directory or the user's private group); each program pinned (#105) and wrapped programs passed by absolute path; a candidate must be executable by the daemon's user (`execvp`'s rule); `Resolves:` marks `(user-writable)` files; escalated requests resolve on the login `PATH`, and helpers never on any `PATH` (B4 row above). **Residual:** see "Inherited environment" below. | G4.2 / #101 |
+| Info disclosure | Child inherits the socket fd or secrets. | Execution isolation: cwd `/`, umask 0077, stdin null, no fd inheritance. Without `--inherit-env` a child gets no variable from the daemon's environment; with it, the operator chose the names, values are never shown at the prompt nor written to the audit log, and a step's output can still carry them back to the requester (residual below). | A2 (assumption), G3.x |
 | DoS | Runaway child floods output. | 16 MiB per-stream output cap. | G6.4 |
 | Elevation | A same-UID process plants a `sudo` (or `pkexec`, or GUI dialog) in a user-writable directory on the daemon's own `PATH` (`~/.cargo/bin`, `~/.local/bin`, shims), which then runs on the next approved privileged request with the human's credential while the prompt shows the approved command. | Helpers are never looked up on the daemon's `PATH`. They are searched on a fixed list (`/run/wrappers/bin` + the default login PATH) and a candidate is used only if it is a root-owned file, not writable by group, others or (through an ACL) the daemon's user, whose directories (as spelled and as resolved) are all the same, except that a root-owned sticky directory may be group- or world-writable (others can add entries but not replace root's; this admits NixOS's `/nix/store`), and every symlink on the spelled path must be root-owned so no one else can repoint it; `sudo` and `pkexec` must also be setuid (`helper::check_trusted`); an untrusted candidate is skipped, never used. `--sudo-path` overrides this for unusual layouts; it is CLI-only (no `hosts.json` or environment equivalent, not forwarded by `--host`, not passed by `sudo-proxy-mcp`) and announced at startup. **Residual:** whoever can replace the installed `sudo-proxy` binary, or what launches it (the terminal emulator `sudo-proxy-mcp` finds on its `PATH`, the client-side `ssh` and `~/.ssh/config`), controls the next daemon; install it where the agent cannot write. | G1 / GHSA-gx9w-4f7x-2gcp |
 
@@ -131,8 +132,12 @@ A  A root command runs that the human did NOT approve
 │   │        [no shell; structured argv → G3.1 · blocked]
 │   ├─ 2.2 Environment escalation (LD_PRELOAD / IFS / BASH_ENV)
 │   │        [hard-reject env allowlist → G3.2 · blocked]
-│   └─ 2.3 Control / zero-width / bidi characters in argv
-│            [has_dangerous_chars → G3.3 · blocked]
+│   ├─ 2.3 Control / zero-width / bidi characters in argv
+│   │        [has_dangerous_chars → G3.3 · blocked]
+│   └─ 2.4 An inherited variable or PATH entry substitutes code (--inherit-*)
+│            [operator opt-in, unprivileged-only, wildcard exclusions, startup
+│             PATH check, cleared sudo env → G3.2 / #101 · mitigated;
+│             residual: the dev shell's own trustworthiness]
 │
 ├─ 3  Deceive the human into approving the wrong thing           (defeat G4)
 │   ├─ 3.1 ANSI / control / bidi in reason/host/session/id/version/requester
@@ -149,9 +154,14 @@ A  A root command runs that the human did NOT approve
 │   │         · blocked for detected terminals (residual: undetected ones)]
 │   ├─ 3.6 Shell or inline code behind a wrapper (env sh -c, python3 -c)
 │   │        [wrapper-aware unwrap → G4.7 · mitigated; residual: awk/sed/script interpreters]
-│   └─ 3.7 Swap the approved file between the prompt and the spawn
-│            [resolved once and pinned by inode → G4.2 / #105 · blocked;
-│             residual: contents changed in place, script / escalated exec window]
+│   ├─ 3.7 Swap the approved file between the prompt and the spawn
+│   │        [resolved once and pinned by inode → G4.2 / #105 · blocked;
+│   │         residual: contents changed in place, script / escalated exec window]
+│   └─ 3.8 The path shown differs from the path run on an inherited PATH
+│            (a decoy earlier on PATH, a wrapper's own lookup)
+│            [wrapped programs pinned by absolute path; execvp access rule;
+│             (user-writable) marker → G4.2 / #101 · mitigated; residual:
+│             shebang interpreters and programs looked up later]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
@@ -174,6 +184,28 @@ A  A root command runs that the human did NOT approve
 
 Every leaf maps to a sub-goal in [assurance-case.md](assurance-case.md); no leaf
 is unaccounted for. The residuals — already on record and accepted — are:
+
+- **2.4 / 3.8 — inherited environment (`--inherit-path` / `--inherit-env`,
+  #101).** Off by default; an operator turns it on for a daemon started by
+  hand in a dev shell. What remains:
+  - *Where the environment comes from.* It comes from `.envrc` and what it
+    pulls in (`flake.nix`, `shell.nix`, `.env`), which an agent may be able
+    to edit in the repository. A request to restart the daemon after such a
+    change deserves the care of a privileged command; the startup report and
+    its fingerprints make a change visible.
+  - *Values leave through output.* stdout and stderr go back to the
+    requester, so a step that prints its environment discloses the inherited
+    values, and every approved step holds the operator's ambient credentials.
+    A local process running as the daemon's user can read them anyway
+    (`/proc`, the dev shell's files); a remote requester could not.
+  - *Contents of user-writable binaries.* Pinning fixes which file runs, not
+    what is in it; `(user-writable)` is the only signal.
+  - *Shebang interpreters.* `#!/usr/bin/env x` looks `x` up at run time on
+    the inherited `PATH`; the prompt shows the script, not the interpreter.
+  - *Programs looked up later.* `just` recipes, `sops exec-env`, scripts and
+    other runners look programs up on the inherited `PATH`, which the prompt
+    cannot show. This is the existing open-ended-runner residual, made the
+    normal case.
 
 - **1.4 / 4.4 — unattended unprivileged window (F2, closed; bounded residual).**
   The old persisted, global auto-approve is gone (invariant G7). What remains is

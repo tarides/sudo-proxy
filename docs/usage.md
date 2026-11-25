@@ -199,6 +199,51 @@ is answered. The remote daemon checks too, and receives
 `--allow-injectable-tty` when you passed it locally. A remote older than 1.2.2
 rejects that flag, so upgrade remotes first.
 
+## Running steps in a dev shell (`--inherit-path`, `--inherit-env`)
+
+By default every step runs with a clean environment and the login `PATH`.
+For a project whose tools come from a dev shell (direnv, Nix, a Python
+virtualenv), start the daemon **by hand inside that shell** and pass:
+
+- `--inherit-path`: steps run with the daemon's `PATH`, and their programs
+  are resolved on it;
+- `--inherit-env=PATTERN,…`: the same, plus the variables named. A pattern is
+  a name (`REPO_ROOT`), a prefix (`TF_VAR_*`) or `*`.
+
+```sh
+cd ~/src/infra            # direnv loads .envrc
+sudo-proxy -v --inherit-env='REPO_ROOT,TF_VAR_*,ANSIBLE_CONFIG,VIRTUAL_ENV'
+```
+
+Only requests with **no escalated step** inherit; a request with
+`privileged` or a `run-as` anywhere runs exactly as without the flags, all
+its steps included. The environment is the one the daemon started with: after
+changing `.envrc`, restart the daemon.
+
+- **Startup checks.** Every `PATH` entry must be absolute, and every directory
+  up to `/` owned by root or by you and not writable by group or others (a
+  root-owned sticky directory such as `/nix/store`, or one of yours whose
+  group is your private group, passes). An entry that does not exist yet, such
+  as `.venv/bin` before `uv sync`, is checked at its nearest existing
+  directory and reported missing.
+- **Excluded names.** `PREFIX*` and `*` never match code-loading variables
+  (`LD_*`, `PYTHONPATH`, `NODE_OPTIONS`, `GIT_SSH_COMMAND`, …) or terminal
+  and display variables (`DISPLAY`, `TMUX`, …); name them exactly to inherit
+  them. With `no_shell` on, a code-loading variable cannot be inherited.
+  `SSH_AUTH_SOCK` is never inherited; use `forward_agent`.
+- **What you see.** The daemon prints a startup report: the `PATH` entries,
+  the inherited names (never values), and two fingerprints to compare with
+  the last start. Each prompt says `Env:     daemon environment (…)`, and
+  marks a program you could have replaced `(user-writable)`.
+- **Not available:** the `a` answer (`--unattended-eligible` is refused), and
+  `--host`: a daemon started over ssh has no dev shell. Reach a hand-started
+  daemon through your own tunnel (`ssh -R`) instead. `sudo-proxy-mcp`'s
+  `start_server` never passes these flags.
+
+Steps then run with your dev shell's code and credentials: treat a request
+to restart the daemon after an `.envrc` change like a privileged command, and
+remember a step's output returns to the requester.
+
 ## Remote hosts over SSH
 
 `sudo-proxy --host HOST` resolves the remote UID (cached in

@@ -37,8 +37,14 @@ finding.
   `argv` shown at the approval prompt. Commands are run via
   `Command::new(argv[0]).args(…)` — never `sh -c` — so there is no second round
   of shell parsing. *Attack:* find any input where the executed bytes differ
-  from the displayed bytes. → `src/executor.rs` (`exec_pkexec`/`exec_sudo`/
-  `exec_direct`), `src/tui.rs` (`prompt_tty`).
+  from the displayed bytes. With `--inherit-path` (#101) the programs of a
+  request with no escalated step resolve on the daemon's own `PATH`, which may
+  hold user-writable directories: the file shown must still be the file that
+  runs (pinning, wrapped programs passed by absolute path, `execvp`'s access
+  rule), and no inherited name may reach any step of a request that escalates.
+  → `src/executor.rs` (`exec_pkexec`/`exec_sudo`/`exec_direct`,
+  `compile_plan`, `build_command`), `src/inherit.rs`, `src/tui.rs`
+  (`prompt_tty`).
 - **C2 — No exec without a keypress.** No privileged command runs without an
   interactive single keypress on `/dev/tty`; the prompt is default-**deny** on a
   60 s timeout. *Attack:* reach `exec_*` for a `privileged` request without a
@@ -86,8 +92,11 @@ The G7 sub-claims (unprivileged surface):
   survive a session/tunnel boundary or a restart; or make a stale
   `confirm_unprivileged` key re-enable it; or make a `hosts.json` that another
   user can write (foreign owner, group/world-writable, symlink, writable parent)
-  confer eligibility. → `src/server.rs` (dispatch),
-  `src/hosts.rs` (`Policy`, migration), `tests/approval.rs`.
+  confer eligibility; or get the `a` answer offered on a daemon started with
+  `--inherit-path` / `--inherit-env`, which exclude it (#101). → `src/server.rs`
+  (dispatch, `run`), `src/hosts.rs` (`Policy`, migration),
+  `src/bin/sudo-proxy.rs` (`inherit_config`), `tests/approval.rs`,
+  `tests/inherit.rs`.
 - **C9 — Self/loopback can't dodge local policy.** A request naming any loopback
   alias of the daemon's own machine (`localhost`, `127.0.0.0/8`, `::1`,
   `localhost.`, the machine's own hostname) routes to the *local* path, not an
@@ -161,6 +170,13 @@ what carries **no proof**, roughly in order of how much it worries us:
    real: an operator who enables eligibility and presses `a` on a hostile-looking
    command is not protected by the code. → `src/server.rs` dispatch, finding F2
    in `docs/security-audit.md`.
+7. **The inherited environment (`--inherit-path`, `--inherit-env`).** Opt-in,
+   for a daemon started by hand in a dev shell. Its steps are exactly as
+   trustworthy as that dev shell, which an agent may be able to edit
+   (`.envrc`, `flake.nix`); a step can print inherited values back to the
+   requester; scripts and runners look programs up later on that `PATH`,
+   where the prompt cannot follow. → `src/inherit.rs`,
+   `docs/threat-model.md` (2.4, 3.8).
 
 ## Run it in a container
 

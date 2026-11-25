@@ -3,6 +3,38 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## Unreleased — What `--inherit-*` shows and records (#101, 1.3.0)
+
+- **`(user-writable)`.** A `Resolves:` entry is marked when the daemon's user
+  could replace what runs: it may write the file, the directory it was found
+  in, or the symlink target's directory (`Resolved::user_writable`, computed
+  at pin time). The one-line form names such a program even when it would
+  otherwise print nothing. This applies to every daemon.
+- **Middle clipping.** A long `Resolves:` path is clipped in the middle
+  (`…[N more chars hidden]…`), so its end and the `->` target stay visible;
+  the marker is outside the clipped text.
+- **Startup report** on the daemon's terminal: the patterns, each `PATH` entry
+  (user-writable or missing), the inherited names, never values, with
+  code-loading ones flagged, the skipped entries, and two SHA-256
+  fingerprints (12 hex digits): names + `PATH`, and names + values. New
+  dependency: `sha2` (`cargo deny check` passes).
+- **Audit:** a `startup` record with the flag, counts and the names-and-`PATH`
+  fingerprint (the values fingerprint stays on the terminal: the log also goes
+  to syslog, and a short hash of a weak secret can be brute-forced). A request
+  that inherits is recorded with `inherited: true` (and `inherited-env` on the
+  human line) and its resolved programs (`path -> target`). No variable name
+  or value is ever recorded.
+- **Docs:** `threat-model.md` (B3, B4, leaves 2.4 and 3.8, the residuals),
+  `assurance-case.md` (A3, G3.2, G4.2, G4.7, new G7.4), `security.md`,
+  `security-audit.md`, `REVIEWING.md` (C1, C8, no-assurance item 7) and a
+  dev-shell section in `usage.md`.
+
+Tests: `tests/pty_inherit.rs` drives the real daemon with `--inherit-env`
+(startup report, `Env:` line, `(user-writable)`, the variable reaching the
+step, audit records free of names and values); unit tests for the
+fingerprints, the middle clipping and the markers. The pty goldens are
+unchanged.
+
 ## Unreleased — `--inherit-path` and `--inherit-env=PATTERN,…` (#101, 1.3.0)
 
 Two daemon flags, off by default and command-line only, for a daemon started
@@ -55,9 +87,8 @@ Tests: `tests/inherit.rs` (the inherited `PATH` and variables reach an
 unprivileged step; nothing reaches any step of an escalated request, nor
 sudo's argv or environment; a `sudo` planted first on the inherited `PATH`
 never runs; every startup refusal; `sudo-proxy-mcp` never passes the flags),
-unit tests in `inherit.rs`, `wrappers.rs` and `executor.rs`. Still to come
-(the next PR): the user-writable marker, the startup report and its
-fingerprints, audit records and the documentation.
+unit tests in `inherit.rs`, `wrappers.rs` and `executor.rs`. The marker,
+report, audit records and documentation are in the entry above.
 
 ## Unreleased — Helpers run with a cleared environment (#101, 1.3.0)
 

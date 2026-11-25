@@ -152,6 +152,11 @@ pub struct Resolved {
     /// path no longer opens once that interpreter runs. Those are spawned by
     /// path after the identity check.
     pub native: bool,
+    /// The daemon's user could replace what runs: it may write the file, the
+    /// directory it was found in, or (for a symlink) the directory of the
+    /// target. The prompt marks it `(user-writable)` (#101). Pinning fixes
+    /// which file runs, not what is in it.
+    pub user_writable: bool,
     fd: Arc<OwnedFd>,
 }
 
@@ -200,12 +205,17 @@ impl Resolved {
                 Ok(magic == *b"\x7fELF")
             })
             .unwrap_or(false);
+        let file = if proc_fd_available() { proc_path.as_path() } else { path.as_path() };
+        let user_writable = writable_by_me(file)
+            || path.parent().is_some_and(writable_by_me)
+            || canonical.as_deref().and_then(Path::parent).is_some_and(writable_by_me);
         Some(Resolved {
             path,
             canonical,
             dev: st.st_dev as u64,
             ino: st.st_ino as u64,
             native,
+            user_writable,
             fd: Arc::new(fd),
         })
     }
@@ -241,6 +251,7 @@ impl Resolved {
             dev: 0,
             ino: 0,
             native: false,
+            user_writable: false,
             fd: Arc::new(OwnedFd::from(f)),
         }
     }
@@ -288,6 +299,15 @@ fn executable_by_me(proc_path: &Path, mode: libc::mode_t) -> bool {
         return false;
     };
     unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
+}
+
+/// Whether the daemon's effective uid may write `path`, by the kernel's own
+/// answer (ACLs count). For a `/proc/self/fd/N` link it is the pinned inode.
+fn writable_by_me(path: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::W_OK, libc::AT_EACCESS) == 0 }
 }
 
 fn fd_path(fd: RawFd) -> PathBuf {

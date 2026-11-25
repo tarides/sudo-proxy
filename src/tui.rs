@@ -468,6 +468,26 @@ fn shown(text: &str) -> String {
     clip(&escape_dangerous(text), MAX_DISPLAY_LINE_CHARS)
 }
 
+/// A filesystem path as the `Resolves:` lines show it: escaped like [`shown`],
+/// but a long one is clipped in the **middle**, so its end, the binary's
+/// name, stays visible (#101). The marker `…[N more chars hidden]…` sits
+/// between two kept parts, so `/usr/bin/…[N more chars hidden]…/x` cannot be
+/// read as `/usr/bin/x`. A `->` target and the `(user-writable)` marker are
+/// added outside the clipped text.
+fn shown_path(path: &str) -> String {
+    let text = escape_dangerous(path);
+    let n = text.chars().count();
+    if n <= MAX_DISPLAY_LINE_CHARS {
+        return text;
+    }
+    let tail = MAX_DISPLAY_LINE_CHARS / 2;
+    let head = MAX_DISPLAY_LINE_CHARS - tail;
+    let hidden = n - head - tail;
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(n - tail).collect();
+    format!("{start}…[{hidden} more chars hidden]…{end}")
+}
+
 /// Byte length of the CSI escape sequence (`ESC [`, parameter bytes, then a
 /// final byte in `0x40..=0x7E`) starting at `s[i..]`, if one starts there.
 fn csi_len(s: &[u8], i: usize) -> Option<usize> {
@@ -1153,24 +1173,35 @@ fn resolve_detail(resolved: Option<&Resolved>, style: &Style) -> String {
     let resolved_str = resolved.path.display().to_string();
     // The canonical target read through the pinned descriptor when the plan
     // was compiled (issue #105), not a fresh `canonicalize` of the path.
-    match resolved.canonical() {
+    let detail = match resolved.canonical() {
         Some(canonical) => {
             let canonical_str = canonical.display().to_string();
             // Compared unclipped, shown clipped (G4.3).
             if canonical_str != resolved_str {
                 format!(
                     "{} {bold}->{reset} {}",
-                    shown(&resolved_str),
-                    shown(&canonical_str)
+                    shown_path(&resolved_str),
+                    shown_path(&canonical_str)
                 )
             } else {
-                shown(&resolved_str)
+                shown_path(&resolved_str)
             }
         }
         None => format!(
             "{} {dim}(canonicalize failed){reset}",
-            shown(&resolved_str)
+            shown_path(&resolved_str)
         ),
+    };
+    format!("{detail}{}", writable_tag(resolved, style))
+}
+
+/// ` (user-writable)` when the daemon's user could replace what runs (#101).
+fn writable_tag(resolved: &Resolved, style: &Style) -> String {
+    let Style { bold, reset, .. } = *style;
+    if resolved.user_writable {
+        format!(" {bold}(user-writable){reset}")
+    } else {
+        String::new()
     }
 }
 
@@ -1209,30 +1240,33 @@ fn write_resolves_line<W: Write>(
     // Branch on the raw, unclipped strings; show them escaped (#86), then
     // clipped (G4.3): neither step may change which rule applies.
     let resolved_differs = resolved_full != *cmd_name;
-    let resolved_shown = shown(&resolved_full);
+    let resolved_shown = shown_path(&resolved_full);
+    let tag = writable_tag(resolved, style);
 
     match resolved.canonical() {
         Some(canonical) => {
             let canonical_full = canonical.display().to_string();
             let canonical_differs = canonical_full != resolved_full;
             let resolved_str = &resolved_shown;
-            let canonical_str = shown(&canonical_full);
+            let canonical_str = shown_path(&canonical_full);
             match (resolved_differs, canonical_differs) {
-                (false, false) => Ok(()),
-                (true, false) => writeln!(w, "Resolves: {resolved_str}"),
+                // Nothing to add about the path, but a writable file is
+                // always named.
+                (false, false) if tag.is_empty() => Ok(()),
+                (false, false) | (true, false) => writeln!(w, "Resolves: {resolved_str}{tag}"),
                 (false, true) => writeln!(
                     w,
-                    "Resolves: {bold}{resolved_str} -> {canonical_str}{reset}"
+                    "Resolves: {bold}{resolved_str} -> {canonical_str}{reset}{tag}"
                 ),
                 (true, true) => writeln!(
                     w,
-                    "Resolves: {resolved_str} {bold}->{reset} {canonical_str}"
+                    "Resolves: {resolved_str} {bold}->{reset} {canonical_str}{tag}"
                 ),
             }
         }
         None => writeln!(
             w,
-            "Resolves: {resolved_shown} {dim}(canonicalize failed){reset}"
+            "Resolves: {resolved_shown} {dim}(canonicalize failed){reset}{tag}"
         ),
     }
 }
@@ -2638,6 +2672,59 @@ mod tests {
         assert!(lines[0].starts_with("Resolves: "), "{out}");
         assert!(lines[0].contains("->") && lines[0].contains("more chars hidden"), "{out}");
         assert!(lines[0].chars().count() <= RESOLVES_BOUND, "{} chars", lines[0].chars().count());
+    }
+
+    /// A long path is clipped in the middle: its start and the binary's name
+    /// stay visible, with the marker between them (#101).
+    #[test]
+    fn long_paths_are_clipped_in_the_middle() {
+        let long = format!("/usr/{}/bin/the-tool", "d".repeat(500));
+        let out = shown_path(&long);
+        assert!(out.starts_with("/usr/ddd"), "{out}");
+        assert!(out.ends_with("/bin/the-tool"), "{out}");
+        assert!(out.contains("…[") && out.contains("more chars hidden]…"), "{out}");
+        assert!(out.chars().count() < MAX_DISPLAY_LINE_CHARS + 40, "{out}");
+        assert_eq!(shown_path("/usr/bin/x"), "/usr/bin/x");
+    }
+
+    /// A writable program is always named, even when the one-line form would
+    /// otherwise print nothing (an absolute path that is its own target).
+    #[test]
+    fn user_writable_program_is_always_marked() {
+        let st = style_for(true);
+        let mut r = Resolved::fake("/home/u/.venv/bin/tool");
+        let line = |r: &Resolved| {
+            let mut buf = Vec::new();
+            write_resolves_line(&mut buf, "/home/u/.venv/bin/tool", Some(r), &st).unwrap();
+            String::from_utf8(buf).unwrap()
+        };
+        assert_eq!(line(&r), "");
+        r.user_writable = true;
+        assert_eq!(line(&r), "Resolves: /home/u/.venv/bin/tool (user-writable)\n");
+        assert!(resolve_detail(Some(&r), &st).ends_with("(user-writable)"));
+    }
+
+    #[test]
+    fn inherit_line_names_the_flag_and_code_loading_names_only() {
+        let st = style_for(true);
+        let d = tempfile::tempdir().unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = vec![
+            ("PATH".into(), d.path().as_os_str().to_owned()),
+            ("PYTHONPATH".into(), "/secret/py".into()),
+            ("REPO_ROOT".into(), "/secret/r".into()),
+        ];
+        let uid = unsafe { libc::geteuid() };
+        let pats = crate::inherit::parse_patterns("PYTHONPATH,REPO_ROOT").unwrap();
+        let i = crate::inherit::Inherited::from_env(crate::inherit::InheritMode::Env, pats, env, uid).unwrap();
+        let mut buf = Vec::new();
+        write_inherit_line(&mut buf, Some(&i), &st).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(out, "Env:     daemon environment (--inherit-env) with code-loading PYTHONPATH\n");
+        let mut buf = Vec::new();
+        write_inherit_line(&mut buf, None, &st).unwrap();
+        assert!(buf.is_empty());
     }
 
     #[test]
