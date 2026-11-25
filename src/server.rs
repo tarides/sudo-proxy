@@ -505,6 +505,7 @@ pub fn run(
     })?);
     let listener = bind_listener(socket_path)?;
     listener.set_nonblocking(true)?;
+    crate::executor::raise_fd_limit();
 
     if config.verbose {
         eprintln!("sudo-proxy listening on {}", socket_path.display());
@@ -893,7 +894,7 @@ fn handle_connection(
     // of a composite, a disallowed setenv) is rejected here, before
     // prompting: the human should never be asked to approve something the
     // executor cannot run.
-    let prepared = match crate::executor::prepare(&req, &env) {
+    let mut prepared = match crate::executor::prepare(&req, &env) {
         Ok(p) => p,
         Err(msg) => {
             let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
@@ -908,26 +909,9 @@ fn handle_connection(
     // before prompting and before the unattended grant or `--pkexec` paths. It
     // reads the same opacity, and the same reason text, the prompt renders, so
     // what the prompt would flag is exactly what is refused.
-    if no_shell {
-        if let Some((v, o)) = views.iter().find_map(|v| v.opaque_reason.as_ref().map(|o| (v, o))) {
-            let prog = v.programs.get(o.at);
-            let name = prog.map(|p| p.name.as_str()).unwrap_or("");
-            let via = prog
-                .and_then(|p| p.via.as_deref())
-                .map(|w| format!(" via {w}"))
-                .unwrap_or_default();
-            let resp = Response::error(
-                &req.id,
-                &format!(
-                    "shell escape hatch rejected by policy (no_shell): stage {} runs {name}{via}: \
-                     opaque — {}; express it with structured ops \
-                     (run/seq/alt/pipe/redirect/setenv/chdir/run-as)",
-                    v.stage_id, o.reason
-                ),
-            );
-            reject(&mut stream, &ev, Reject::NoShell, resp);
-            return;
-        }
+    if let Some(msg) = no_shell_violation(no_shell, views) {
+        reject(&mut stream, &ev, Reject::NoShell, Response::error(&req.id, &msg));
+        return;
     }
 
     let effective_privileged = req.effective_privileged();
@@ -975,7 +959,14 @@ fn handle_connection(
             // by ForegroundGuard for the swap.
             let prompt_result = {
                 let _g = lock_recover(&tty_lock);
-                prompter.prompt(&prepared, unattended_eligible, PROMPT_TIMEOUT)
+                fresh_prompt(&mut prepared, &env, no_shell, &*prompter, unattended_eligible)
+            };
+            let prompt_result = match prompt_result {
+                Ok(r) => r,
+                Err((why, msg)) => {
+                    reject(&mut stream, &ev, why, Response::error(&req.id, &msg));
+                    return;
+                }
             };
             match prompt_result {
                 Ok(tui::PromptResult::Approved) => {
@@ -1018,7 +1009,14 @@ fn handle_connection(
         // `a` degrades to approve-once and grants nothing.
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
-            prompter.prompt(&prepared, unattended_eligible, PROMPT_TIMEOUT)
+            fresh_prompt(&mut prepared, &env, no_shell, &*prompter, unattended_eligible)
+        };
+        let prompt_result = match prompt_result {
+            Ok(r) => r,
+            Err((why, msg)) => {
+                reject(&mut stream, &ev, why, Response::error(&req.id, &msg));
+                return;
+            }
         };
         match prompt_result {
             Ok(tui::PromptResult::Approved) => (exec_direct(&prepared), Outcome::Approved),
@@ -1064,6 +1062,52 @@ fn handle_connection(
     audit.record(&ev.with_response(&resp));
 
     let _ = write_response(&mut stream, &resp);
+}
+
+/// The strict `no_shell` policy's refusal, if any stage is opaque (a `Shell`
+/// node, or a shell, inline-code interpreter or runner, directly or behind a
+/// wrapper). It reads the same opacity, and the same reason text, the prompt
+/// renders, so what the prompt would flag is exactly what is refused.
+fn no_shell_violation(no_shell: bool, views: &[LeafView]) -> Option<String> {
+    if !no_shell {
+        return None;
+    }
+    let (v, o) = views.iter().find_map(|v| v.opaque_reason.as_ref().map(|o| (v, o)))?;
+    let prog = v.programs.get(o.at);
+    let name = prog.map(|p| p.name.as_str()).unwrap_or("");
+    let via = prog
+        .and_then(|p| p.via.as_deref())
+        .map(|w| format!(" via {w}"))
+        .unwrap_or_default();
+    Some(format!(
+        "shell escape hatch rejected by policy (no_shell): stage {} runs {name}{via}: \
+         opaque — {}; express it with structured ops \
+         (run/seq/alt/pipe/redirect/setenv/chdir/run-as)",
+        v.stage_id, o.reason
+    ))
+}
+
+/// Prompt for `prepared`, called with the TTY lock held. A request may have
+/// queued for that lock behind another prompt or an escalated run that
+/// replaced one of its programs (an upgrade). If a pin no longer holds, the
+/// plan is compiled again first, so the prompt shows the files there now
+/// rather than an approval that would only be refused at spawn (issue
+/// #105), and the `no_shell` policy is applied to the new resolution.
+fn fresh_prompt(
+    prepared: &mut crate::executor::PreparedRequest<'_>,
+    env: &std::collections::HashMap<String, String>,
+    no_shell: bool,
+    prompter: &dyn Prompter,
+    eligible: bool,
+) -> Result<io::Result<tui::PromptResult>, (Reject, String)> {
+    if !prepared.pins_current() {
+        *prepared = crate::executor::prepare(prepared.request(), env)
+            .map_err(|e| (Reject::InvalidPlan, format!("invalid plan: {e}")))?;
+        if let Some(msg) = no_shell_violation(no_shell, prepared.views()) {
+            return Err((Reject::NoShell, msg));
+        }
+    }
+    Ok(prompter.prompt(prepared, eligible, PROMPT_TIMEOUT))
 }
 
 fn write_response(stream: &mut impl Write, resp: &Response) -> std::io::Result<()> {

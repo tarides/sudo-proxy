@@ -34,6 +34,13 @@ Pass `--unattended-eligible` when starting a daemon to make it eligible without
 editing the file (the session grant still needs the `a` keypress; it is never
 persisted).
 
+**A request does not run a program it has just rebuilt.** Every program a
+request runs is resolved, and pinned, before the prompt: the file you approve
+is the file that runs. If an earlier step replaces it (`cargo build &&
+./target/debug/app`, `apt-get upgrade && systemctl restart nginx`), the later
+step is refused with "changed since it was approved". Send the build (or the
+upgrade) and the run as two requests. See [security.md](security.md).
+
 ## Strict no-shell mode
 
 Every structured op exists so a shell feature need not be expressed by shelling

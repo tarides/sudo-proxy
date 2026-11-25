@@ -213,7 +213,9 @@ is unaccounted for. The residuals — already on record and accepted — are:
   names resolve on the root-owned login `PATH`, so both cases need a `./name`
   in a directory the requester can write, where rewriting the file is already
   possible. Programs the approved program looks up itself (a script's
-  commands, `just` recipes, `#!/usr/bin/env x`) are not shown and not pinned.
+  commands, `just` recipes, `#!/usr/bin/env x`) are not shown and not pinned,
+  and neither is a `find -execdir` / `-okdir` program named with a `/`, which
+  `find` runs from each match's directory.
 - **4.2 — SSH first-contact MITM (assumption A4).** The ssh invocation sets no
   `StrictHostKeyChecking`; safety depends on the remote being in `known_hosts`
   first, or configuring `StrictHostKeyChecking=accept-new`.

@@ -20,18 +20,33 @@ swap is one whose contents it could already rewrite. It is a prerequisite for
   it. The `no_shell` check, the pkexec decision, the prompt (`Prompter::prompt`
   now takes the `PreparedRequest`) and `exec_*` all use that one result.
 - Just before each spawn the path must still name the pinned inode; otherwise
-  the stage is refused with "changed since it was approved" and nothing runs
-  (for a pipe, no stage starts). A binary running as the daemon's user is
-  executed through its descriptor (`/proc/self/fd/N`); a `#!` script and an
-  escalated step are spawned by path after the check.
+  the stage is refused with "changed since it was approved" and nothing runs.
+  A pipe runs every pre-spawn refusal for all its stages before any starts.
+  **Behaviour change:** this includes a binary replaced by an earlier step of
+  the same request (`cargo build && ./target/debug/app`, `apt-get upgrade &&
+  systemctl restart …`), which ran before; send such steps as separate
+  requests (`usage.md`). A native (ELF) binary running as the daemon's user
+  is executed through its descriptor (`/proc/self/fd/N`); anything else (a
+  script with or without `#!`, a binfmt_misc format) and an escalated step
+  are spawned by path after the check.
+- A request that queued for the terminal (behind another prompt or an
+  escalated run) and whose pins no longer hold when its turn comes is
+  compiled again before the prompt, and `no_shell` is applied to the new
+  resolution, so the prompt never shows a stale target.
+- The daemon raises its soft open-file limit to the hard limit at start (each
+  pin holds a descriptor while the request waits); children get the original
+  limit back.
 - A program run by a wrapper (`env X=1 tool`, `nice`, `timeout`, …) is passed
   to the wrapper by its pinned absolute path (basename unchanged; applets
   excluded), so the wrapper does not search `PATH` again. **Behaviour change:**
   such a program that is not found is now refused before the spawn
   ("command not found: x (run by env)") instead of failing inside the wrapper
-  with exit 127. A resolved path containing `=` is refused as well, since
-  `env` would read it as an assignment. Opaque stages keep such words as
-  written.
+  with exit 127, also behind a `find` or `xargs` that might never run it. A
+  resolved path containing `=` is refused behind `env`, which would read it
+  as an assignment. A `find -execdir` / `-okdir` program named with a `/` is
+  left as written (`find` runs it from each match's directory), and so are
+  such words in opaque stages. PATH entries that are not absolute are never
+  searched.
 - The prompt's `⚠ invalid plan` line (bounded in #90) is gone: a
   `PreparedRequest` exists only for a plan that compiled.
 - Docs: `security.md` ("resolved once" now holds), the threat model (new B4
@@ -40,8 +55,12 @@ swap is one whose contents it could already rewrite. It is a prerequisite for
   (Sn4.2, Sn4.3, Sn5.4), `architecture.md`.
 - Tests: `tests/pinning.rs` changes files from inside the scripted prompt
   (rename over, symlink retargeted to a shell under `no_shell`, wrapped
-  program swapped, in-place rewrite residual); executor unit tests for the
-  pin, the descriptor exec and the wrapped-argv rewrite.
+  program swapped, in-place rewrite residual, a script without `#!`, a pipe
+  refused before any stage starts, a queued request re-prepared or refused by
+  `no_shell`); executor unit tests for the pin, the descriptor exec and the
+  wrapped-argv rewrite (`-execdir`, `=` only behind `env`). A live run through
+  the real prompt confirmed the refusal of a symlink retargeted after
+  approval.
 
 ## Unreleased — Trusted helpers under `/nix/store` are accepted (NixOS `--pkexec`, 1.3.0)
 

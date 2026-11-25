@@ -174,3 +174,92 @@ fn contents_rewritten_in_place_still_run() {
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(stdout(&resp), "new\n");
 }
+
+/// Review of #108: a script with no `#!` line is not a native binary, so it is
+/// spawned by path (libc hands it to `/bin/sh`), not through its descriptor,
+/// whose `/proc/self/fd` path would no longer open in the shell.
+#[test]
+fn script_without_shebang_still_runs() {
+    let dir = tempdir();
+    let d = dir.path().to_path_buf();
+    std::fs::write(d.join("plain"), "echo plain\n").unwrap();
+    std::fs::set_permissions(d.join("plain"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    let s = server_with(false, || {});
+    let resp = s.send(&plan_req("pin-no-shebang", &d, &["./plain"]));
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(stdout(&resp), "plain\n");
+}
+
+/// Review of #108: a pipe stage refused before its spawn (here a wrapped
+/// program that is not found) refuses the whole pipe before any stage starts,
+/// instead of killing the earlier stages part-way.
+#[test]
+fn pipe_refuses_before_any_stage_starts() {
+    let dir = tempdir();
+    let d = dir.path().to_path_buf();
+    let marker = d.join("first-ran");
+    let exec = |argv: &[&str]| Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() };
+    let plan = Plan::Chdir {
+        dir: d.to_str().unwrap().to_string(),
+        body: Box::new(Plan::Pipe {
+            stages: vec![exec(&["touch", marker.to_str().unwrap()]), exec(&["env", "./absent"])],
+        }),
+    };
+    let mut req = Request::new_plan(String::new(), "test".into(), plan, Default::default(), String::new(), false, false);
+    req.id = "pin-pipe-preflight".into();
+    req.time = iso_now();
+    let s = server_with(false, || {});
+    let resp = s.send(&req);
+    assert_eq!(resp.status, Status::Error, "{resp:?}");
+    assert!(resp.message.as_deref().unwrap_or("").contains("command not found: ./absent"), "{resp:?}");
+    assert!(!marker.exists(), "the first stage started");
+}
+
+/// Send `req` while the test holds the TTY lock, run `meanwhile` once the
+/// request is queued behind it, then release the lock.
+fn send_while_queued(s: &TestServer, req: Request, meanwhile: impl FnOnce()) -> Response {
+    let guard = s.tty_lock.lock().unwrap();
+    let path = s.socket_path.clone();
+    let t = std::thread::spawn(move || send_request(&path, &req));
+    std::thread::sleep(Duration::from_millis(300));
+    meanwhile();
+    drop(guard);
+    t.join().unwrap()
+}
+
+/// Review of #108: a request that queued for the TTY lock while one of its
+/// programs was replaced (an upgrade by another request) is compiled again
+/// before its prompt, so the human approves the file there now and it runs.
+#[test]
+fn queued_request_is_prepared_again_when_stale() {
+    let dir = tempdir();
+    let d = dir.path().to_path_buf();
+    script(&d.join("tool"), "echo old");
+    let s = server_with(false, || {});
+    let resp = send_while_queued(&s, plan_req("pin-queued", &d, &["./tool"]), || {
+        script(&d.join("tool.new"), "echo new");
+        std::fs::rename(d.join("tool.new"), d.join("tool")).unwrap();
+    });
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(stdout(&resp), "new\n");
+    assert_eq!(s.prompter.call_count(), 1);
+}
+
+/// ...and the `no_shell` policy is applied to the new resolution: a symlink
+/// retargeted to a shell while queued is refused without a prompt.
+#[test]
+fn queued_request_retargeted_to_a_shell_is_refused_by_no_shell() {
+    let Some(truth) = sudo_proxy::executor::resolve_command("true", "/") else { return };
+    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else { return };
+    let dir = tempdir();
+    let d = dir.path().to_path_buf();
+    symlink(&truth.path, d.join("x")).unwrap();
+    let s = server_with(true, || {});
+    let resp = send_while_queued(&s, plan_req("pin-queued-sh", &d, &["./x", "-c", "true"]), || {
+        std::fs::remove_file(d.join("x")).unwrap();
+        symlink(&sh.path, d.join("x")).unwrap();
+    });
+    assert_eq!(resp.status, Status::Error, "{resp:?}");
+    assert!(resp.message.as_deref().unwrap_or("").contains("no_shell"), "{resp:?}");
+    assert_eq!(s.prompter.call_count(), 0, "refused before the prompt");
+}
