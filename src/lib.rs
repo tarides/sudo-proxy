@@ -15,6 +15,7 @@ pub mod executor;
 pub mod gui;
 pub mod helper;
 pub mod hosts;
+pub mod inherit;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod mode;

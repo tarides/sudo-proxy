@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
+use crate::inherit::Inherited;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -180,10 +181,15 @@ impl Resolved {
         if st.st_mode & libc::S_IFMT != libc::S_IFREG {
             return None;
         }
-        if need_exec && st.st_mode & 0o111 == 0 {
+        let proc_path = fd_path(fd.as_raw_fd());
+        // A PATH candidate must be executable by the daemon's user, as
+        // `execvp` requires (an effective-UID access check), so a decoy
+        // without execute permission for us is skipped here just as a
+        // wrapper's own lookup would skip it (#101). Asked of the pinned
+        // inode through the descriptor; the mode bits stand in without /proc.
+        if need_exec && !executable_by_me(&proc_path, st.st_mode) {
             return None;
         }
-        let proc_path = fd_path(fd.as_raw_fd());
         // Through the descriptor, so it describes the pinned inode even if the
         // path changes now.
         let canonical = std::fs::read_link(&proc_path).ok();
@@ -269,6 +275,19 @@ fn restore_fd_limit() {
             libc::setrlimit(libc::RLIMIT_NOFILE, lim);
         }
     }
+}
+
+/// Whether the daemon's effective uid may execute the file at `proc_path`
+/// (a `/proc/self/fd/N` link to the pinned inode); `mode` decides when
+/// `/proc` is not mounted.
+fn executable_by_me(proc_path: &Path, mode: libc::mode_t) -> bool {
+    if !proc_fd_available() {
+        return mode & 0o111 != 0;
+    }
+    let Ok(c) = std::ffi::CString::new(proc_path.as_os_str().as_encoded_bytes()) else {
+        return false;
+    };
+    unsafe { libc::faccessat(libc::AT_FDCWD, c.as_ptr(), libc::X_OK, libc::AT_EACCESS) == 0 }
 }
 
 fn fd_path(fd: RawFd) -> PathBuf {
@@ -439,6 +458,11 @@ struct LeafPlan {
     /// Exit codes treated as success (besides 0) for seq short-circuiting.
     accepted: Vec<i32>,
     forward_agent: bool,
+    /// The daemon environment this leaf runs with (`--inherit-path` /
+    /// `--inherit-env`, #101). Set only on leaves of a request with no
+    /// escalated step, and applied only in the `Direct` arm of
+    /// [`build_command`].
+    inherit: Option<Arc<Inherited>>,
     /// Pre-order index == position in the response's `stages` and in the
     /// prompt render.
     stage_id: usize,
@@ -461,8 +485,10 @@ enum SeqNode {
 struct Ctx {
     env: HashMap<String, String>,
     cwd: String,
-    /// The PATH bare program names are resolved on.
+    /// The PATH bare program names are resolved on: the login PATH, or the
+    /// inherited one (#101).
     lookup_path: String,
+    inherit: Option<Arc<Inherited>>,
     runas: LeafRunAs,
     accepted: Vec<i32>,
     forward_agent: bool,
@@ -487,7 +513,17 @@ struct Compiled {
 /// Compile `req.exec_plan()` into leaves + a sequencing tree. Ambient run-as is
 /// seeded from `req.privileged` (root when set, else the daemon user); `RunAs`
 /// nodes override it per-subtree.
-fn compile_plan(req: &ValidatedRequest, env: &HashMap<String, String>) -> Result<Compiled, String> {
+fn compile_plan(
+    req: &ValidatedRequest,
+    env: &HashMap<String, String>,
+    inherit: Option<&Arc<Inherited>>,
+) -> Result<Compiled, String> {
+    // Whether the request inherits was decided once, by the caller, from
+    // `effective_privileged()` (#101); a request with an escalated step never
+    // does. Checked again here and on the compiled leaves, failing closed.
+    if inherit.is_some() && req.effective_privileged() {
+        return Err("internal error: daemon environment offered to an escalated request".into());
+    }
     let ambient = if req.privileged {
         LeafRunAs::Root
     } else {
@@ -496,7 +532,8 @@ fn compile_plan(req: &ValidatedRequest, env: &HashMap<String, String>) -> Result
     let ctx = Ctx {
         env: env.clone(),
         cwd: "/".to_string(),
-        lookup_path: DEFAULT_LOGIN_PATH.to_string(),
+        lookup_path: inherit.map_or_else(|| DEFAULT_LOGIN_PATH.to_string(), |i| i.path.clone()),
+        inherit: inherit.cloned(),
         runas: ambient,
         accepted: Vec::new(),
         forward_agent: req.forward_agent,
@@ -507,6 +544,9 @@ fn compile_plan(req: &ValidatedRequest, env: &HashMap<String, String>) -> Result
     let plan = req.exec_plan();
     let mut leaves = Vec::new();
     let seq = compile_seq(&plan, ctx, &mut leaves)?;
+    if leaves.iter().any(|l| l.inherit.is_some() && l.runas.is_escalated()) {
+        return Err("internal error: daemon environment reached an escalated step".into());
+    }
     Ok(Compiled { leaves, seq })
 }
 
@@ -712,6 +752,8 @@ pub struct ProgramHop {
     /// runs its built-in applet, so its PATH resolution is not shown
     /// (`resolved` is `None`).
     pub applet: bool,
+    /// Inherited names this program, an `env` wrapper, sets or unsets (#101).
+    pub overrides_inherited: Vec<String>,
 }
 
 /// Why a leaf is opaque, described once for both the prompt and the
@@ -797,10 +839,15 @@ fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafP
             } else {
                 lookup(h.argv_index, h.chdir.as_deref())
             };
+            let overrides_inherited = match &ctx.inherit {
+                Some(i) => h.touches.iter().filter(|n| i.has(n)).cloned().collect(),
+                None => Vec::new(),
+            };
             ProgramHop {
                 name,
                 argv_index: h.argv_index,
                 resolved,
+                overrides_inherited,
                 via: h.via.map(|p| argv[hops[p].argv_index].clone()),
                 via_index: h.via.map(|p| hops[p].argv_index),
                 runtime_lookup: inner && escalated && !h.applet,
@@ -822,6 +869,7 @@ fn push_leaf(argv: Vec<String>, shell_op: bool, ctx: Ctx, leaves: &mut Vec<LeafP
         resolved_bin,
         accepted: ctx.accepted,
         forward_agent: ctx.forward_agent,
+        inherit: ctx.inherit,
         stage_id,
     });
     stage_id
@@ -899,6 +947,7 @@ pub struct PreparedRequest<'a> {
     req: &'a ValidatedRequest,
     compiled: Compiled,
     views: Vec<LeafView>,
+    inherit: Option<Arc<Inherited>>,
 }
 
 impl<'a> PreparedRequest<'a> {
@@ -913,6 +962,11 @@ impl<'a> PreparedRequest<'a> {
 
     pub fn views(&self) -> &[LeafView] {
         &self.views
+    }
+
+    /// The daemon environment this request runs with, if any (#101).
+    pub fn inherit(&self) -> Option<&Arc<Inherited>> {
+        self.inherit.as_ref()
     }
 }
 
@@ -930,9 +984,22 @@ pub fn prepare<'a>(
     req: &'a ValidatedRequest,
     env: &HashMap<String, String>,
 ) -> Result<PreparedRequest<'a>, String> {
-    let compiled = compile_plan(req, env)?;
+    prepare_with(req, env, None)
+}
+
+/// [`prepare`] for a request that runs with the daemon environment `inherit`
+/// (`--inherit-path` / `--inherit-env`, #101). The caller decides, once,
+/// that the request has no escalated step; a request that has one is refused.
+/// `env` then holds only the request's own variables: the login defaults are
+/// applied at spawn, under the inherited layer.
+pub fn prepare_with<'a>(
+    req: &'a ValidatedRequest,
+    env: &HashMap<String, String>,
+    inherit: Option<Arc<Inherited>>,
+) -> Result<PreparedRequest<'a>, String> {
+    let compiled = compile_plan(req, env, inherit.as_ref())?;
     let views = leaf_views(&compiled);
-    Ok(PreparedRequest { req, compiled, views })
+    Ok(PreparedRequest { req, compiled, views, inherit })
 }
 
 /// The prompt's view of a request with no environment: the structure and
@@ -1442,7 +1509,25 @@ fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, Strin
             c.arg0(&argv[0]);
             c.args(&argv[1..]);
             c.env_clear();
+            // With `--inherit-path` / `--inherit-env` (#101), in order, a
+            // later layer replacing an earlier one: the inherited variables;
+            // the login defaults for names still unset; the request's `env`
+            // and the plan's `setenv`. No request can set PATH, so a PATH in
+            // `leaf.env` can only be a login default and never replaces the
+            // inherited one.
+            if let Some(inh) = &leaf.inherit {
+                c.env("PATH", &inh.path);
+                c.envs(&inh.vars);
+                for (k, v) in login_env_defaults() {
+                    if !inh.has(k) {
+                        c.env(k, v);
+                    }
+                }
+            }
             for (k, v) in &leaf.env {
+                if leaf.inherit.is_some() && k == "PATH" {
+                    continue;
+                }
                 c.env(k, v);
             }
             if leaf.forward_agent {
@@ -2126,6 +2211,7 @@ mod tests {
             resolved_bin: Some(Resolved::fake(&format!("/usr/bin/{}", argv[0]))),
             accepted: vec![],
             forward_agent: false,
+            inherit: None,
             stage_id: 0,
         }
     }
@@ -2171,6 +2257,27 @@ mod tests {
                 || seen.contains(&format!("PATH=\"{}\"", crate::helper::HELPER_PATH)),
             "PATH must be the helper search list: {seen}"
         );
+    }
+
+    /// A PATH candidate the daemon's user cannot execute is skipped, as
+    /// `execvp` skips it, and the next one is pinned (#101).
+    #[test]
+    fn path_lookup_skips_files_not_executable_by_me() {
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root may execute any file with an x bit
+        }
+        let d = tempfile::tempdir().unwrap();
+        let (a, b) = (d.path().join("a"), d.path().join("b"));
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        for (dir, mode) in [(&a, 0o010), (&b, 0o755)] {
+            let f = dir.join("tool");
+            std::fs::write(&f, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let path = format!("{}:{}", a.display(), b.display());
+        let r = resolve_on("tool", "/", &path).expect("resolves");
+        assert_eq!(r.path, b.join("tool"), "group-only x bit is not executable by its owner");
     }
 
     #[test]
@@ -2464,7 +2571,7 @@ mod tests {
             let plan = random_plan(&mut rng, 5);
             let privileged = rng.below(2) == 0;
             let req = mk_plan_req(plan.clone(), privileged);
-            let compiled = compile_plan(&req, &HashMap::new()).expect("compiles");
+            let compiled = compile_plan(&req, &HashMap::new(), None).expect("compiles");
             assert_eq!(compiled.leaves.len(), count_leaves(&plan));
         }
     }
@@ -2489,6 +2596,7 @@ mod tests {
             resolved_bin: Some(Resolved::fake("/usr/sbin/sysctl")),
             accepted: Vec::new(),
             forward_agent: false,
+            inherit: None,
             stage_id: 0,
         };
 
@@ -2783,6 +2891,7 @@ mod tests {
             via_index: Some(0),
             runtime_lookup: false,
             applet: false,
+            overrides_inherited: Vec::new(),
         }
     }
 

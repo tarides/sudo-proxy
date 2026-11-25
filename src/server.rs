@@ -468,6 +468,10 @@ pub struct ServerConfig {
     /// Persistent audit sinks (issue #65). The stderr audit line is always
     /// written; `Default` turns the file and syslog sinks off.
     pub audit: AuditConfig,
+    /// `--inherit-path` / `--inherit-env` (#101): the daemon environment that
+    /// requests with no escalated step run with. Built at startup from the
+    /// command line only; immutable thereafter. `None` by default.
+    pub inherit: Option<Arc<crate::inherit::Inherited>>,
 }
 
 impl Default for ServerConfig {
@@ -481,6 +485,7 @@ impl Default for ServerConfig {
             no_shell: false,
             max_in_flight: DEFAULT_MAX_IN_FLIGHT,
             audit: AuditConfig::default(),
+            inherit: None,
         }
     }
 }
@@ -522,7 +527,10 @@ pub fn run(
     // for the requesting `session` only, in memory only, never persisted. They
     // die with the daemon, i.e. with the SSH tunnel for a remote host, so no
     // grant can outlive the daemon (invariant G7).
-    let unattended_eligible = config.unattended_eligible;
+    // `--inherit-path` / `--inherit-env` exclude `a` (#101): every request
+    // on such a daemon with no escalated step inherits, so the startup
+    // refuses `--unattended-eligible` with them; this holds it here too.
+    let unattended_eligible = config.unattended_eligible && config.inherit.is_none();
     let unattended_grants = Arc::new(UnattendedGrants::default());
 
     loop {
@@ -582,6 +590,7 @@ pub fn run(
         let verbose = config.verbose;
         let log_json = config.log_json;
         let no_shell = config.no_shell;
+        let inherit = config.inherit.clone();
         let unattended_grants = Arc::clone(&unattended_grants);
         let shutdown = Arc::clone(&shutdown);
         let audit = Arc::clone(&audit);
@@ -596,6 +605,7 @@ pub fn run(
                 log_json,
                 unattended_eligible,
                 no_shell,
+                inherit,
                 unattended_grants,
                 prompter,
                 sink,
@@ -685,6 +695,7 @@ fn handle_connection(
     log_json: bool,
     unattended_eligible: bool,
     no_shell: bool,
+    inherit: Option<Arc<crate::inherit::Inherited>>,
     unattended_grants: Arc<UnattendedGrants>,
     prompter: Arc<dyn Prompter>,
     result_sink: Arc<dyn ResultSink>,
@@ -819,11 +830,22 @@ fn handle_connection(
             return;
         }
     };
+    // Whether this request runs with the daemon environment (#101), decided
+    // once, here, from the same predicate as every other "has an escalated
+    // step" decision: a request any of whose steps runs as root or as another
+    // user (`privileged`, or a `run-as` anywhere) never does, none of its
+    // steps included. The one decision is passed to the compilation and so
+    // to the prompt.
+    let inherit = inherit.filter(|_| !req.effective_privileged());
+
     // Command-mode SSH skips PAM session, so the daemon (and every
     // env_clear()'d child) starts with no HOME/USER/LOGNAME/PATH.
     // Inject defaults from /etc/passwd so opam/git/ssh stop silently
-    // misbehaving — see issue #23.
-    crate::executor::apply_login_env_defaults(&mut env);
+    // misbehaving — see issue #23. An inheriting request gets them at spawn
+    // instead, under the inherited layer.
+    if inherit.is_none() {
+        crate::executor::apply_login_env_defaults(&mut env);
+    }
 
     // Atomic check-and-insert: closes the TOCTOU window between
     // contains() and insert() that exists when two threads race the
@@ -894,7 +916,7 @@ fn handle_connection(
     // of a composite, a disallowed setenv) is rejected here, before
     // prompting: the human should never be asked to approve something the
     // executor cannot run.
-    let mut prepared = match crate::executor::prepare(&req, &env) {
+    let mut prepared = match crate::executor::prepare_with(&req, &env, inherit) {
         Ok(p) => p,
         Err(msg) => {
             let resp = Response::error(&req.id, &format!("invalid plan: {msg}"));
@@ -1101,7 +1123,8 @@ fn fresh_prompt(
     eligible: bool,
 ) -> Result<io::Result<tui::PromptResult>, (Reject, String)> {
     if !prepared.pins_current() {
-        *prepared = crate::executor::prepare(prepared.request(), env)
+        let inherit = prepared.inherit().cloned();
+        *prepared = crate::executor::prepare_with(prepared.request(), env, inherit)
             .map_err(|e| (Reject::InvalidPlan, format!("invalid plan: {e}")))?;
         if let Some(msg) = no_shell_violation(no_shell, prepared.views()) {
             return Err((Reject::NoShell, msg));

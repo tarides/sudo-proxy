@@ -438,6 +438,10 @@ pub struct Hop {
     /// An applet of a multi-call dispatcher (`busybox sh`): the dispatcher
     /// runs its built-in applet, not the binary the name resolves to on PATH.
     pub applet: bool,
+    /// The names this hop sets or unsets, when it is `env` (`env A=1 -u B x`
+    /// touches `A` and `B`). The prompt says when one of them overrides a
+    /// variable inherited from the daemon (#101).
+    pub touches: Vec<String>,
 }
 
 /// Why a leaf is opaque. `hop` indexes the hop list returned by [`unwrap`].
@@ -615,6 +619,7 @@ pub fn unwrap(
             via: r.via,
             chdir: r.chdir.clone(),
             applet: r.applet,
+            touches: Vec::new(),
         });
         let written = classify(&argv[r.start]);
         // An applet's PATH resolution says nothing about what the dispatcher
@@ -643,7 +648,7 @@ pub fn unwrap(
                 Some(flag) => Err(OpaqueReason::InlineCode { hop, flag }),
                 None => continue,
             },
-            Class::Wrapper(spec) => parse_wrapper(spec, argv, &r, hop),
+            Class::Wrapper(spec) => parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches),
         };
         match next {
             Err(reason) => return (hops, Some(reason)),
@@ -736,6 +741,7 @@ fn parse_wrapper(
     argv: &[String],
     r: &Region,
     hop: usize,
+    touches: &mut Vec<String>,
 ) -> Result<Children, OpaqueReason> {
     let bad = |why: String| OpaqueReason::Unparsable { hop, why };
     let one = |at: usize, chdir: Option<String>| -> Children {
@@ -783,7 +789,9 @@ fn parse_wrapper(
         }
         Kind::Env => {
             let mut chdir = r.chdir.clone();
+            let touched = std::cell::RefCell::new(Vec::new());
             let check_name = |var: &str| -> Result<(), OpaqueReason> {
+                touched.borrow_mut().push(var.to_string());
                 if var == "PATH" {
                     Err(OpaqueReason::PathChanged { hop })
                 } else if env_rejected(var) {
@@ -828,16 +836,53 @@ fn parse_wrapper(
                 check_name(var)?;
                 i += 1;
             }
+            *touches = touched.into_inner();
             Ok(one(i, chdir))
         }
     }
 }
 
-/// `PATH` is reported as [`OpaqueReason::PathChanged`]; these other names
-/// change what code the resolved program runs, and are among those the
-/// `setenv` policy hard-rejects (G3.2).
+/// `PATH` is reported as [`OpaqueReason::PathChanged`]; the other names are
+/// the code-loading ones ([`is_code_loading`]), which change what code the
+/// resolved program runs. None of them is on the `setenv` allowlist (G3.2).
 pub fn env_rejected(name: &str) -> bool {
-    name == "PATH" || name.starts_with("LD_") || matches!(name, "BASH_ENV" | "ENV" | "IFS")
+    name == "PATH" || is_code_loading(name)
+}
+
+/// Prefixes of names that make a program load code other than its own.
+pub const CODE_LOADING_PREFIXES: &[&str] = &["LD_", "DYLD_"];
+
+/// Names that make a program load code other than its own: a dynamic loader,
+/// a shell's startup file, or a language runtime's module path or options.
+/// A best-effort subset (many variables name a command some tool runs:
+/// `EDITOR`, `GIT_ASKPASS`, …). An `env` wrapper setting one is opaque, and
+/// `--inherit-env` never matches one with a wildcard (#101).
+pub const CODE_LOADING: &[&str] = &[
+    "NIX_LD",
+    "NIX_LD_LIBRARY_PATH",
+    "GCONV_PATH",
+    "BASH_ENV",
+    "ENV",
+    "IFS",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "PYTHONHOME",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+    "PERL5OPT",
+    "PERL5LIB",
+    "RUBYOPT",
+    "RUBYLIB",
+    "JAVA_TOOL_OPTIONS",
+    "_JAVA_OPTIONS",
+    "GIT_SSH_COMMAND",
+    "GIT_EXEC_PATH",
+];
+
+/// Whether `name` is a code-loading variable ([`CODE_LOADING`],
+/// [`CODE_LOADING_PREFIXES`]).
+pub fn is_code_loading(name: &str) -> bool {
+    CODE_LOADING_PREFIXES.iter().any(|p| name.starts_with(p)) || CODE_LOADING.contains(&name)
 }
 
 /// Parse a wrapper's options from `argv[r.start + 1..r.end]`, calling `on` for
@@ -1287,6 +1332,31 @@ mod tests {
         let nine = ["nice"; 9];
         assert_eq!(run(&nine).1, Some(OpaqueReason::TooDeep));
         assert_eq!(run(&nine[..8]).1, None);
+    }
+
+    /// The code-loading list makes an `env` wrapper opaque, beyond the
+    /// loader and shell names (#101), and an ordinary name stays transparent.
+    #[test]
+    fn env_setting_a_code_loading_name_is_opaque() {
+        for var in ["PYTHONPATH", "NODE_OPTIONS", "GIT_SSH_COMMAND", "DYLD_INSERT_LIBRARIES", "NIX_LD"] {
+            let set = format!("{var}=x");
+            assert_eq!(
+                run(&["env", &set, "true"]).1,
+                Some(OpaqueReason::EnvRejected { hop: 0, name: var.into() }),
+                "{var}"
+            );
+            assert!(opaque(&["env", "-u", var, "true"]), "{var}");
+        }
+        assert!(!opaque(&["env", "TF_VAR_x=1", "true"]));
+    }
+
+    /// `env` records the names it sets or unsets on its own hop.
+    #[test]
+    fn env_hop_records_the_names_it_touches() {
+        let (hops, reason) = run(&["env", "-u", "A", "B=1", "nice", "env", "C=2", "true"]);
+        assert_eq!(reason, None);
+        let touched: Vec<Vec<String>> = hops.iter().map(|h| h.touches.clone()).collect();
+        assert_eq!(touched, vec![vec!["A".to_string(), "B".into()], vec![], vec!["C".into()], vec![]]);
     }
 
     #[test]
