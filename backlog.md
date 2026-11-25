@@ -6,6 +6,39 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
+## 1.3.0 critical path: #105, then #101, then `v1.3.0-rc.1`
+
+Tracked in [#89](https://github.com/tarides/sudo-proxy/issues/89) (release
+plan). Done before this: 1.2.3 (GHSA-gx9w-4f7x-2gcp, helpers never looked up
+on the daemon's PATH), merged into `main` in #106; #107 (root-owned sticky
+directories accepted in the helper check, so `--pkexec` works on NixOS).
+
+1. **#105: resolve each program once and pin it** from the `no_shell` check
+   through the prompt to the spawn: path, canonical target and `(dev, ino)`,
+   refusing the spawn if the identity changed. Wrapped programs
+   (`env VAR=… just`, `nice`, `timeout`) are pinned too, by rewriting the
+   wrapped word to its resolved absolute path (basename kept; applets
+   excluded). `#!` scripts cannot go through `fexecve` on a close-on-exec fd
+   (`ENOENT`), so they need a path-based spawn plus the identity check. No
+   security impact on its own today (see the issue); a prerequisite for #101.
+2. **#101: `--inherit-path` / `--inherit-env=PATTERN,…`.** The design was
+   reviewed twice and posted on #101
+   ([comment](https://github.com/tarides/sudo-proxy/issues/101#issuecomment-7161219003),
+   "Full design" section); that comment is the spec. It includes two changes
+   outside the flags: the `env -C` probe (`env_supports_chdir`) clears its
+   environment and sets `PATH` to `HELPER_PATH`, and the `sudo` process gets a
+   cleared environment (`TERM`, `LANG`, `LC_*` only) for every daemon, with a
+   changelog note. Build #105 and #101 together if that avoids reworking
+   resolution twice.
+3. **Tag `v1.3.0-rc.1`** (release flow: version bump in `Cargo.toml` and the
+   three JSON files, tag). The #101 reporter tests it; also run `--pkexec` on
+   a real NixOS host, since #107 was only reproduced in a container.
+
+Housekeeping: the remote daemons on the registered hosts still run an older
+version until restarted (binaries are 1.2.3). Local branches `release/1.2.3`,
+`merge/release-1.2.3` and `fix/helper-sticky-dirs` are merged and can be
+deleted.
+
 ## Automate the manual end-to-end tests through a pty
 
 Issue [#68](https://github.com/tarides/sudo-proxy/issues/68). The checks in
