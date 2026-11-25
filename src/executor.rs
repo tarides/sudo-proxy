@@ -1102,21 +1102,23 @@ fn run_plan(prepared: &PreparedRequest, mode: EscalationMode, tty_lock: Option<&
 fn env_supports_chdir() -> bool {
     static CACHE: OnceLock<bool> = OnceLock::new();
     *CACHE.get_or_init(|| {
-        let Ok(env) = crate::helper::find_trusted("env", false, crate::helper::HELPER_PATH) else {
+        let trusted = |name| crate::helper::find_trusted(name, false, crate::helper::HELPER_PATH);
+        let (Ok(env), Ok(truth)) = (trusted("env"), trusted("true")) else {
             return false;
         };
-        env_chdir_probe(&env).status().is_ok_and(|s| s.success())
+        env_chdir_probe(&env, &truth).status().is_ok_and(|s| s.success())
     })
 }
 
-/// The `env -C / -- true` probe, with a cleared environment and the helper
-/// search list as PATH: `env` looks `true` up itself, and the daemon's own
-/// PATH may hold user-writable directories (#101's `--inherit-path` makes it
-/// so on purpose), where a planted `true` could turn pkexec mode off or run
-/// code as the daemon's user.
-fn env_chdir_probe(env: &Path) -> Command {
+/// The `env -C / -- TRUE` probe. Both programs are trusted absolute paths
+/// (GHSA-gx9w-4f7x-2gcp), and the probe runs with a cleared environment and
+/// the helper search list as PATH: the daemon's own PATH may hold
+/// user-writable directories (#101's `--inherit-path` makes it so on
+/// purpose), where a planted `true` could turn pkexec mode off or run code as
+/// the daemon's user.
+fn env_chdir_probe(env: &Path, truth: &Path) -> Command {
     let mut c = Command::new(env);
-    c.args(["-C", "/", "--", "true"])
+    c.args(["-C".as_ref(), "/".as_ref(), "--".as_ref(), truth.as_os_str()])
         .env_clear()
         .env("PATH", crate::helper::HELPER_PATH)
         .stdin(Stdio::null())
@@ -2116,15 +2118,27 @@ mod tests {
 
     /// The `env -C` probe runs with a cleared environment and the helper
     /// search list as PATH, whatever the daemon's own environment holds (#101).
-    /// A stand-in `env` records the environment it was given.
+    /// A stand-in `env` records the environment and the arguments it was
+    /// given; `true` is passed as the absolute path, never looked up.
     #[test]
     fn env_chdir_probe_clears_the_environment() {
         let d = tempfile::tempdir().unwrap();
         let out = d.path().join("env.out");
+        let args = d.path().join("env.args");
         let fake = d.path().join("env");
-        std::fs::write(&fake, format!("#!/bin/sh\nexport -p >'{}'\n", out.display())).unwrap();
+        std::fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nexport -p >'{}'\nprintf '%s\\n' \"$@\" >'{}'\n",
+                out.display(),
+                args.display()
+            ),
+        )
+        .unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(env_chdir_probe(&fake).status().unwrap().success());
+        let truth = Path::new("/trusted/true");
+        assert!(env_chdir_probe(&fake, truth).status().unwrap().success());
+        assert_eq!(std::fs::read_to_string(&args).unwrap(), "-C\n/\n--\n/trusted/true\n");
         let seen = std::fs::read_to_string(&out).unwrap();
         let names: Vec<&str> = seen
             .lines()

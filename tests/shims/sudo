@@ -9,7 +9,8 @@
 # so the log cannot be named by a variable: the harness copies this file into
 # its temp directory, and the log is `sudo.log` next to the copy. The
 # environment sudo received is written to `sudo.env` (last call wins), with the
-# `export -p` builtin since PATH is unset here.
+# `export -p` builtin since PATH is unset here, through a per-process file
+# renamed into place so that concurrent stages never leave a torn copy.
 #
 # Log format: one record per invocation, each argument NUL-terminated, then a
 # newline. Argv cannot contain a newline (the daemon rejects one), so records
@@ -18,7 +19,8 @@
 set -eu
 here=${0%/*}
 { printf '%s\000' "$@"; printf '\n'; } >>"$here/sudo.log"
-export -p >"$here/sudo.env"
+export -p >"$here/sudo.env.$$"
+mv -f "$here/sudo.env.$$" "$here/sudo.env"
 
 if [ "${1-}" = "-u" ]; then
     shift 2
