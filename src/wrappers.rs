@@ -27,7 +27,10 @@
 //! `env` that changes how the wrapped program is looked up or sets a name the
 //! `setenv` policy rejects, a `find -exec` program word containing `{}` or a
 //! `find -exec` command containing another action word, an `xargs -I`
-//! replacement string in the program word, a `--` or any other option word
+//! replacement string in the program word, run-time input reaching a nested
+//! wrapper's words (a `{}` or `xargs -I` placeholder in them or in a deeper
+//! program word, an `xargs` appending its input where a wrapper expects its
+//! program), a `--` or any other option word
 //! where a program is expected, a multi-call dispatcher option, an ambiguous
 //! name and a chain deeper than [`MAX_DEPTH`] all make the leaf opaque.
 //!
@@ -120,6 +123,9 @@ pub struct WrapperSpec {
     numeric_positionals: bool,
     /// Options (short letter or long name) after which no program runs.
     no_program: &'static [&'static str],
+    /// Words that, where the program is expected, make the wrapper run the
+    /// next word through a shell instead (`flock FILE -c 'cmd'`).
+    command_words: &'static [&'static str],
     pub kind: Kind,
 }
 
@@ -135,6 +141,7 @@ const fn spec(name: &'static str, kind: Kind) -> WrapperSpec {
         positionals: 0,
         numeric_positionals: false,
         no_program: &["help", "version"],
+        command_words: &[],
         kind,
     }
 }
@@ -195,7 +202,7 @@ pub const WRAPPERS: &[WrapperSpec] = &[
     // util-linux flock `+sexnoFuw:E:hV?` (BusyBox `+sxnu`, a subset), then
     // the lock file; a lone operand is a file descriptor and runs no
     // program. `-c`/`--command` is not a getopt option: right after the
-    // lock file it makes flock run `$SHELL -c` (see `parse_wrapper`).
+    // lock file it makes flock run `$SHELL -c`.
     // `--nonblock`, the spelling `flock --help` documents, is GNU's
     // abbreviation of `--nonblocking`.
     WrapperSpec {
@@ -218,6 +225,7 @@ pub const WRAPPERS: &[WrapperSpec] = &[
         long_arg: &["timeout", "wait", "conflict-exit-code"],
         positionals: 1,
         no_program: &["h", "V", "help", "version"],
+        command_words: &["-c", "--command"],
         ..spec("flock", Kind::Getopt)
     },
     // util-linux ionice `+n:c:p:P:u:tVh`; `-p`/`-P`/`-u` act on existing
@@ -545,6 +553,11 @@ pub enum OpaqueReason {
         hop: usize,
         replace: String,
     },
+    /// An `xargs` appends its input where this wrapper expects its program,
+    /// an option or a `find` action.
+    FromInput {
+        hop: usize,
+    },
     Ambiguous {
         hop: usize,
         canonical: String,
@@ -566,6 +579,7 @@ impl OpaqueReason {
             | OpaqueReason::EnvRejected { hop, .. }
             | OpaqueReason::FindPlaceholder { hop }
             | OpaqueReason::XargsReplace { hop, .. }
+            | OpaqueReason::FromInput { hop }
             | OpaqueReason::Ambiguous { hop, .. } => *hop,
         }
     }
@@ -618,6 +632,9 @@ impl OpaqueReason {
             OpaqueReason::XargsReplace { replace, .. } => {
                 format!("{name} takes the program from its input ({replace})")
             }
+            OpaqueReason::FromInput { .. } => {
+                format!("xargs appends its input to {name}, which may make it run another program")
+            }
             OpaqueReason::Ambiguous { canonical, .. } => {
                 format!("ambiguous wrapper: {name} resolves to {canonical}")
             }
@@ -634,6 +651,38 @@ struct Region {
     chdir: Option<String>,
     depth: usize,
     applet: bool,
+    /// An `xargs` up the chain (without `-I`) appends its input items after
+    /// `argv[end - 1]` (#92 review).
+    appended: bool,
+    /// Placeholders an enclosing `find -exec` (`{}`) or `xargs -I R` (`R`)
+    /// replaces in this region's words at run time.
+    subst: Vec<Subst>,
+}
+
+/// A placeholder replaced at run time, and the hop that replaces it.
+#[derive(Clone)]
+struct Subst {
+    hop: usize,
+    text: String,
+    find: bool,
+}
+
+impl Subst {
+    fn reason(&self) -> OpaqueReason {
+        if self.find {
+            OpaqueReason::FindPlaceholder { hop: self.hop }
+        } else {
+            OpaqueReason::XargsReplace {
+                hop: self.hop,
+                replace: self.text.clone(),
+            }
+        }
+    }
+
+    /// The first placeholder of `subst` that `word` contains.
+    fn in_word<'a>(subst: &'a [Subst], word: &str) -> Option<&'a Subst> {
+        subst.iter().find(|s| word.contains(s.text.as_str()))
+    }
 }
 
 /// Unwrap a leaf's argv into the chain of programs that run, and say why the
@@ -660,6 +709,8 @@ pub fn unwrap(
         chdir: None,
         depth: 1,
         applet: false,
+        appended: false,
+        subst: Vec::new(),
     });
     while let Some(r) = queue.pop_front() {
         if r.depth > MAX_DEPTH {
@@ -679,6 +730,11 @@ pub fn unwrap(
                 format!("option {word} where the program is expected")
             };
             return (hops, Some(OpaqueReason::Unparsable { hop: via, why }));
+        }
+        // A program word an enclosing `find -exec` or `xargs -I` fills in
+        // (`xargs -I{} timeout 5 {}`): the program comes from the input.
+        if let Some(s) = Subst::in_word(&r.subst, &argv[r.start]) {
+            return (hops, Some(s.reason()));
         }
         let hop = hops.len();
         hops.push(Hop {
@@ -719,12 +775,38 @@ pub fn unwrap(
                 Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
                 None => continue,
             },
-            Class::Wrapper(spec) => parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches),
+            Class::Wrapper(spec) => {
+                let mut replace = None;
+                parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches, &mut replace).and_then(
+                    |children| {
+                        check_input_words(spec, argv, &r, hop, &children)?;
+                        Ok((spec, children, replace))
+                    },
+                )
+            }
         };
         match next {
             Err(reason) => return (hops, Some(reason)),
-            Ok(children) => {
-                let applet = matches!(class, Class::Wrapper(s) if s.kind == Kind::MultiCall);
+            Ok((spec, children, replace)) => {
+                let applet = spec.kind == Kind::MultiCall;
+                let mut subst = r.subst.clone();
+                let mut appended = r.appended;
+                if spec.kind == Kind::FindExec {
+                    subst.push(Subst {
+                        hop,
+                        text: "{}".into(),
+                        find: true,
+                    });
+                } else if spec.name == "xargs" {
+                    match replace {
+                        Some(text) => subst.push(Subst {
+                            hop,
+                            text,
+                            find: false,
+                        }),
+                        None => appended = true,
+                    }
+                }
                 for (start, end, chdir) in children {
                     queue.push_back(Region {
                         start,
@@ -733,12 +815,43 @@ pub fn unwrap(
                         chdir,
                         depth: r.depth + 1,
                         applet,
+                        // A `find -exec` command ends at its `;` or `+`,
+                        // before anything xargs appends.
+                        appended: appended && end == r.end,
+                        subst: subst.clone(),
                     });
                 }
             }
         }
     }
     (hops, None)
+}
+
+/// Fail closed when run-time input can change how a wrapper's words parse:
+/// a placeholder an enclosing `find -exec` or `xargs -I` fills in, in any of
+/// the wrapper's own words (`xargs -I{} flock {} /tmp/l sh` with the input
+/// `-s` runs `sh`), or an `xargs` appending its input where the wrapper
+/// expects its program, an option or an action (`xargs flock /tmp/l` with
+/// the input `-c CMD`, `xargs find .`).
+fn check_input_words(
+    spec: &WrapperSpec,
+    argv: &[String],
+    r: &Region,
+    hop: usize,
+    children: &Children,
+) -> Result<(), OpaqueReason> {
+    let in_child = |k: usize| children.iter().any(|&(s, e, _)| (s..e).contains(&k));
+    if let Some(s) = (r.start + 1..r.end)
+        .filter(|&k| !in_child(k))
+        .find_map(|k| Subst::in_word(&r.subst, &argv[k]))
+    {
+        return Err(s.reason());
+    }
+    let program_at_end = children.iter().any(|&(_, e, _)| e == r.end);
+    if r.appended && (spec.kind == Kind::FindExec || !program_at_end) {
+        return Err(OpaqueReason::FromInput { hop });
+    }
+    Ok(())
 }
 
 /// The inline-code flag an interpreter's arguments carry, `"stdin"` if no
@@ -807,12 +920,15 @@ fn inline_code(spec: &InterpSpec, args: &[String]) -> Option<String> {
 
 type Children = Vec<(usize, usize, Option<String>)>;
 
+/// Parse a wrapper's own words into the regions it runs. `xargs_replace`
+/// receives the `xargs -I` replacement string, if any.
 fn parse_wrapper(
     spec: &'static WrapperSpec,
     argv: &[String],
     r: &Region,
     hop: usize,
     touches: &mut Vec<String>,
+    xargs_replace: &mut Option<String>,
 ) -> Result<Children, OpaqueReason> {
     let bad = |why: String| OpaqueReason::Unparsable { hop, why };
     let one = |at: usize, chdir: Option<String>| -> Children {
@@ -853,14 +969,13 @@ fn parse_wrapper(
                 }
                 i += 1;
             }
-            // `flock FILE -c 'cmd'` / `--command`: flock runs `$SHELL -c`.
-            if spec.name == "flock" && i < r.end && matches!(argv[i].as_str(), "-c" | "--command") {
-                let trigger = Trigger::Option(argv[i].clone());
+            if i < r.end && spec.command_words.contains(&argv[i].as_str()) {
+                let trigger = Trigger::Shell(argv[i].clone());
                 return Err(OpaqueReason::CommandString { hop, trigger });
             }
-            if let Some(replace) = replace.filter(|p| i < r.end && argv[i].contains(p.as_str())) {
-                return Err(OpaqueReason::XargsReplace { hop, replace });
-            }
+            // A program word containing `R` is refused by `unwrap`, as is a
+            // placeholder in any later wrapper word.
+            *xargs_replace = replace;
             Ok(one(i, r.chdir.clone()))
         }
         Kind::Env => {
@@ -1669,6 +1784,76 @@ mod tests {
         }
     }
 
+    /// #92 review: run-time input reaching a wrapper's words fails closed,
+    /// at any depth. An `xargs` without `-I` appends its input; `find -exec`
+    /// and `xargs -I R` substitute it for `{}` / `R`.
+    #[test]
+    fn input_reaching_a_wrapper_fails_closed() {
+        for (argv, hop) in [
+            (&["xargs", "flock", "/tmp/l"][..], 1),
+            (&["xargs", "timeout", "5"], 1),
+            (&["xargs", "env", "X=1"], 1),
+            (&["xargs", "nice"], 1),
+            (&["xargs", "busybox"], 1),
+            (&["xargs", "xargs"], 1),
+            (&["xargs", "find", "."], 1),
+            (&["xargs", "find", ".", "-exec", "rm", "{}", ";"], 1),
+            (&["xargs", "env", "timeout", "5"], 2),
+            (&["find", ".", "-exec", "xargs", "flock", "/tmp/l", ";"], 2),
+        ] {
+            assert_eq!(
+                run(argv).1,
+                Some(OpaqueReason::FromInput { hop }),
+                "{argv:?}"
+            );
+        }
+        let xr = |r: &str| {
+            Some(OpaqueReason::XargsReplace {
+                hop: 0,
+                replace: r.into(),
+            })
+        };
+        let fp = Some(OpaqueReason::FindPlaceholder { hop: 0 });
+        for (argv, want) in [
+            (
+                &["xargs", "-I{}", "flock", "/tmp/l", "{}", "id"][..],
+                xr("{}"),
+            ),
+            (&["xargs", "-I{}", "timeout", "5", "{}"], xr("{}")),
+            (&["xargs", "-I@", "flock", "@", "/tmp/l", "sh"], xr("@")),
+            (&["xargs", "-I@", "env", "nice", "x@"], xr("@")),
+            (
+                &["find", ".", "-exec", "flock", "/tmp/l", "{}", ";"],
+                fp.clone(),
+            ),
+            (
+                &["find", ".", "-exec", "timeout", "5", "{}", ";"],
+                fp.clone(),
+            ),
+            (
+                &["find", ".", "-exec", "env", "{}", "true", ";"],
+                fp.clone(),
+            ),
+        ] {
+            assert_eq!(run(argv).1, want, "{argv:?}");
+        }
+        for argv in [
+            &["xargs", "flock", "/tmp/l", "rm"][..],
+            &["xargs", "timeout", "5", "rm"],
+            &["xargs", "-I{}", "timeout", "5", "rm", "{}"],
+            &["find", ".", "-exec", "flock", "/tmp/l", "rm", "{}", ";"],
+            &["find", ".", "-exec", "xargs", "rm", ";"],
+        ] {
+            assert_eq!(run(argv).1, None, "{argv:?}");
+        }
+        let argv = ["xargs", "flock", "/tmp/l"];
+        let (hops, reason) = run(&argv);
+        assert_eq!(
+            reason.unwrap().describe(&hops, &v(&argv)),
+            "xargs appends its input to flock, which may make it run another program"
+        );
+    }
+
     /// #92: `flock FILE -c '…'` runs `$SHELL -c`; the flock hop carries the
     /// command string, also behind a wrapper.
     #[test]
@@ -1686,7 +1871,7 @@ mod tests {
                 run(argv).1,
                 Some(OpaqueReason::CommandString {
                     hop,
-                    trigger: Trigger::Option(flag.into())
+                    trigger: Trigger::Shell(flag.into())
                 }),
                 "{argv:?}"
             );
@@ -1696,7 +1881,7 @@ mod tests {
             reason
                 .unwrap()
                 .describe(&hops, &v(&["flock", "/tmp/l", "-c", "id"])),
-            "runs a command string remotely or through a shell (-c)"
+            "runs a command string through a shell (-c)"
         );
     }
 
@@ -2001,7 +2186,9 @@ mod tests {
         &["ionice", "-c", "3"],
         &["chrt", "-o", "0"],
         &["taskset", "1"],
-        &["xargs"],
+        // A bare `xargs` appends its input, which may change what runs; with
+        // `-I` it substitutes it in place, and the tokens never contain `@`.
+        &["xargs", "-I@"],
         &["busybox"],
         &["coreutils"],
         &["flock", "/tmp/l"],

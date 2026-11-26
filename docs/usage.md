@@ -71,7 +71,7 @@ each one:
   dispatchers `busybox`, `toybox` and `coreutils` (their `argv[1]` is the
   applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`).
   `flock FILE -c 'cmd'` (or `--command`) runs `$SHELL -c`: opaque, *runs a
-  command string remotely or through a shell (-c)* (#92);
+  command string through a shell (-c)* (#92);
 - **inline-code interpreter**: `python`, `perl`, `ruby`, `php` and `lua`,
   each optionally followed by digits and dots only (`python3.12`, `perl5.38.2`;
   not `python3-config` or `perlcritic`), plus `pypy`, `pypy3`, `luajit`,
@@ -145,7 +145,13 @@ assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
 `BASH_ENV`, `ENV`, `IFS`, and the transport commands `GIT_SSH_COMMAND`,
 `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
 `RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `find -exec`
-program word containing `{}`, an
+program word containing `{}`, a `{}` (under `find -exec`) or an `xargs -I`
+replacement string (under `xargs -I`) in a wrapper's own words or in a
+program word at any depth (`find . -exec timeout 5 {} ;`,
+`xargs -I@ flock @ /tmp/l sh`), a wrapper under an `xargs` without `-I`
+that has no program of its own, so that xargs's input supplies it, its
+options or a `find` action (`xargs timeout 5`, `xargs flock /tmp/l`,
+`xargs find .`), an
 action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
 command (a test such as `-printf` may have absorbed the one before it), an
 `xargs -I R`/`-i`/`--replace` whose replacement string appears in the program

@@ -400,3 +400,11 @@ pub fn decode_stdout(resp: &Response) -> String {
 pub fn skip_if_no_sleep_binary() -> bool {
     sudo_proxy::executor::which("sleep").is_none()
 }
+
+/// The lock path for a `flock` test case (#92): the temp directory, which
+/// exists, so running `flock` creates no file. `None` when `flock` is not
+/// on the login PATH the daemon resolves programs on.
+pub fn flock_lock() -> Option<String> {
+    sudo_proxy::executor::resolve_command("flock", "/")?;
+    Some(std::env::temp_dir().to_str()?.to_string())
+}

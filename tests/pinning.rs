@@ -131,12 +131,12 @@ fn symlink_retargeted_to_a_shell_is_refused() {
 /// rewritten.
 #[test]
 fn wrapped_program_is_pinned_and_named_by_path() {
-    let mut wrappers = vec![vec!["env"], vec!["timeout", "5"]];
-    if sudo_proxy::executor::resolve_command("flock", "/").is_some() {
-        wrappers.push(vec!["flock", "lock"]);
+    let mut wrappers = vec![vec!["env".to_string()], vec!["timeout".into(), "5".into()]];
+    if let Some(lock) = flock_lock() {
+        wrappers.push(vec!["flock".into(), lock]);
     }
-    for w in wrappers {
-        let argv: Vec<&str> = w.iter().copied().chain(["./x"]).collect();
+    for w in &wrappers {
+        let argv: Vec<&str> = w.iter().map(String::as_str).chain(["./x"]).collect();
         let dir = tempdir();
         let d = dir.path().to_path_buf();
         script(&d.join("x"), "echo \"$0\"");

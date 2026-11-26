@@ -23,16 +23,25 @@ fn check(mut d: PtyDaemon) {
         "{r:?}"
     );
     // A shell behind a wrapper is rejected the same way (#87), and so is a
-    // command string run remotely or through a shell (#91).
-    for (id, argv) in [
+    // command string run remotely or through a shell (#91) or by
+    // `flock FILE -c` (#92).
+    let mut cases: Vec<(&str, Vec<String>)> = [
         ("ns-env", &["env", "sh", "-c", "true"][..]),
         ("ns-timeout", &["timeout", "5", "sh", "-c", "true"]),
         ("ns-rsync", &["rsync", "-e", "sh -c true", "a", "b"]),
-    ] {
+    ]
+    .iter()
+    .map(|(id, a)| (*id, a.iter().map(|s| s.to_string()).collect()))
+    .collect();
+    if let Some(lock) = common::flock_lock() {
+        cases.push((
+            "ns-flock-c",
+            vec!["flock".into(), lock, "-c".into(), "true".into()],
+        ));
+    }
+    for (id, argv) in &cases {
         let mut req = common::make_req(id, vec![]);
-        req.plan = Some(Plan::Exec {
-            argv: argv.iter().map(|s| s.to_string()).collect(),
-        });
+        req.plan = Some(Plan::Exec { argv: argv.clone() });
         let r = common::send_request(&d.socket, &req);
         assert_eq!(r.status, Status::Error, "{id}: {r:?}");
         assert!(
@@ -51,7 +60,10 @@ fn check(mut d: PtyDaemon) {
     assert_eq!(r.status, Status::Ok, "{r:?}");
     assert_eq!(common::decode_stdout(&r), "structured-ok\n");
     let tty = d.capture();
-    for id in ["ns-opaque", "ns-env", "ns-timeout", "ns-rsync"] {
+    for id in ["ns-opaque"]
+        .into_iter()
+        .chain(cases.iter().map(|(id, _)| *id))
+    {
         assert!(!tty.contains(id), "the opaque request {id} reached the tty");
     }
 }

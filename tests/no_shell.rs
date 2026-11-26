@@ -90,6 +90,8 @@ fn opaque_requests() -> Vec<Request> {
         ),
         // Review C4: xargs takes its program from its input (stdin is empty).
         plan_req("xargs-replace", exec(&["xargs", "-I{}", "{}"])),
+        // #92 review: xargs appends its input where timeout's program goes.
+        plan_req("xargs-timeout", exec(&["xargs", "timeout", "5"])),
     ];
     if sudo_proxy::executor::resolve_command("coreutils", "/").is_some() {
         reqs.push(plan_req(
@@ -98,16 +100,14 @@ fn opaque_requests() -> Vec<Request> {
         ));
     }
     // #92: flock runs the program after the lock file, or `$SHELL -c` with
-    // `-c`. The lock is taken on the temp directory, which exists, so running
-    // them creates no file.
-    if sudo_proxy::executor::resolve_command("flock", "/").is_some() {
-        let lock = std::env::temp_dir();
-        let lock = lock.to_str().unwrap();
+    // `-c`.
+    if let Some(lock) = common::flock_lock() {
         reqs.push(plan_req(
             "flock-sh",
-            exec(&["flock", lock, "sh", "-c", "true"]),
+            exec(&["flock", &lock, "sh", "-c", "true"]),
         ));
-        reqs.push(plan_req("flock-c", exec(&["flock", lock, "-c", "true"])));
+        reqs.push(plan_req("flock-c", exec(&["flock", &lock, "-c", "true"])));
+        reqs.push(plan_req("xargs-flock", exec(&["xargs", "flock", &lock])));
     }
     reqs
 }
@@ -232,9 +232,8 @@ fn no_shell_still_runs_structured_requests() {
         exec(&["nice", "-n", "5", "true"]),
         exec(&["timeout", "5", "true"]),
     ];
-    if sudo_proxy::executor::resolve_command("flock", "/").is_some() {
-        let lock = std::env::temp_dir();
-        wrapped.push(exec(&["flock", lock.to_str().unwrap(), "true"]));
+    if let Some(lock) = common::flock_lock() {
+        wrapped.push(exec(&["flock", &lock, "true"]));
     }
     let n = wrapped.len();
     for (i, plan) in wrapped.into_iter().enumerate() {
@@ -267,17 +266,13 @@ fn no_shell_message_names_the_command_string() {
     );
 
     // #92: `flock FILE -c` names flock and its `-c`.
-    if sudo_proxy::executor::resolve_command("flock", "/").is_none() {
+    let Some(lock) = common::flock_lock() else {
         return;
-    }
-    let lock = std::env::temp_dir();
-    let resp = s.send(&plan_req(
-        "flock-c",
-        exec(&["flock", lock.to_str().unwrap(), "-c", "true"]),
-    ));
+    };
+    let resp = s.send(&plan_req("flock-c", exec(&["flock", &lock, "-c", "true"])));
     let msg = resp.message.as_deref().unwrap_or("");
     assert!(
-        msg.contains("opaque — runs a command string remotely or through a shell (-c)"),
+        msg.contains("stage 0 runs flock: opaque — runs a command string through a shell (-c)"),
         "{msg}"
     );
 }

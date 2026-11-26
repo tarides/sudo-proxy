@@ -62,6 +62,9 @@ pub enum Trigger {
     Unparsed(String),
     /// Any other program: the option or word that carries the string.
     Option(String),
+    /// A local program that runs the string through a shell (`flock FILE -c`,
+    /// #92): the option that carries it.
+    Shell(String),
 }
 
 impl Trigger {
@@ -76,6 +79,7 @@ impl Trigger {
             Trigger::Option(t) => {
                 format!("runs a command string remotely or through a shell ({t})")
             }
+            Trigger::Shell(t) => format!("runs a command string through a shell ({t})"),
         }
     }
 }
