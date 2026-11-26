@@ -126,33 +126,42 @@ fn symlink_retargeted_to_a_shell_is_refused() {
 }
 
 /// A program run by a wrapper is pinned too: swapping it is refused, and
-/// left alone it runs under its absolute path, so `env` never searches.
+/// left alone it runs under its absolute path, so the wrapper never
+/// searches. `flock` (#92) skips its lock-file operand, which is not
+/// rewritten.
 #[test]
 fn wrapped_program_is_pinned_and_named_by_path() {
-    let dir = tempdir();
-    let d = dir.path().to_path_buf();
-    script(&d.join("x"), "echo \"$0\"");
+    let mut wrappers = vec![vec!["env".to_string()], vec!["timeout".into(), "5".into()]];
+    if let Some(lock) = flock_lock() {
+        wrappers.push(vec!["flock".into(), lock]);
+    }
+    for w in &wrappers {
+        let argv: Vec<&str> = w.iter().map(String::as_str).chain(["./x"]).collect();
+        let dir = tempdir();
+        let d = dir.path().to_path_buf();
+        script(&d.join("x"), "echo \"$0\"");
 
-    let s = server_with(false, || {});
-    let resp = s.send(&plan_req("pin-wrapped-ok", &d, &["env", "./x"]));
-    assert_eq!(resp.status, Status::Ok, "{resp:?}");
-    assert_eq!(
-        stdout(&resp).trim_end(),
-        d.join("./x").to_str().unwrap(),
-        "absolute path"
-    );
-
-    let swap = d.clone();
-    let s = server_with(false, move || {
-        script(
-            &swap.join("x.new"),
-            &format!("touch {}/ran-new", swap.display()),
+        let s = server_with(false, || {});
+        let resp = s.send(&plan_req("pin-wrapped-ok", &d, &argv));
+        assert_eq!(resp.status, Status::Ok, "{argv:?}: {resp:?}");
+        assert_eq!(
+            stdout(&resp).trim_end(),
+            d.join("./x").to_str().unwrap(),
+            "{argv:?}: absolute path"
         );
-        std::fs::rename(swap.join("x.new"), swap.join("x")).unwrap();
-    });
-    let resp = s.send(&plan_req("pin-wrapped-swap", &d, &["env", "./x"]));
-    assert_refused(&resp, "wrapped program swapped");
-    assert!(!d.join("ran-new").exists());
+
+        let swap = d.clone();
+        let s = server_with(false, move || {
+            script(
+                &swap.join("x.new"),
+                &format!("touch {}/ran-new", swap.display()),
+            );
+            std::fs::rename(swap.join("x.new"), swap.join("x")).unwrap();
+        });
+        let resp = s.send(&plan_req("pin-wrapped-swap", &d, &argv));
+        assert_refused(&resp, &format!("{argv:?}: wrapped program swapped"));
+        assert!(!d.join("ran-new").exists(), "{argv:?}");
+    }
 }
 
 /// A wrapped program that is not found is refused before the spawn instead

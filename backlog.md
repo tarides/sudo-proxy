@@ -13,13 +13,9 @@ then Phase 1 with the prompt issues placed where they fit). One PR per step;
 each moves its evidence status in `docs/assurance-case.md`; every
 prompt-touching PR gets the pty goldens plus a live manual run.
 
-Done: step 1, #91 (PR #117, see changelog). Next is #92.
+Done: step 1, #91 (PR #117) and step 2, #92 (PR #120); see changelog.
+Next is #95.
 
-2. **#92: `flock` as a fixed-shape wrapper.** Move it from the runner list to
-   the wrapper table (skip options and the lock-file operand, classify the
-   wrapped program); `flock -c` / `--command` stays opaque. The wrapped
-   program is then pinned and rewritten like `timeout`'s (#105). Same file as
-   #91 (`src/wrappers.rs`); branch off #117 or wait for it to merge.
 3. **#95: zenity Pango markup.** `--no-markup`, or escape `&`, `<`, `>` and
    quotes in every interpolated field; unit test on the text builder, manual
    check with a real zenity.

@@ -358,6 +358,9 @@ fn ui_prompts_no_color() {
         "{w}"
     );
     assert!(w.contains("(run by env; looked up at run time)"), "{w}");
+    // #92: flock is unwrapped; its lock file is not a program.
+    assert!(w.contains("(run by flock; looked up at run time)"), "{w}");
+    assert_eq!(w.matches("opaque — ").count(), 1, "{w}");
 
     // #91: plain rsync stays transparent; `rsync -e` is opaque.
     let r = get(&blocks, "remote");

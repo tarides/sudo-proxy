@@ -5,15 +5,18 @@ Client:  sudo-proxy 0.0.0-golden
 Time:    <TIME>
 ID:      ui-wrappers
 Reason:  \e[1mui golden wrappers\e[0m
-Command: \e[1msudo env X=1 true; sudo timeout 5 sh -c true\e[0m
+Command: \e[1msudo env X=1 true; sudo timeout 5 sh -c true; sudo flock /tmp/lock true\e[0m
 Resolves:
   env      <PATH>
   true     <PATH>
   timeout  <PATH>
   sh       <PATH>
+  flock    <PATH>
+  true     <PATH>
 Steps:
 \e[2m0\e[0m  \e[38;5;196msudo env X=1 true\e[0m\e[38;5;210m ;\e[0m
-\e[2m1\e[0m  \e[38;5;196msudo timeout 5 sh -c true\e[0m
+\e[2m1\e[0m  \e[38;5;196msudo timeout 5 sh -c true\e[0m\e[38;5;210m ;\e[0m
+\e[2m2\e[0m  \e[38;5;196msudo flock /tmp/lock true\e[0m
 Execute as root? [y/N] (60s timeout, default=N) 
 → Denied
 \e[1m━━━━━━━━━━━━━━━━━━━━━━━━━\e[0m

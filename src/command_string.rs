@@ -10,7 +10,9 @@
 //! like a trigger (a file named `-e`, a `git bisect start run`) over-flags,
 //! which is acceptable; a missed trigger is not. Plain transfers (`rsync src
 //! dst`, `scp src dst`, `git fetch`) carry no command string and stay
-//! transparent. `ssh` always runs something remotely, so it is always flagged.
+//! transparent. `ssh` always runs something remotely, and `sftp` the commands
+//! of its batch file or stdin (`!cmd` runs a local shell), so both are always
+//! flagged.
 //! `git` is scanned only for the subcommands of an allowlist; any other
 //! subcommand is flagged.
 //!
@@ -62,6 +64,12 @@ pub enum Trigger {
     Unparsed(String),
     /// Any other program: the option or word that carries the string.
     Option(String),
+    /// A local program that runs the string through a shell (`flock FILE -c`,
+    /// #92): the option that carries it.
+    Shell(String),
+    /// `sftp` with no other trigger: it runs the commands of its `-b` batch
+    /// file or of stdin, and `!command` runs a local shell.
+    SftpCommands,
 }
 
 impl Trigger {
@@ -75,6 +83,10 @@ impl Trigger {
             Trigger::Unparsed(w) => format!("not parsed; may run a command string ({w})"),
             Trigger::Option(t) => {
                 format!("runs a command string remotely or through a shell ({t})")
+            }
+            Trigger::Shell(t) => format!("runs a command string through a shell ({t})"),
+            Trigger::SftpCommands => {
+                "runs sftp commands from a batch file or stdin (! runs a local shell)".into()
             }
         }
     }
@@ -93,7 +105,13 @@ pub fn scan(prog: Prog, args: &[String]) -> Option<Trigger> {
     match prog {
         Prog::Ssh => Some(ssh(args)),
         Prog::Scp => scp_sftp(false, args).map(Trigger::Option),
-        Prog::Sftp => scp_sftp(true, args).map(Trigger::Option),
+        // Always: its commands come from `-b FILE` or stdin, which a request
+        // can supply (a pipe, `with-stdin-from`), and `!cmd` runs a shell.
+        Prog::Sftp => Some(
+            scp_sftp(true, args)
+                .map(Trigger::Option)
+                .unwrap_or(Trigger::SftpCommands),
+        ),
         Prog::Rsync => rsync(args).map(Trigger::Option),
         Prog::Git => git(args),
         Prog::GitDashed => Some(Trigger::Unparsed("git-<command>".into())),
@@ -587,9 +605,15 @@ mod tests {
             trig(Prog::Sftp, &["-o", "PKCS11Provider=/x.so", "h"]).as_deref(),
             Some("-o PKCS11Provider")
         );
-        assert_eq!(trig(Prog::Sftp, &["-b", "batch", "h"]), None);
-        // sftp has no `-O`; it is not a trigger there.
-        assert_eq!(trig(Prog::Sftp, &["-O", "h"]), None);
+        // sftp runs the commands of its batch file or stdin, where `!cmd`
+        // runs a local shell: always flagged, by its other triggers first.
+        for a in [&["-b", "batch", "h"][..], &["h"], &["-O", "h"]] {
+            assert_eq!(
+                scan(Prog::Sftp, &v(a)),
+                Some(Trigger::SftpCommands),
+                "sftp {a:?}"
+            );
+        }
         // `scp -s` selects the sftp protocol; it runs nothing.
         assert_eq!(trig(Prog::Scp, &["-s", "a", "h:b"]), None);
     }

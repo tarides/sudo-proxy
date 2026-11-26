@@ -3,6 +3,81 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-26 — flock is unwrapped as a fixed-shape wrapper (#92, PR #120)
+
+Step 2 of the 1.3.1 plan. **Behaviour change:** `flock LOCK PROG …` is no
+longer refused under `no_shell`; some `xargs`/`find -exec` forms that were
+transparent now are.
+
+- `flock` moved from the runner list to the wrapper table (option table from
+  util-linux 2.41.3 `flock.c`, `+sexnoFuw:E:hV?`; BusyBox's `+sxnu` is a
+  subset; `--nonblock` accepted as documented). The wrapped program is shown
+  `(run by flock)`, pinned and passed by absolute path (#105). A lone operand
+  is a file descriptor: no program.
+- `flock FILE -c`/`--command` (positional, as in flock) is opaque with a new
+  `Trigger::Shell`: *runs a command string through a shell (-c)*. The
+  wrapper table gains `command_words` for it.
+- Review of the PR found the unwrap trusted words that run-time input fills
+  in, a gap older than flock (`xargs timeout 5` with the input `sh -c …`,
+  `find . -exec timeout 5 {} ;`) that flock widened (`xargs flock LOCK` with
+  the input `-c CMD`). Regions now carry the placeholders an enclosing
+  `find -exec` (`{}`) or `xargs -I R` substitutes and whether an `xargs`
+  appends its input. A placeholder in a wrapper's own words or in a program
+  word at any depth, and a wrapper under an appending `xargs` with no program
+  of its own (or a `find` there), are opaque (`OpaqueReason::FromInput`:
+  *xargs appends its input to X, which may change what it runs*). The same
+  holds for `rsync`, `git`, `scp` and `sftp` (they parse options after their
+  operands: `xargs git add` is opaque) and for an interpreter's words up to
+  its script (`xargs -I@ python3 @`; *X takes arguments from run-time input
+  (@)*); input after the script is the script's own.
+- find's `{}` counts as run-time input like any placeholder, even where
+  it can only become a path (`find . -exec git add {} +` is refused under
+  `no_shell`): a start point can be `ext::x` or `a:b`, come from stdin
+  (`-files0-from -`), follow `--`, be rewritten by a nested `xargs -I`, or
+  become many words under `+`. An exception for "plain" start points was
+  tried and dropped after review found three ways around it.
+- `xargs -I R` followed by `-n`, `-L` or `-l` counts as appending too: GNU
+  xargs drops the replacement and appends (`xargs -I@ -n2 flock LOCK`).
+  xargs has its own `Kind::Xargs`.
+- `sftp` is always opaque, like `ssh`: a gap from #91. It runs the commands
+  of its `-b` batch file or of stdin (a pipe or `with-stdin-from` in the
+  request), and `!command` runs a local shell (`Trigger::SftpCommands`).
+- The other runners stay runners (identity, root, namespace or unit change;
+  shell by default; ssh family); reasons in the PR.
+- A program made opaque by run-time input keeps its resolved path and the
+  #101 `(user-writable)` marker on the `Resolves:` line (`FromInput` names
+  the program; test `program_reached_by_input_is_marked_user_writable`).
+- A placeholder in a wrapper's own words reads *X takes arguments from
+  run-time input*, on that wrapper's hop. Not refused: an `env` assignment's
+  value (`env FILE={} ./process`) and a wrapper an option stops from running
+  a program (`xargs ionice -c3 -p`, `xargs taskset -cp …`).
+- Tests: unit tables, `input_reaching_a_wrapper_fails_closed`,
+  `input_reaching_a_scanned_program_fails_closed`,
+  `flock_command_string_is_opaque`, flock in the property tests (the bare
+  `xargs` prefix became `xargs -I@`: a bare one now changes opacity, by
+  design); `tests/no_shell.rs`, `tests/pinning.rs` (env, timeout, flock),
+  `tests/pty_no_shell.rs` (`flock -c`), the `wrappers` UI golden (a flock
+  step); `common::flock_lock` (locks cargo's per-target scratch directory,
+  not the shared `/tmp`).
+- Verified: fmt, clippy, both release builds, full suite (34 binaries); live
+  run under `--no-shell`: `flock LOCK echo` prompted with `echo (run by
+  flock)` and ran, `flock LOCK -c id` refused before the prompt.
+
+## 2026-11-26 — The tree is in rustfmt's form, checked in CI (PR #119)
+
+- `cargo fmt` over the tree (42 files had drifted). Formatting only;
+  commit `c73e273`.
+- CI's `lint` job runs `cargo fmt --check` before clippy. The job keeps its
+  name, `clippy`, so required checks are unchanged.
+- `.git-blame-ignore-revs` lists `c73e273`. GitHub's blame view reads it;
+  local blame needs `git config blame.ignoreRevsFile
+  .git-blame-ignore-revs` once. Merge PRs that add to it with a merge
+  commit: a squash or rebase changes the hash.
+- A scan of the history for other formatting-only commits found none worth
+  listing.
+- Verified: `cargo fmt --check`, clippy, both release builds, full suite
+  (34 binaries), before and after the rebase onto #117.
+
 ## 2026-11-26 — The ssh family is opaque when it runs a command string (#91, PR #117)
 
 First step of the 1.3.1 plan. **Behaviour change:** these forms are now
@@ -62,7 +137,12 @@ refused under `no_shell`.
   - clippy (`-D warnings`), both release builds, and the full suite (34
     binaries);
   - a live run: the `rsync -e` prompt shows the reason, `git --version`
-    prompts as structured, and `--no-shell` rejects before any prompt.
+    prompts as structured, and `--no-shell` rejects before any prompt;
+  - a second live run after the review fixes: the new reason texts for
+    `ssh -N`, `git --frobnicate`, `git submodule update` and `scp -o
+    ' ProxyCommand=x'` at the prompt; `git status` structured; under
+    `--no-shell`, rejection with the same text and no prompt.
+- Merged 2026-11-26 (merge commit `f7612a6`); #89's plan ticks step 1.
 - Notes:
   - The flaky `burst_connections_above_cap_get_busy_response` failed in 2 of
     5 full-suite runs (a third had one failing binary, not identified) and

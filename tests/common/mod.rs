@@ -400,3 +400,13 @@ pub fn decode_stdout(resp: &Response) -> String {
 pub fn skip_if_no_sleep_binary() -> bool {
     sudo_proxy::executor::which("sleep").is_none()
 }
+
+/// The lock path for a `flock` test case (#92): cargo's per-target scratch
+/// directory, which exists (so running `flock` creates no file) and which
+/// only this test suite locks (a shared `/tmp` may be locked by others, and
+/// `flock` would wait). `None` when `flock` is not on the login PATH the
+/// daemon resolves programs on.
+pub fn flock_lock() -> Option<String> {
+    sudo_proxy::executor::resolve_command("flock", "/")?;
+    Some(env!("CARGO_TARGET_TMPDIR").to_string())
+}

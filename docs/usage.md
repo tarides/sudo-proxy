@@ -65,9 +65,13 @@ each one:
 
 - **shell** (`sh`, `bash`, `dash`, `zsh`, …): opaque, *resolves only the shell*;
 - **wrapper**, unwrapped: `env`, `nice`, `nohup`, `setsid`, `stdbuf`,
-  `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`, the multi-call
+  `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`, `flock` (the word
+  after its options is the lock file; a lone operand is a file descriptor and
+  runs nothing), the multi-call
   dispatchers `busybox`, `toybox` and `coreutils` (their `argv[1]` is the
-  applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`);
+  applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`).
+  `flock FILE -c 'cmd'` (or `--command`) runs `$SHELL -c`: opaque, *runs a
+  command string through a shell (-c)* (#92);
 - **inline-code interpreter**: `python`, `perl`, `ruby`, `php` and `lua`,
   each optionally followed by digits and dots only (`python3.12`, `perl5.38.2`;
   not `python3-config` or `perlcritic`), plus `pypy`, `pypy3`, `luajit`,
@@ -90,7 +94,10 @@ each one:
     `SecurityKeyProvider`: a library loaded into the ssh child), or
     `XAuthLocation`, read as ssh reads it (leading blanks or `=` skipped,
     quotes stripped, any case), `scp -O` (the legacy protocol passes the
-    remote path through the remote shell), and `sftp -s`;
+    remote path through the remote shell), and `sftp -s`; `sftp` with none
+    of these is still flagged, *runs sftp commands from a batch file or
+    stdin (! runs a local shell)*: its commands come from `-b FILE` or from
+    stdin, which a request can supply, and `!command` runs a local shell;
   - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`,
     `--old-args` (the remote path reaches the remote shell unescaped),
     `--daemon` and `--dparam` (a daemon runs the `exec` commands of its
@@ -126,25 +133,37 @@ each one:
   `--daemon`, `git clone --template`) is a trigger; files the program finds
   by convention are a residual (below);
 - **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
-  `unshare`, `nsenter`, `flock`, `watch`, `script`, `systemd-run`, and the
+  `unshare`, `nsenter`, `watch`, `script`, `systemd-run`, and the
   ssh-adjacent `ssh-agent`, `sshpass`, `autossh`, `mosh`, `sshfs`):
   always opaque, *runs a program the prompt does not unwrap*;
 - anything else is transparent.
 
 The unwrap **fails closed**: the stage is opaque on a wrapper option its table
-does not list (GNU long-option abbreviations such as `--sig=KILL` included;
+does not list (GNU long-option abbreviations such as `--sig=KILL` included,
+except `flock --nonblock`, the spelling its own `--help` documents;
 uutils accepts more spellings than GNU, and those are rejected too), a missing
 option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
 changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
 assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
 `BASH_ENV`, `ENV`, `IFS`, and the transport commands `GIT_SSH_COMMAND`,
 `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
-`RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `find -exec`
-program word containing `{}`, an
-action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
-command (a test such as `-printf` may have absorbed the one before it), an
-`xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
-word, a dispatcher called with an option (`busybox --list`), a name whose
+`RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `{}` (under
+`find -exec`) or an `xargs -I`
+replacement string (under `xargs -I`) in a wrapper's own words (an `env`
+assignment's value excepted: `env FILE={} ./process` is fine) or in a
+program word at any depth (`find . -exec timeout 5 {} ;`,
+`xargs -I@ flock @ /tmp/l sh`), a wrapper under an `xargs` without `-I`
+that has no program of its own, so that xargs's input supplies it, its
+options or a `find` action (`xargs timeout 5`, `xargs flock /tmp/l`,
+`xargs find .`; also with `-I` when a later `-n`, `-L` or `-l` makes GNU
+xargs drop it and append again; an option that runs no program, as in
+`xargs ionice -c3 -p`, is fine), an `xargs` appending its input to `rsync`,
+`git`, `scp` or `sftp` (`xargs git add`: they parse options after their
+operands), such a placeholder in their arguments or in an interpreter's words
+up to its script (`xargs -I@ python3 @`, `perl -I {}`; after the script it is
+the script's own argument), an action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
+command (a test such as `-printf` may have absorbed the one before it), a
+dispatcher called with an option (`busybox --list`), a name whose
 resolved binary is a different wrapper, a wrapper name whose binary is an
 interpreter or a command-string program (or the reverse), and a chain deeper
 than 8. A `--`
@@ -154,6 +173,11 @@ any other option word where the program is expected (`timeout 5 -- sh`,
 between implementations: uutils `timeout` keeps parsing options after its
 duration; uutils `timeout` and util-linux `chrt` skip a `--` and run the next
 word; GNU `env` runs a program named `--`.
+
+A `find` `{}` counts like any other placeholder, even where it can only
+become a path (`find . -exec git add {} +` is opaque): a start point may be
+`ext::x` or `host:path`, come from stdin (`-files0-from -`), be rewritten by a
+nested `xargs -I`, or become many words under `+`.
 
 The `Resolves:` block lists every program, the wrapped ones with
 `(run by <wrapper>)`. For an escalated stage the wrapper looks its program up
