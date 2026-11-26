@@ -147,23 +147,23 @@ changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
 assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
 `BASH_ENV`, `ENV`, `IFS`, and the transport commands `GIT_SSH_COMMAND`,
 `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
-`RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `find -exec`
-program word containing `{}`, a `{}` (under `find -exec`) or an `xargs -I`
+`RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `{}` (under
+`find -exec`) or an `xargs -I`
 replacement string (under `xargs -I`) in a wrapper's own words (an `env`
 assignment's value excepted: `env FILE={} ./process` is fine) or in a
 program word at any depth (`find . -exec timeout 5 {} ;`,
 `xargs -I@ flock @ /tmp/l sh`), a wrapper under an `xargs` without `-I`
 that has no program of its own, so that xargs's input supplies it, its
 options or a `find` action (`xargs timeout 5`, `xargs flock /tmp/l`,
-`xargs find .`; an option that runs no program, as in
+`xargs find .`; also with `-I` when a later `-n`, `-L` or `-l` makes GNU
+xargs drop it and append again; an option that runs no program, as in
 `xargs ionice -c3 -p`, is fine), an `xargs` appending its input to `rsync`,
 `git`, `scp` or `sftp` (`xargs git add`: they parse options after their
 operands), such a placeholder in their arguments or in an interpreter's words
 up to its script (`xargs -I@ python3 @`, `perl -I {}`; after the script it is
 the script's own argument), an action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
-command (a test such as `-printf` may have absorbed the one before it), an
-`xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
-word, a dispatcher called with an option (`busybox --list`), a name whose
+command (a test such as `-printf` may have absorbed the one before it), a
+dispatcher called with an option (`busybox --list`), a name whose
 resolved binary is a different wrapper, a wrapper name whose binary is an
 interpreter or a command-string program (or the reverse), and a chain deeper
 than 8. A `--`
@@ -174,17 +174,10 @@ between implementations: uutils `timeout` keeps parsing options after its
 duration; uutils `timeout` and util-linux `chrt` skip a `--` and run the next
 word; GNU `env` runs a program named `--`.
 
-A `find` `{}` is a path that starts with one of find's start points, so it
-is tolerated where it can only be an argument: in the arguments of `rsync`,
-`git` and `scp` (`sftp` is always opaque), and in the operands and option arguments of the
-wrappers other than `env`, `xargs` and `find` (`find . -exec git add {} +`,
-`find src -exec rsync -a {} host:dst ;`, `find . -exec flock {} make ;`).
-That needs every start point to be plain (no `:` or `=`, not starting with
-`-` or `+`; none means `.`) and the word to start with `{}` and add no `:`,
-`=` or second `{}` (`L{}=x` or `{}:dst` could form an assignment or a host).
-A `{}` in a program word, an interpreter's words up to its script, or `env`'s
-options and assignment names stays opaque: a start point named `PATH` or
-`LD_PRELOAD` is itself the first path find reports.
+A `find` `{}` counts like any other placeholder, even where it can only
+become a path (`find . -exec git add {} +` is opaque): a start point may be
+`ext::x` or `host:path`, come from stdin (`-files0-from -`), be rewritten by a
+nested `xargs -I`, or become many words under `+`.
 
 The `Resolves:` block lists every program, the wrapped ones with
 `(run by <wrapper>)`. For an escalated stage the wrapper looks its program up

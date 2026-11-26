@@ -30,13 +30,15 @@ transparent now are.
   operands: `xargs git add` is opaque) and for an interpreter's words up to
   its script (`xargs -I@ python3 @`; *X takes arguments from run-time input
   (@)*); input after the script is the script's own.
-- A `find` `{}` with plain start points (no `:` or `=`, not `-…`/`+…`) that
-  leads a word adding no `:`, `=` or second `{}` is tolerated in the
-  arguments of `rsync`/`git`/`scp` and in the words of wrappers other
-  than `env`, `xargs` and `find`: `find . -exec git add {} +`,
-  `find . -exec rsync -a {} host:dst ;` stay transparent. Program words,
-  interpreter words up to the script, and `env`'s options and assignment
-  names stay strict (a start point named `LD_PRELOAD` is itself a result).
+- find's `{}` counts as run-time input like any placeholder, even where
+  it can only become a path (`find . -exec git add {} +` is refused under
+  `no_shell`): a start point can be `ext::x` or `a:b`, come from stdin
+  (`-files0-from -`), follow `--`, be rewritten by a nested `xargs -I`, or
+  become many words under `+`. An exception for "plain" start points was
+  tried and dropped after review found three ways around it.
+- `xargs -I R` followed by `-n`, `-L` or `-l` counts as appending too: GNU
+  xargs drops the replacement and appends (`xargs -I@ -n2 flock LOCK`).
+  xargs has its own `Kind::Xargs`.
 - `sftp` is always opaque, like `ssh`: a gap from #91. It runs the commands
   of its `-b` batch file or of stdin (a pipe or `with-stdin-from` in the
   request), and `!command` runs a local shell (`Trigger::SftpCommands`).

@@ -25,12 +25,10 @@
 //! The walk fails closed: an option a wrapper's table does not list (including
 //! GNU long-option abbreviations), a missing option argument or operand, an
 //! `env` that changes how the wrapped program is looked up or sets a name the
-//! `setenv` policy rejects, a `find -exec` program word containing `{}` or a
-//! `find -exec` command containing another action word, an `xargs -I`
-//! replacement string in the program word, run-time input reaching a nested
-//! wrapper's words (a `{}` or `xargs -I` placeholder in them or in a deeper
-//! program word, an `xargs` appending its input where a wrapper expects its
-//! program), the same input reaching a command-string program's arguments
+//! `setenv` policy rejects, a `find -exec` command containing another action
+//! word, run-time input reaching a program word at any depth or a wrapper's
+//! words (a `find -exec` `{}` or `xargs -I` placeholder, an `xargs` appending
+//! its input where a wrapper expects its program), the same input reaching a command-string program's arguments
 //! or an interpreter's words up to its script, a `--` or any other option word
 //! where a program is expected, a multi-call dispatcher option, an ambiguous
 //! name and a chain deeper than [`MAX_DEPTH`] all make the leaf opaque.
@@ -100,6 +98,9 @@ pub enum Kind {
     MultiCall,
     /// `find`: each `-exec`/`-execdir`/`-ok`/`-okdir` starts a program.
     FindExec,
+    /// `xargs`: `Getopt`, and its input is appended to the program's argv or
+    /// substituted for an `-I` replacement string.
+    Xargs,
 }
 
 /// A wrapper's option table. Every wrapper listed here stops option parsing at
@@ -316,7 +317,7 @@ pub const WRAPPERS: &[WrapperSpec] = &[
             "process-slot-var",
         ],
         long_optarg: &["eof", "replace", "max-lines"],
-        ..spec("xargs", Kind::Getopt)
+        ..spec("xargs", Kind::Xargs)
     },
     spec("busybox", Kind::MultiCall),
     spec("toybox", Kind::MultiCall),
@@ -675,9 +676,6 @@ struct Subst {
     hop: usize,
     text: String,
     find: bool,
-    /// A `find` whose start points are all plain ([`plain_start_points`]):
-    /// its `{}` expands to a path that starts with one of them.
-    plain: bool,
 }
 
 impl Subst {
@@ -692,64 +690,10 @@ impl Subst {
         }
     }
 
-    /// The first placeholder of `subst` that `word` contains: `word` is a
-    /// program word or a script operand, where any input runs something.
+    /// The first placeholder of `subst` that `word` contains.
     fn in_word<'a>(subst: &'a [Subst], word: &str) -> Option<&'a Subst> {
         subst.iter().find(|s| word.contains(s.text.as_str()))
     }
-
-    /// The first placeholder of `subst` in `word` that may change how the
-    /// word parses, `word` being an argument. A `find` `{}` with plain start
-    /// points leading the word, the rest holding no `:`, `=` or second `{}`,
-    /// is a path that starts with a start point: it can be no option, URL,
-    /// `host:path`, remote helper or assignment (`git add {}`, `rsync -a {}
-    /// host:dst`). A prefix (`L{}=x`) or such a suffix (`{}:dst`) could form
-    /// one.
-    fn in_arg<'a>(subst: &'a [Subst], word: &str) -> Option<&'a Subst> {
-        subst.iter().find(|s| {
-            word.contains(s.text.as_str())
-                && !(s.find
-                    && s.plain
-                    && word.strip_prefix("{}").is_some_and(|rest| {
-                        !rest.contains(':') && !rest.contains('=') && !rest.contains("{}")
-                    }))
-        })
-    }
-}
-
-/// Whether `w` starts a `find` expression rather than naming a start point.
-fn starts_expression(w: &str) -> bool {
-    (w.starts_with('-') && w.len() > 1) || matches!(w, "(" | ")" | "!" | ",")
-}
-
-/// Whether every start point of the `find` at `argv[r.start]` is plain: not
-/// an option (`-…`, `+…`), and holding no `:` or `=`. GNU find's leading
-/// `-H`/`-L`/`-P`/`-D DEBUG`/`-O<n>` are skipped; the start points end at
-/// the first word that starts the expression (`-…`, `(`, `)`, `!`, `,`).
-/// With none, find searches `.`.
-fn plain_start_points(argv: &[String], r: &Region) -> bool {
-    // A start point an enclosing find or xargs fills in is not plain (its
-    // own `{}` is refused earlier, as a strict `find` word).
-    let mut i = r.start + 1;
-    while i < r.end {
-        match argv[i].as_str() {
-            "-H" | "-L" | "-P" => i += 1,
-            "-D" => i += 2,
-            w if w.starts_with("-O") => i += 1,
-            _ => break,
-        }
-    }
-    argv[i.min(r.end)..r.end]
-        .iter()
-        .take_while(|w| !starts_expression(w))
-        .all(|w| {
-            !w.is_empty()
-                && !w.starts_with('-')
-                && !w.starts_with('+')
-                && !w.contains(':')
-                && !w.contains('=')
-                && Subst::in_word(&r.subst, w).is_none()
-        })
 }
 
 /// Unwrap a leaf's argv into the chain of programs that run, and say why the
@@ -841,10 +785,10 @@ pub fn unwrap(
                     // Options end at the script operand: input after it is
                     // the script's own arguments, and input in it picks the
                     // script that runs.
-                    // Its options are strict too: `perl -I {}`, `node -r {}`
-                    // load code from the path.
+                    // Its options count too: `perl -I {}`, `node -r {}` load
+                    // code from the path.
                     None => match script_operand(spec, args)
-                        .and_then(|k| input_in(&r, &args[..=k], false, false, hop))
+                        .and_then(|k| input_in(&r, &args[..=k], false, hop))
                     {
                         Some(reason) => Err(reason),
                         None => continue,
@@ -857,7 +801,7 @@ pub fn unwrap(
                     Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
                     // These programs parse options after their operands, so
                     // input anywhere in their arguments may add a trigger.
-                    None => match input_in(&r, args, true, true, hop) {
+                    None => match input_in(&r, args, true, hop) {
                         Some(reason) => Err(reason),
                         None => continue,
                     },
@@ -880,18 +824,16 @@ pub fn unwrap(
                         hop,
                         text: "{}".into(),
                         find: true,
-                        plain: plain_start_points(argv, &r),
                     });
-                } else if spec.name == "xargs" {
-                    match parsed.xargs_replace {
-                        Some(text) => subst.push(Subst {
+                } else if spec.kind == Kind::Xargs {
+                    if let Some(text) = parsed.xargs_replace {
+                        subst.push(Subst {
                             hop,
                             text,
                             find: false,
-                            plain: false,
-                        }),
-                        None => appended = true,
+                        });
                     }
+                    appended |= parsed.xargs_appends;
                 }
                 // A `find` under an appending xargs is refused above, so every
                 // child of an appended region ends where the input is added.
@@ -915,13 +857,12 @@ pub fn unwrap(
 
 /// The reason run-time input reaching an interpreter's or a command-string
 /// program's words makes the hop opaque: a placeholder in one of `words`
-/// (when `lenient`, only one that may change how it parses,
-/// [`Subst::in_arg`]; a start point such as `ext::x` is special to git), or,
-/// when `appended_counts`, an appending `xargs` above.
+/// (even find's `{}`: a start point such as `ext::x` is special to git, and
+/// find can read its start points from stdin), or, when `appended_counts`,
+/// an appending `xargs` above.
 fn input_in(
     r: &Region,
     words: &[String],
-    lenient: bool,
     appended_counts: bool,
     hop: usize,
 ) -> Option<OpaqueReason> {
@@ -931,14 +872,9 @@ fn input_in(
             placeholder: None,
         });
     }
-    let check = if lenient {
-        Subst::in_arg
-    } else {
-        Subst::in_word
-    };
     words
         .iter()
-        .find_map(|w| check(&r.subst, w))
+        .find_map(|w| Subst::in_word(&r.subst, w))
         .map(|s| OpaqueReason::FromInput {
             hop,
             placeholder: Some(s.text.clone()),
@@ -970,19 +906,9 @@ fn check_input_words(
             _ => w,
         }
     };
-    // `env -C {}` / `-u {}` change where the program is looked up, an
-    // `xargs` option its input or replacement string, a `find` word its
-    // start points or actions: strict. Other wrappers' operands and option
-    // arguments (a lock file, a duration) are lenient.
-    let lenient = matches!(spec.kind, Kind::Getopt | Kind::Nice) && spec.name != "xargs";
-    let check = if lenient {
-        Subst::in_arg
-    } else {
-        Subst::in_word
-    };
     if let Some(s) = (r.start + 1..r.end)
         .filter(|&k| !in_child(k))
-        .find_map(|k| check(&r.subst, parsed_part(k)))
+        .find_map(|k| Subst::in_word(&r.subst, parsed_part(k)))
     {
         return Err(OpaqueReason::FromInput {
             hop,
@@ -1076,6 +1002,8 @@ struct Parsed {
     runs: bool,
     /// The `xargs -I` replacement string, if any.
     xargs_replace: Option<String>,
+    /// An `xargs` that appends its input (no `-I`, or a later `-n`/`-L`).
+    xargs_appends: bool,
     /// The indices of `env`'s `NAME=VALUE` assignments.
     assignments: std::ops::Range<usize>,
 }
@@ -1086,6 +1014,7 @@ impl Parsed {
             children,
             runs: true,
             xargs_replace: None,
+            xargs_appends: false,
             assignments: 0..0,
         }
     }
@@ -1121,13 +1050,21 @@ fn parse_wrapper(
             None => Ok(Parsed::runs(Vec::new())),
         },
         Kind::FindExec => find_exec(argv, r, hop).map(Parsed::runs),
-        Kind::Getopt | Kind::Nice => {
+        Kind::Getopt | Kind::Nice | Kind::Xargs => {
             // `xargs -I R` / `-i[R]` / `--replace[=R]` substitutes each input
-            // item for `R`, in the program word too (`xargs -I{} {}`).
+            // item for `R`, in the program word too (`xargs -I{} {}`). A
+            // `-n`/`-L`/`-l`/`--max-args`/`--max-lines` after it makes GNU
+            // xargs drop the replacement and append again (last wins), so
+            // with both, the input is taken as appended too.
             let mut replace: Option<String> = None;
+            let mut limits = false;
             let parsed = getopt(spec, argv, r, hop, |opt, arg| {
-                if spec.name == "xargs" && matches!(opt, "I" | "i" | "replace") {
-                    replace = Some(arg.unwrap_or("{}").to_string());
+                if spec.kind == Kind::Xargs {
+                    match opt {
+                        "I" | "i" | "replace" => replace = Some(arg.unwrap_or("{}").to_string()),
+                        "n" | "L" | "l" | "max-args" | "max-lines" => limits = true,
+                        _ => {}
+                    }
                 }
                 Ok(())
             })?;
@@ -1152,6 +1089,7 @@ fn parse_wrapper(
             // A program word containing `R` is refused by `unwrap`, as is a
             // placeholder in any later wrapper word.
             Ok(Parsed {
+                xargs_appends: spec.kind == Kind::Xargs && (replace.is_none() || limits),
                 xargs_replace: replace,
                 ..Parsed::runs(one(i, r.chdir.clone()))
             })
@@ -1984,6 +1922,9 @@ mod tests {
             (&["xargs", "find", ".", "-exec", "rm", "{}", ";"], 1),
             (&["xargs", "env", "timeout", "5"], 2),
             (&["find", ".", "-exec", "xargs", "flock", "/tmp/l", ";"], 2),
+            // GNU xargs drops `-I` for a later `-n`/`-L`/`-l` and appends.
+            (&["xargs", "-I@", "-n2", "flock", "/tmp/l"], 1),
+            (&["xargs", "-I@", "-L1", "timeout", "5"], 1),
         ] {
             assert_eq!(
                 run(argv).1,
@@ -2040,8 +1981,17 @@ mod tests {
                 &["find", ".", "-exec", "env", "L{}=1", "true", ";"],
                 word(1, "{}"),
             ),
-            // Other wrappers: lenient only with plain start points and a
-            // word led by `{}` adding no `:` or `=`.
+            // Any placeholder in a wrapper's own words, find's `{}` too: it
+            // becomes a path that starts with a start point (`a:b`, a
+            // stdin-fed `-files0-from`), or many words under `+`.
+            (
+                &["find", ".", "-exec", "timeout", "{}", "rm", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", "-L", "/srv", "-exec", "flock", "{}", "make", ";"],
+                word(1, "{}"),
+            ),
             (
                 &["find", "a:b", "-exec", "timeout", "{}", "rm", ";"],
                 word(1, "{}"),
@@ -2053,6 +2003,16 @@ mod tests {
             (
                 &["find", ".", "-exec", "xargs", "-a", "{}", "rm", ";"],
                 word(1, "{}"),
+            ),
+            // Under `+` the `{}` is many words: the second fills the program.
+            (&["find", ".", "-exec", "flock", "{}", "+"], word(1, "{}")),
+            (
+                &["find", ".", "-exec", "time", "-o", "{}", "+"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "nice", "timeout", "{}", "+"],
+                word(2, "{}"),
             ),
             (&["xargs", "-I@", "env", "nice", "x@"], xr("@")),
             (
@@ -2084,10 +2044,6 @@ mod tests {
             // An assignment's value cannot change how env parses.
             &["find", ".", "-exec", "env", "FILE={}", "./process", ";"],
             &["xargs", "-I@", "env", "TARGET=@", "make"],
-            &["find", ".", "-exec", "timeout", "{}", "rm", ";"],
-            &[
-                "find", "-L", "/srv", "x", "-exec", "flock", "{}", "make", ";",
-            ],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }
@@ -2147,12 +2103,62 @@ mod tests {
                 &["find", ".", "-exec", "perl", "-I", "{}", "x.pl", ";"],
                 ph(1, "{}"),
             ),
-            // A start point filled in by input is no plain start point.
+            // Any placeholder in their arguments, find's `{}` too: a start
+            // point may be `ext::x` or `a:b`, or come from stdin.
+            (
+                &[
+                    "find", ".", "-name", "*.c", "-exec", "git", "add", "{}", "+",
+                ],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "rsync", "-a", "{}", "host:dst", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", "src", "-execdir", "scp", "{}.bak", "h:", ";"],
+                ph(1, "{}"),
+            ),
             (
                 &[
                     "xargs", "-I@", "find", "@", "-exec", "git", "add", "{}", "+",
                 ],
                 ph(1, "@"),
+            ),
+            (&["xargs", "-I@", "-L1", "rsync", "a"], appended(1)),
+            (&["xargs", "-I@", "--max-args=2", "git", "add"], appended(1)),
+            (
+                &[
+                    "find",
+                    "-files0-from",
+                    "-",
+                    "-exec",
+                    "rsync",
+                    "{}",
+                    "h:",
+                    ";",
+                ],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", "--", "a:b", "-exec", "rsync", "{}", "h:", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", "--", "ext::x", "-exec", "git", "fetch", "{}", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &[
+                    "find", ".", "-exec", "xargs", "-I.", "rsync", "{}", "h:", ";",
+                ],
+                ph(2, "{}"),
+            ),
+            (
+                &[
+                    "find", "@", "-exec", "xargs", "-I@", "git", "add", "{}", ";",
+                ],
+                ph(2, "{}"),
             ),
             (&["xargs", "-I@", "python3", "@"], ph(1, "@")),
             (&["xargs", "-I@", "python3", "-W", "@", "x.py"], ph(1, "@")),
@@ -2167,14 +2173,6 @@ mod tests {
             &["find", ".", "-exec", "python3", "x.py", "{}", ";"],
             &["xargs", "-I@", "cp", "@", "/dst"],
             &["git", "fetch"],
-            // A path from plain start points is no option, URL or host.
-            &[
-                "find", ".", "-name", "*.c", "-exec", "git", "add", "{}", "+",
-            ],
-            &[
-                "find", "-L", ".", "-exec", "rsync", "-a", "{}", "host:dst", ";",
-            ],
-            &["find", "src", "lib", "-execdir", "scp", "{}.bak", "h:", ";"],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }
