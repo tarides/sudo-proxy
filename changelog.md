@@ -3,6 +3,53 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-26 — The ssh family is opaque when it runs a command string (#91, PR #117)
+
+First step of the 1.3.1 plan. **Behaviour change:** these forms are now
+refused under `no_shell`.
+
+- New pure module `src/command_string.rs`, reached from `wrappers::unwrap`
+  as `Class::CommandString`, so it also applies behind wrappers and to
+  renamed binaries. The scans are coarse and fail closed:
+  - `ssh`/`slogin`: always opaque, *runs a command string remotely
+    (<word>)* or *runs a remote login shell*;
+  - `scp`/`sftp`: `-S`, `-D`, `-F`, `-o …Command`, `sftp -s`;
+  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`, also
+    clustered and abbreviated;
+  - `git`: `-c`, `--config-env`, `--exec-path` and unknown global options,
+    `ext::`, `--upload-pack`/`--receive-pack`/`--exec`, `clone -u/-c`,
+    `ls-remote -u`, `rebase -x`, `difftool -x`, `submodule foreach`,
+    `bisect run`, `filter-branch`.
+
+  Plain transfers stay structured. `ssh` left `RUNNERS`.
+- `GIT_SSH`, `GIT_PROXY_COMMAND`, `RSYNC_RSH` and `RSYNC_CONNECT_PROG` joined
+  `CODE_LOADING`.
+- Tests:
+  - unit tables and `scan_is_total`;
+  - the ssh family added to the opacity properties;
+  - 11 rejected forms in `tests/no_shell.rs`;
+  - `rsync -e` in `tests/pty_no_shell.rs`;
+  - the new `remote` UI golden.
+- Docs: `usage.md`, `threat-model.md`, G4.7/Sn4.7 (still partial),
+  `testing.md`.
+- Residuals, documented:
+  - commands set in files the program reads (git hooks and config,
+    `~/.ssh/config`);
+  - `GIT_PAGER`/`GIT_EDITOR`/`GIT_ASKPASS`, left out because adding them
+    would refuse common inherited names at startup.
+- Verified:
+  - clippy (`-D warnings`), both release builds, and the full suite (34
+    binaries);
+  - a live run: the `rsync -e` prompt shows the reason, `git --version`
+    prompts as structured, and `--no-shell` rejects before any prompt.
+- Notes:
+  - The flaky `burst_connections_above_cap_get_busy_response` failed in 2 of
+    5 full-suite runs (a third had one failing binary, not identified) and
+    passed 5 of 5 alone.
+  - `cargo clean -p sudo-proxy` was needed once: the integration tests had
+    linked a stale library build.
+  - `sudo-request` exits 0 when the daemon returns an error; not chased.
+
 ## 2026-11-26 — Prepared v1.3.0
 
 - The #101 reporter tested rc.1 on NixOS and found no problems. The NixOS
