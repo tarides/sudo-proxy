@@ -30,6 +30,13 @@ transparent now are.
   operands: `xargs git add` is opaque) and for an interpreter's words up to
   its script (`xargs -I@ python3 @`; *X takes arguments from run-time input
   (@)*); input after the script is the script's own.
+- A `find` `{}` with plain start points (no `:` or `=`, not `-…`/`+…`) that
+  leads a word adding no `:`, `=` or second `{}` is tolerated in the
+  arguments of `rsync`/`git`/`scp`/`sftp` and in the words of wrappers other
+  than `env`, `xargs` and `find`: `find . -exec git add {} +`,
+  `find . -exec rsync -a {} host:dst ;` stay transparent. Program words,
+  interpreter words up to the script, and `env`'s options and assignment
+  names stay strict (a start point named `LD_PRELOAD` is itself a result).
 - The other runners stay runners (identity, root, namespace or unit change;
   shell by default; ssh family); reasons in the PR.
 - A placeholder in a wrapper's own words reads *X takes arguments from

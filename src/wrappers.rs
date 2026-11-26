@@ -674,6 +674,9 @@ struct Subst {
     hop: usize,
     text: String,
     find: bool,
+    /// A `find` whose start points are all plain ([`plain_start_points`]):
+    /// its `{}` expands to a path that starts with one of them.
+    plain: bool,
 }
 
 impl Subst {
@@ -688,10 +691,64 @@ impl Subst {
         }
     }
 
-    /// The first placeholder of `subst` that `word` contains.
+    /// The first placeholder of `subst` that `word` contains: `word` is a
+    /// program word or a script operand, where any input runs something.
     fn in_word<'a>(subst: &'a [Subst], word: &str) -> Option<&'a Subst> {
         subst.iter().find(|s| word.contains(s.text.as_str()))
     }
+
+    /// The first placeholder of `subst` in `word` that may change how the
+    /// word parses, `word` being an argument. A `find` `{}` with plain start
+    /// points leading the word, the rest holding no `:`, `=` or second `{}`,
+    /// is a path that starts with a start point: it can be no option, URL,
+    /// `host:path`, remote helper or assignment (`git add {}`, `rsync -a {}
+    /// host:dst`). A prefix (`L{}=x`) or such a suffix (`{}:dst`) could form
+    /// one.
+    fn in_arg<'a>(subst: &'a [Subst], word: &str) -> Option<&'a Subst> {
+        subst.iter().find(|s| {
+            word.contains(s.text.as_str())
+                && !(s.find
+                    && s.plain
+                    && word.strip_prefix("{}").is_some_and(|rest| {
+                        !rest.contains(':') && !rest.contains('=') && !rest.contains("{}")
+                    }))
+        })
+    }
+}
+
+/// Whether `w` starts a `find` expression rather than naming a start point.
+fn starts_expression(w: &str) -> bool {
+    (w.starts_with('-') && w.len() > 1) || matches!(w, "(" | ")" | "!" | ",")
+}
+
+/// Whether every start point of the `find` at `argv[r.start]` is plain: not
+/// an option (`-…`, `+…`), and holding no `:` or `=`. GNU find's leading
+/// `-H`/`-L`/`-P`/`-D DEBUG`/`-O<n>` are skipped; the start points end at
+/// the first word that starts the expression (`-…`, `(`, `)`, `!`, `,`).
+/// With none, find searches `.`.
+fn plain_start_points(argv: &[String], r: &Region) -> bool {
+    // A start point an enclosing find or xargs fills in is not plain (its
+    // own `{}` is refused earlier, as a strict `find` word).
+    let mut i = r.start + 1;
+    while i < r.end {
+        match argv[i].as_str() {
+            "-H" | "-L" | "-P" => i += 1,
+            "-D" => i += 2,
+            w if w.starts_with("-O") => i += 1,
+            _ => break,
+        }
+    }
+    argv[i.min(r.end)..r.end]
+        .iter()
+        .take_while(|w| !starts_expression(w))
+        .all(|w| {
+            !w.is_empty()
+                && !w.starts_with('-')
+                && !w.starts_with('+')
+                && !w.contains(':')
+                && !w.contains('=')
+                && Subst::in_word(&r.subst, w).is_none()
+        })
 }
 
 /// Unwrap a leaf's argv into the chain of programs that run, and say why the
@@ -781,9 +838,12 @@ pub fn unwrap(
                 match inline_code(spec, args) {
                     Some(flag) => Err(OpaqueReason::InlineCode { hop, flag }),
                     // Options end at the script operand: input after it is
-                    // the script's own arguments.
+                    // the script's own arguments, and input in it picks the
+                    // script that runs.
+                    // Its options are strict too: `perl -I {}`, `node -r {}`
+                    // load code from the path.
                     None => match script_operand(spec, args)
-                        .and_then(|k| input_in(&r, &args[..=k], false, hop))
+                        .and_then(|k| input_in(&r, &args[..=k], false, false, hop))
                     {
                         Some(reason) => Err(reason),
                         None => continue,
@@ -796,7 +856,7 @@ pub fn unwrap(
                     Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
                     // These programs parse options after their operands, so
                     // input anywhere in their arguments may add a trigger.
-                    None => match input_in(&r, args, true, hop) {
+                    None => match input_in(&r, args, true, true, hop) {
                         Some(reason) => Err(reason),
                         None => continue,
                     },
@@ -819,6 +879,7 @@ pub fn unwrap(
                         hop,
                         text: "{}".into(),
                         find: true,
+                        plain: plain_start_points(argv, &r),
                     });
                 } else if spec.name == "xargs" {
                     match parsed.xargs_replace {
@@ -826,6 +887,7 @@ pub fn unwrap(
                             hop,
                             text,
                             find: false,
+                            plain: false,
                         }),
                         None => appended = true,
                     }
@@ -850,14 +912,15 @@ pub fn unwrap(
     (hops, None)
 }
 
-/// The reason run-time input reaching `words` (an interpreter's or a
-/// command-string program's arguments) makes the hop opaque: a placeholder
-/// in one of them, or, when `appended_counts`, an appending `xargs` above.
-/// `find`'s `{}` counts too: it starts with a start point, which may itself
-/// be special to the program (`find ext::x -exec git fetch {} ;`).
+/// The reason run-time input reaching an interpreter's or a command-string
+/// program's words makes the hop opaque: a placeholder in one of `words`
+/// (when `lenient`, only one that may change how it parses,
+/// [`Subst::in_arg`]; a start point such as `ext::x` is special to git), or,
+/// when `appended_counts`, an appending `xargs` above.
 fn input_in(
     r: &Region,
     words: &[String],
+    lenient: bool,
     appended_counts: bool,
     hop: usize,
 ) -> Option<OpaqueReason> {
@@ -867,9 +930,14 @@ fn input_in(
             placeholder: None,
         });
     }
+    let check = if lenient {
+        Subst::in_arg
+    } else {
+        Subst::in_word
+    };
     words
         .iter()
-        .find_map(|w| Subst::in_word(&r.subst, w))
+        .find_map(|w| check(&r.subst, w))
         .map(|s| OpaqueReason::FromInput {
             hop,
             placeholder: Some(s.text.clone()),
@@ -892,8 +960,8 @@ fn check_input_words(
     parsed: &Parsed,
 ) -> Result<(), OpaqueReason> {
     let in_child = |k: usize| parsed.children.iter().any(|&(s, e, _)| (s..e).contains(&k));
-    // An assignment's name is fixed by the words before `=`; its value
-    // cannot change how `env` parses the rest.
+    // An assignment's value cannot change how `env` parses the rest; its
+    // name can (a find start point named `LD_PRELOAD`), so it is strict.
     let parsed_part = |k: usize| -> &str {
         let w = argv[k].as_str();
         match w.split_once('=') {
@@ -901,9 +969,19 @@ fn check_input_words(
             _ => w,
         }
     };
+    // `env -C {}` / `-u {}` change where the program is looked up, an
+    // `xargs` option its input or replacement string, a `find` word its
+    // start points or actions: strict. Other wrappers' operands and option
+    // arguments (a lock file, a duration) are lenient.
+    let lenient = matches!(spec.kind, Kind::Getopt | Kind::Nice) && spec.name != "xargs";
+    let check = if lenient {
+        Subst::in_arg
+    } else {
+        Subst::in_word
+    };
     if let Some(s) = (r.start + 1..r.end)
         .filter(|&k| !in_child(k))
-        .find_map(|k| Subst::in_word(&r.subst, parsed_part(k)))
+        .find_map(|k| check(&r.subst, parsed_part(k)))
     {
         return Err(OpaqueReason::FromInput {
             hop,
@@ -1942,8 +2020,37 @@ mod tests {
             ),
             (&["xargs", "-I@", "env", "-C", "@", "make"], word(1, "@")),
             (&["xargs", "-I@", "env", "@=1", "make"], word(1, "@")),
+            // A `{}` in env's words is strict, except in an assignment's
+            // value: a start point named `LD_PRELOAD` or `PATH` is itself
+            // the first path find reports.
             (
-                &["find", ".", "-exec", "timeout", "{}", "rm", ";"],
+                &["find", "LD_PRELOAD", "-exec", "env", "{}=1", "true", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", "PATH", "-exec", "env", "-u", "{}", "true", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "env", "-C", "{}", "./x", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "env", "L{}=1", "true", ";"],
+                word(1, "{}"),
+            ),
+            // Other wrappers: lenient only with plain start points and a
+            // word led by `{}` adding no `:` or `=`.
+            (
+                &["find", "a:b", "-exec", "timeout", "{}", "rm", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "timeout", "5{}", "rm", ";"],
+                word(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "xargs", "-a", "{}", "rm", ";"],
                 word(1, "{}"),
             ),
             (&["xargs", "-I@", "env", "nice", "x@"], xr("@")),
@@ -1976,6 +2083,10 @@ mod tests {
             // An assignment's value cannot change how env parses.
             &["find", ".", "-exec", "env", "FILE={}", "./process", ";"],
             &["xargs", "-I@", "env", "TARGET=@", "make"],
+            &["find", ".", "-exec", "timeout", "{}", "rm", ";"],
+            &[
+                "find", "-L", "/srv", "x", "-exec", "flock", "{}", "make", ";",
+            ],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }
@@ -2016,8 +2127,31 @@ mod tests {
                 ph(1, "{}"),
             ),
             (
-                &["find", ".", "-exec", "sftp", "-b", "{}", "h", ";"],
+                &["find", "a:b", "-exec", "rsync", "{}", "h:", ";"],
                 ph(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "rsync", "{}:x", "h", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "git", "fetch", "x{}", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", "-", "-exec", "git", "add", "{}", "+"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "perl", "-I", "{}", "x.pl", ";"],
+                ph(1, "{}"),
+            ),
+            // A start point filled in by input is no plain start point.
+            (
+                &[
+                    "xargs", "-I@", "find", "@", "-exec", "git", "add", "{}", "+",
+                ],
+                ph(1, "@"),
             ),
             (&["xargs", "-I@", "python3", "@"], ph(1, "@")),
             (&["xargs", "-I@", "python3", "-W", "@", "x.py"], ph(1, "@")),
@@ -2032,6 +2166,14 @@ mod tests {
             &["find", ".", "-exec", "python3", "x.py", "{}", ";"],
             &["xargs", "-I@", "cp", "@", "/dst"],
             &["git", "fetch"],
+            // A path from plain start points is no option, URL or host.
+            &[
+                "find", ".", "-name", "*.c", "-exec", "git", "add", "{}", "+",
+            ],
+            &[
+                "find", "-L", ".", "-exec", "rsync", "-a", "{}", "host:dst", ";",
+            ],
+            &["find", "src", "lib", "-execdir", "scp", "{}.bak", "h:", ";"],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }
