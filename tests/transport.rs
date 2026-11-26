@@ -159,7 +159,9 @@ fn eof_without_newline_returns_error() {
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    stream.write_all(b"{\"id\":\"x\",\"pipeline\":[[\"true\"]]}").unwrap();
+    stream
+        .write_all(b"{\"id\":\"x\",\"pipeline\":[[\"true\"]]}")
+        .unwrap();
     stream.shutdown(std::net::Shutdown::Write).unwrap();
 
     let mut reader = BufReader::new(stream);
@@ -235,7 +237,6 @@ fn request_without_version_field_accepted() {
 #[test]
 fn response_without_version_field_deserializes() {
     let json = r#"{"id":"legacy","status":"ok","stages":[],"stdout":null}"#;
-    let resp: sudo_proxy::protocol::Response =
-        serde_json::from_str(json).expect("parse");
+    let resp: sudo_proxy::protocol::Response = serde_json::from_str(json).expect("parse");
     assert_eq!(resp.version, "");
 }

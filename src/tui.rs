@@ -62,7 +62,14 @@ pub fn command_summary(req: &ValidatedRequest) -> String {
 pub fn steps_shell_text(req: &ValidatedRequest) -> String {
     steps_lines(&request_layout(req), &style_for(true))
         .iter()
-        .map(|l| format!("{}{}{}", "  ".repeat(l.depth), l.text, l.comment(&style_for(true))))
+        .map(|l| {
+            format!(
+                "{}{}{}",
+                "  ".repeat(l.depth),
+                l.text,
+                l.comment(&style_for(true))
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -73,10 +80,18 @@ pub fn steps_shell_text(req: &ValidatedRequest) -> String {
 /// light red. A `run-as` node overrides it per subtree.
 fn ambient_ctx(privileged: bool) -> LayCtx {
     LayCtx {
-        sudo: if privileged { "sudo ".into() } else { String::new() },
+        sudo: if privileged {
+            "sudo ".into()
+        } else {
+            String::new()
+        },
         accepted: Vec::new(),
         esc: Esc {
-            uid: if privileged { StepUid::Root } else { StepUid::Default },
+            uid: if privileged {
+                StepUid::Root
+            } else {
+                StepUid::Default
+            },
             boundary: false,
         },
     }
@@ -160,33 +175,46 @@ fn layout(plan: &Plan, ctx: &LayCtx) -> Lay {
         Plan::Run { steps } => lay_chain(Op::And, steps, ctx),
         Plan::Alt { steps } => lay_chain(Op::Or, steps, ctx),
         Plan::Seq { steps } => lay_chain(Op::Seq, steps, ctx),
-        Plan::Redirect { stream, target, body } => {
-            lay_redirect(layout(body, ctx), redir_suffix(*stream, target))
-        }
+        Plan::Redirect {
+            stream,
+            target,
+            body,
+        } => lay_redirect(layout(body, ctx), redir_suffix(*stream, target)),
         Plan::WithStdinFrom { path, body } => {
             lay_redirect(layout(body, ctx), format!("< {}", shquote(path)))
         }
-        Plan::Setenv { key, value, body } => {
-            lay_scope(format!("export {key}={}", shquote(value)), layout(body, ctx))
-        }
+        Plan::Setenv { key, value, body } => lay_scope(
+            format!("export {key}={}", shquote(value)),
+            layout(body, ctx),
+        ),
         Plan::Chdir { dir, body } => lay_scope(format!("cd {}", shquote(dir)), layout(body, ctx)),
         Plan::RunAs { who, body } => {
             let ctx2 = match who {
                 RunAs::Root => LayCtx {
                     sudo: "sudo ".into(),
-                    esc: Esc { uid: StepUid::Root, boundary: true },
+                    esc: Esc {
+                        uid: StepUid::Root,
+                        boundary: true,
+                    },
                     accepted: ctx.accepted.clone(),
                 },
                 RunAs::User { name } => LayCtx {
                     sudo: format!("sudo -u {} ", shquote(name)),
-                    esc: Esc { uid: StepUid::User, boundary: true },
+                    esc: Esc {
+                        uid: StepUid::User,
+                        boundary: true,
+                    },
                     accepted: ctx.accepted.clone(),
                 },
             };
             layout(body, &ctx2)
         }
         Plan::WithAcceptedExitCodes { codes, body } => {
-            let ctx2 = LayCtx { sudo: ctx.sudo.clone(), esc: ctx.esc, accepted: codes.clone() };
+            let ctx2 = LayCtx {
+                sudo: ctx.sudo.clone(),
+                esc: ctx.esc,
+                accepted: codes.clone(),
+            };
             layout(body, &ctx2)
         }
     }
@@ -204,23 +232,38 @@ fn lay_leaf(cmd: String, ctx: &LayCtx) -> Lay {
     codes.dedup();
     let (cmd, note) = match codes.as_slice() {
         [] => (cmd, String::new()),
-        [c] => (format!("{{ {cmd} || [ $? -eq {c} ]; }}"), format!("exit {c} accepted")),
+        [c] => (
+            format!("{{ {cmd} || [ $? -eq {c} ]; }}"),
+            format!("exit {c} accepted"),
+        ),
         cs => {
             let list = cs.iter().map(i32::to_string).collect::<Vec<_>>();
             (
-                format!("{{ {cmd} || case $? in {}) ;; *) false ;; esac; }}", list.join("|")),
+                format!(
+                    "{{ {cmd} || case $? in {}) ;; *) false ;; esac; }}",
+                    list.join("|")
+                ),
                 format!("exits {} accepted", list.join(", ")),
             )
         }
     };
-    Lay::Leaf { cmd, redir: String::new(), esc: ctx.esc, scope: false, note }
+    Lay::Leaf {
+        cmd,
+        redir: String::new(),
+        esc: ctx.esc,
+        scope: false,
+        note,
+    }
 }
 
 /// Parenthesize, unless the layout already is a bare group.
 fn lay_group(l: Lay) -> Lay {
     match l {
         g @ Lay::Group { .. } if matches!(&g, Lay::Group { redir, .. } if redir.is_empty()) => g,
-        other => Lay::Group { inner: Box::new(other), redir: String::new() },
+        other => Lay::Group {
+            inner: Box::new(other),
+            redir: String::new(),
+        },
     }
 }
 
@@ -244,11 +287,27 @@ fn lay_chain(op: Op, steps: &[Plan], ctx: &LayCtx) -> Lay {
 
 fn lay_redirect(l: Lay, suffix: String) -> Lay {
     match l {
-        Lay::Leaf { cmd, redir, esc, scope, note } => {
-            Lay::Leaf { cmd, redir: join_suffix(redir, &suffix), esc, scope, note }
-        }
-        Lay::Group { inner, redir } => Lay::Group { inner, redir: join_suffix(redir, &suffix) },
-        c @ Lay::Chain { .. } => Lay::Group { inner: Box::new(c), redir: suffix },
+        Lay::Leaf {
+            cmd,
+            redir,
+            esc,
+            scope,
+            note,
+        } => Lay::Leaf {
+            cmd,
+            redir: join_suffix(redir, &suffix),
+            esc,
+            scope,
+            note,
+        },
+        Lay::Group { inner, redir } => Lay::Group {
+            inner,
+            redir: join_suffix(redir, &suffix),
+        },
+        c @ Lay::Chain { .. } => Lay::Group {
+            inner: Box::new(c),
+            redir: suffix,
+        },
     }
 }
 
@@ -260,12 +319,18 @@ fn lay_scope(header: String, body: Lay) -> Lay {
     let head = Lay::Leaf {
         cmd: header,
         redir: String::new(),
-        esc: Esc { uid: StepUid::Default, boundary: false },
+        esc: Esc {
+            uid: StepUid::Default,
+            boundary: false,
+        },
         scope: true,
         note: String::new(),
     };
     Lay::Group {
-        inner: Box::new(Lay::Chain { op: Op::And, items: vec![head, lay_group(body)] }),
+        inner: Box::new(Lay::Chain {
+            op: Op::And,
+            items: vec![head, lay_group(body)],
+        }),
         redir: String::new(),
     }
 }
@@ -352,7 +417,14 @@ fn style() -> Style {
 /// process-wide environment.
 fn style_for(no_color: bool) -> Style {
     if no_color {
-        Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" }
+        Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        }
     } else {
         Style {
             bold: "\x1b[1m",
@@ -445,7 +517,9 @@ fn split_at_chars(s: &str, max: usize) -> Option<(&str, usize)> {
 pub fn truncate_for_display(s: &str) -> String {
     match split_at_chars(s, MAX_DISPLAY_CMD_CHARS) {
         None => s.to_string(),
-        Some((head, hidden)) => format!("{head}… [{hidden} more chars hidden — full command not shown]"),
+        Some((head, hidden)) => {
+            format!("{head}… [{hidden} more chars hidden — full command not shown]")
+        }
     }
 }
 
@@ -532,7 +606,10 @@ fn clip_styled(s: &str, max: usize, style: &Style) -> String {
         if visible == max {
             let Style { bold, reset, .. } = *style;
             let hidden = visible_chars(&s[i..]);
-            return format!("{}{reset}{bold}… [{hidden} more chars hidden]{reset}", &s[..i]);
+            return format!(
+                "{}{reset}{bold}… [{hidden} more chars hidden]{reset}",
+                &s[..i]
+            );
         }
         visible += 1;
         i += s[i..].chars().next().map_or(1, char::len_utf8);
@@ -654,7 +731,9 @@ pub fn prompt_tty(
     let tty_r = File::open("/dev/tty")?;
 
     let st = style();
-    let Style { bold, dim, reset, .. } = st;
+    let Style {
+        bold, dim, reset, ..
+    } = st;
 
     write_request_header(&mut tty_w, req, &st)?;
     write_request_meta(&mut tty_w, req, &st)?;
@@ -710,7 +789,9 @@ pub fn prompt_tty(
         // `a` on an eligible daemon grants the session; pressed when `a` was
         // not offered it degrades to a plain approve-once (the dispatcher will
         // not grant), so label it honestly.
-        PromptResult::ApprovedAlways if offer_always => "Approved (unattended for this session name)",
+        PromptResult::ApprovedAlways if offer_always => {
+            "Approved (unattended for this session name)"
+        }
         PromptResult::ApprovedAlways => "Approved",
         PromptResult::Denied => "Denied",
     };
@@ -758,20 +839,29 @@ fn injectable_tty_line(reasons: &[String], style: &Style) -> Option<String> {
 /// line says so; an empty one (legacy peer) renders nothing. Writer-generic so
 /// the bytes are unit-testable without /dev/tty.
 fn write_request_header<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -> io::Result<()> {
-    let Style { bold, reset, user, .. } = *st;
+    let Style {
+        bold, reset, user, ..
+    } = *st;
     writeln!(w)?;
     if req.requester_is_ai() {
         writeln!(w, "{bold}{user}[AI-AGENT REQUEST]{reset}")?;
     }
     writeln!(w, "{bold}━━━ Privilege Request ━━━{reset}")?;
-    if let Some(line) = INJECTABLE_TTY.get().and_then(|r| injectable_tty_line(r, st)) {
+    if let Some(line) = INJECTABLE_TTY
+        .get()
+        .and_then(|r| injectable_tty_line(r, st))
+    {
         writeln!(w, "{line}")?;
     }
     writeln!(
         w,
         "From:    {} @ {}",
         clip(&req.session, MAX_DISPLAY_FIELD_CHARS),
-        if req.host.is_empty() { "local".to_string() } else { clip(&req.host, MAX_DISPLAY_FIELD_CHARS) }
+        if req.host.is_empty() {
+            "local".to_string()
+        } else {
+            clip(&req.host, MAX_DISPLAY_FIELD_CHARS)
+        }
     )?;
     if !req.requester.is_empty() {
         writeln!(
@@ -788,9 +878,15 @@ fn write_request_header<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style)
 /// `MAX_DISPLAY_FIELD_CHARS`, the command to `MAX_DISPLAY_CMD_CHARS`.
 /// Writer-generic so the bytes are unit-testable without /dev/tty.
 fn write_request_meta<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -> io::Result<()> {
-    let Style { bold, dim, reset, .. } = *st;
+    let Style {
+        bold, dim, reset, ..
+    } = *st;
     let field = |s: &str| clip(s, MAX_DISPLAY_FIELD_CHARS);
-    let client_ver = if req.version.is_empty() { "(unknown)".to_string() } else { field(&req.version) };
+    let client_ver = if req.version.is_empty() {
+        "(unknown)".to_string()
+    } else {
+        field(&req.version)
+    };
     writeln!(w, "Client:  sudo-proxy {client_ver}")?;
     if !req.time.is_empty() {
         writeln!(w, "Time:    {}", field(&req.time))?;
@@ -804,7 +900,11 @@ fn write_request_meta<W: Write>(w: &mut W, req: &ValidatedRequest, st: &Style) -
     } else {
         String::new()
     };
-    writeln!(w, "Command: {bold}{}{reset}{agent_tag}", truncate_for_display(&command_summary(req)))
+    writeln!(
+        w,
+        "Command: {bold}{}{reset}{agent_tag}",
+        truncate_for_display(&command_summary(req))
+    )
 }
 
 /// Write the fixed `Env:` line of a request that runs with the daemon
@@ -825,7 +925,11 @@ fn write_inherit_line<W: Write>(
         let names = clip(&i.code_loading.join(" "), MAX_DISPLAY_CMD_CHARS);
         format!(" {bold}with code-loading {names}{reset}")
     };
-    writeln!(w, "Env:     daemon environment ({}){loading}", i.mode.flag())
+    writeln!(
+        w,
+        "Env:     daemon environment ({}){loading}",
+        i.mode.flag()
+    )
 }
 
 /// Write the `Env:` line, if the request sets any variable. Each `KEY=value` is
@@ -836,9 +940,16 @@ fn write_env_line<W: Write>(w: &mut W, req: &ValidatedRequest) -> io::Result<()>
     if req.env.is_empty() {
         return Ok(());
     }
-    let env_display: Vec<String> =
-        req.env.iter().map(|(k, v)| clip(&format!("{k}={v}"), MAX_DISPLAY_FIELD_CHARS)).collect();
-    writeln!(w, "Env:     {}", clip(&env_display.join(" "), MAX_DISPLAY_CMD_CHARS))
+    let env_display: Vec<String> = req
+        .env
+        .iter()
+        .map(|(k, v)| clip(&format!("{k}={v}"), MAX_DISPLAY_FIELD_CHARS))
+        .collect();
+    writeln!(
+        w,
+        "Env:     {}",
+        clip(&env_display.join(" "), MAX_DISPLAY_CMD_CHARS)
+    )
 }
 
 /// Write the `Execute?` question line, wrapped with the attention cues. The BEL
@@ -853,7 +964,11 @@ fn write_question_line<W: Write>(
     choices: &str,
     timeout_secs: u64,
 ) -> io::Result<()> {
-    let Alert { bell, blink_on, blink_off } = *alert;
+    let Alert {
+        bell,
+        blink_on,
+        blink_off,
+    } = *alert;
     let text = question_text(question, choices, timeout_secs);
     write!(w, "{bell}{blink_on}{text}{blink_off} ")
 }
@@ -979,7 +1094,9 @@ fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> 
     if lines.is_empty() {
         return Ok(());
     }
-    let Style { dim, reset, bold, .. } = *style;
+    let Style {
+        dim, reset, bold, ..
+    } = *style;
     writeln!(w, "Steps:")?;
     let shown = lines.len().min(MAX_DISPLAY_STAGES);
     let numbered = lines[..shown].iter().filter(|l| l.numbered).count();
@@ -989,7 +1106,11 @@ fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> 
         let indent = "  ".repeat(ln.depth + 1);
         // The gutter and indent are bounded already (32 lines, plan depth);
         // the text and note carry request data, so they are clipped (G4.3).
-        let body = clip_styled(&format!("{}{}", ln.text, ln.comment(style)), MAX_DISPLAY_LINE_CHARS, style);
+        let body = clip_styled(
+            &format!("{}{}", ln.text, ln.comment(style)),
+            MAX_DISPLAY_LINE_CHARS,
+            style,
+        );
         if ln.numbered {
             writeln!(w, "{dim}{n:<width$}{reset}{indent}{body}")?;
             n += 1;
@@ -999,7 +1120,10 @@ fn write_steps<W: Write>(w: &mut W, lay: &Lay, style: &Style) -> io::Result<()> 
     }
     if lines.len() > shown {
         let hidden = lines.len() - shown;
-        writeln!(w, "{bold}… {hidden} more line(s) hidden — see Command:{reset}")?;
+        writeln!(
+            w,
+            "{bold}… {hidden} more line(s) hidden — see Command:{reset}"
+        )?;
     }
     Ok(())
 }
@@ -1014,9 +1138,24 @@ fn steps_lines(lay: &Lay, style: &Style) -> Vec<StepLine> {
 /// after this subtree, which decides where a group's `)` goes.
 fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut Vec<StepLine>) {
     match lay {
-        Lay::Leaf { cmd, redir, esc, scope, note } => {
-            let text = if *scope { cmd.clone() } else { colorize(*esc, cmd, style) };
-            out.push(StepLine { depth, text: join_suffix(text, redir), numbered: true, note: note.clone() });
+        Lay::Leaf {
+            cmd,
+            redir,
+            esc,
+            scope,
+            note,
+        } => {
+            let text = if *scope {
+                cmd.clone()
+            } else {
+                colorize(*esc, cmd, style)
+            };
+            out.push(StepLine {
+                depth,
+                text: join_suffix(text, redir),
+                numbered: true,
+                note: note.clone(),
+            });
         }
         Lay::Chain { op, items } => {
             let plain = format!(" {}", op.sym());
@@ -1031,7 +1170,10 @@ fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut 
                 let last = i + 1 == items.len();
                 steps_emit(item, depth, !last, style, out);
                 if !last {
-                    out.last_mut().expect("an item emits a line").text.push_str(&op_str);
+                    out.last_mut()
+                        .expect("an item emits a line")
+                        .text
+                        .push_str(&op_str);
                 }
             }
         }
@@ -1044,7 +1186,12 @@ fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut 
                     prev.depth
                 }
                 None => {
-                    out.push(StepLine { depth, text: "(".into(), numbered: false, note: String::new() });
+                    out.push(StepLine {
+                        depth,
+                        text: "(".into(),
+                        numbered: false,
+                        note: String::new(),
+                    });
                     depth
                 }
             };
@@ -1057,7 +1204,12 @@ fn steps_emit(lay: &Lay, depth: usize, followed: bool, style: &Style, out: &mut 
                 last.text.push(' ');
                 last.text.push_str(&close);
             } else {
-                out.push(StepLine { depth: opener_depth, text: close, numbered: false, note: String::new() });
+                out.push(StepLine {
+                    depth: opener_depth,
+                    text: close,
+                    numbered: false,
+                    note: String::new(),
+                });
             }
         }
     }
@@ -1091,7 +1243,9 @@ fn lay_all_escalated(lay: &Lay) -> bool {
 /// stage's reason points at shows the reason in bold instead (a shell keeps
 /// the `opaque — resolves only the shell` marker).
 fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -> io::Result<()> {
-    let Style { bold, dim, reset, .. } = *style;
+    let Style {
+        bold, dim, reset, ..
+    } = *style;
     let mut seen = std::collections::HashSet::new();
     let mut entries: Vec<(String, String)> = Vec::new();
     for view in views {
@@ -1102,9 +1256,15 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
             // `Ambiguous` reason quotes) also goes through `shown` (#86).
             let name = clip(&prog.name, MAX_DISPLAY_LINE_CHARS);
             let no_path = prog.runtime_lookup || prog.applet;
-            let suffix = match (prog.via.as_deref().map(|v| clip(v, MAX_DISPLAY_LINE_CHARS)), prog.applet, prog.runtime_lookup) {
+            let suffix = match (
+                prog.via.as_deref().map(|v| clip(v, MAX_DISPLAY_LINE_CHARS)),
+                prog.applet,
+                prog.runtime_lookup,
+            ) {
                 (Some(v), true, _) => format!(" {dim}(applet of {v}){reset}"),
-                (Some(v), false, true) => format!(" {dim}(run by {v}; looked up at run time){reset}"),
+                (Some(v), false, true) => {
+                    format!(" {dim}(run by {v}; looked up at run time){reset}")
+                }
                 (Some(v), false, false) => format!(" {dim}(run by {v}){reset}"),
                 (None, ..) => String::new(),
             };
@@ -1146,7 +1306,11 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
         return Ok(());
     }
     let shown = entries.len().min(MAX_DISPLAY_RESOLVES);
-    let width = entries[..shown].iter().map(|(n, _)| n.chars().count()).max().unwrap_or(0);
+    let width = entries[..shown]
+        .iter()
+        .map(|(n, _)| n.chars().count())
+        .max()
+        .unwrap_or(0);
     writeln!(w, "Resolves:")?;
     for (name, detail) in &entries[..shown] {
         writeln!(w, "  {name:<width$}  {detail}")?;
@@ -1169,7 +1333,9 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
 /// validated `argv[0]`/cwd and the constant login PATH, so escaping it is
 /// defence in depth. Comparisons use the raw strings.
 fn resolve_detail(resolved: Option<&Resolved>, style: &Style) -> String {
-    let Style { bold, dim, reset, .. } = *style;
+    let Style {
+        bold, dim, reset, ..
+    } = *style;
     let resolved = match resolved {
         Some(r) => r,
         None => return format!("{bold}(not found in PATH){reset}"),
@@ -1233,7 +1399,9 @@ fn write_resolves_line<W: Write>(
     resolved: Option<&Resolved>,
     style: &Style,
 ) -> io::Result<()> {
-    let Style { bold, dim, reset, .. } = *style;
+    let Style {
+        bold, dim, reset, ..
+    } = *style;
     let resolved = match resolved {
         Some(r) => r,
         None => {
@@ -1288,7 +1456,10 @@ pub fn display_banner(req: &ValidatedRequest) -> io::Result<()> {
     let Style { dim, reset, .. } = style();
     let cmd = command_summary(req);
     if req.forward_agent {
-        writeln!(tty, "{dim}\u{25b6}{reset} {cmd} {dim}(agent forwarded){reset}")?;
+        writeln!(
+            tty,
+            "{dim}\u{25b6}{reset} {cmd} {dim}(agent forwarded){reset}"
+        )?;
     } else {
         writeln!(tty, "{dim}\u{25b6}{reset} {cmd}")?;
     }
@@ -1314,7 +1485,9 @@ pub fn display_result(resp: &Response) -> io::Result<()> {
 
 /// Write the command result to any writer. Truncate stdout/stderr to 3 lines.
 pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
-    let Style { bold, dim, reset, .. } = style();
+    let Style {
+        bold, dim, reset, ..
+    } = style();
 
     match resp.status {
         Status::Ok => {
@@ -1323,8 +1496,11 @@ pub fn write_result(w: &mut impl Write, resp: &Response) -> io::Result<()> {
 
             if multi_stage {
                 // Show all exit codes for multi-stage
-                let codes: Vec<String> =
-                    resp.stages.iter().map(|s| s.exit_code.to_string()).collect();
+                let codes: Vec<String> = resp
+                    .stages
+                    .iter()
+                    .map(|s| s.exit_code.to_string())
+                    .collect();
                 let label = format!("exit [{}]", codes.join(", "));
                 if exit_code == 0 {
                     writeln!(w, "{dim}{label}{reset}")?;
@@ -1378,7 +1554,11 @@ fn print_truncated(tty: &mut impl Write, bytes: &[u8], label: &str) -> io::Resul
     let lines: Vec<&str> = text.lines().collect();
     let Style { dim, reset, .. } = style();
     let truncated = lines.len() > MAX_DISPLAY_LINES;
-    let shown = if truncated { &lines[..MAX_DISPLAY_LINES] } else { &lines };
+    let shown = if truncated {
+        &lines[..MAX_DISPLAY_LINES]
+    } else {
+        &lines
+    };
 
     let trunc_tag = if truncated { ", truncated" } else { "" };
     writeln!(
@@ -1512,7 +1692,14 @@ mod tests {
 
     fn render_resolves(cmd_name: &str) -> String {
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "B", dim: "D", reset: "R", root: "ROOT", root_boundary: "RB", user: "USR" };
+        let st = Style {
+            bold: "B",
+            dim: "D",
+            reset: "R",
+            root: "ROOT",
+            root_boundary: "RB",
+            user: "USR",
+        };
         let resolved = crate::executor::resolve_command(cmd_name, "/");
         write_resolves_line(&mut buf, cmd_name, resolved.as_ref(), &st).expect("write");
         String::from_utf8(buf).expect("utf8")
@@ -1529,11 +1716,17 @@ mod tests {
             steps: vec![
                 Plan::RunAs {
                     who: RunAs::Root,
-                    body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+                    body: Box::new(Plan::Exec {
+                        argv: vec!["true".into()],
+                    }),
                 },
                 Plan::RunAs {
-                    who: RunAs::User { name: "alice".into() },
-                    body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+                    who: RunAs::User {
+                        name: "alice".into(),
+                    },
+                    body: Box::new(Plan::Exec {
+                        argv: vec!["true".into()],
+                    }),
                 },
                 Plan::Shell {
                     shell: ShellProc::Sh,
@@ -1554,13 +1747,26 @@ mod tests {
 
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
 
         // Privilege is now shown by color, not text tags — the old brackets are gone.
-        assert!(!out.contains("[ROOT]"), "run-as tag should be color, not text: {out}");
-        assert!(!out.contains("[as alice]"), "run-as tag should be color, not text: {out}");
+        assert!(
+            !out.contains("[ROOT]"),
+            "run-as tag should be color, not text: {out}"
+        );
+        assert!(
+            !out.contains("[as alice]"),
+            "run-as tag should be color, not text: {out}"
+        );
         // The Shell leaf is still flagged opaque in the resolve block.
         assert!(
             out.contains("opaque — resolves only the shell"),
@@ -1574,9 +1780,15 @@ mod tests {
         );
         let resolves_at = out.find("Resolves:").unwrap();
         let steps_at = out.find("Steps:").expect("a Steps block");
-        assert!(resolves_at < steps_at, "resolve block must precede the steps: {out}");
+        assert!(
+            resolves_at < steps_at,
+            "resolve block must precede the steps: {out}"
+        );
         // The three leaves appear in the Steps block.
-        assert!(out.contains("sh -c 'echo hi'"), "shell leaf in steps: {out}");
+        assert!(
+            out.contains("sh -c 'echo hi'"),
+            "shell leaf in steps: {out}"
+        );
     }
 
     /// A lone `exec sh -c` stage is opaque: it must not take the simple
@@ -1599,11 +1811,19 @@ mod tests {
         .expect("valid");
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
         assert!(
-            out.contains("opaque — resolves only the shell") || out.contains("opaque — shell not found"),
+            out.contains("opaque — resolves only the shell")
+                || out.contains("opaque — shell not found"),
             "exec of a shell must be flagged opaque: {out}"
         );
     }
@@ -1622,13 +1842,22 @@ mod tests {
         .expect("valid");
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
 
     fn exec(argv: &[&str]) -> crate::protocol::Plan {
-        crate::protocol::Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+        crate::protocol::Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     /// Issue #87: a shell behind a wrapper is flagged with the same marker,
@@ -1636,10 +1865,16 @@ mod tests {
     #[test]
     fn wrapped_shell_renders_opaque_run_by_wrapper() {
         let out = render_plan(exec(&["env", "sh", "-c", "echo hi"]));
-        let line = out.lines().find(|l| l.trim_start().starts_with("sh ")).unwrap_or_else(|| panic!("{out}"));
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("sh "))
+            .unwrap_or_else(|| panic!("{out}"));
         assert!(line.contains("opaque — resolves only the shell"), "{out}");
         assert!(line.contains("(run by env)"), "{out}");
-        assert!(out.lines().any(|l| l.trim_start().starts_with("env ")), "{out}");
+        assert!(
+            out.lines().any(|l| l.trim_start().starts_with("env ")),
+            "{out}"
+        );
     }
 
     /// A transparent wrapper takes the block form and lists the program it
@@ -1647,8 +1882,14 @@ mod tests {
     #[test]
     fn wrapped_program_takes_the_block_form() {
         let out = render_plan(exec(&["env", "X=1", "true"]));
-        assert!(out.starts_with("Resolves:\n"), "block form, not the single line: {out}");
-        let line = out.lines().find(|l| l.trim_start().starts_with("true ")).unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            out.starts_with("Resolves:\n"),
+            "block form, not the single line: {out}"
+        );
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("true "))
+            .unwrap_or_else(|| panic!("{out}"));
         assert!(line.contains("(run by env)") && line.contains('/'), "{out}");
         assert!(!out.contains("opaque"), "{out}");
     }
@@ -1658,8 +1899,14 @@ mod tests {
     #[test]
     fn applet_renders_without_a_path() {
         let out = render_plan(exec(&["busybox", "sh", "-c", "true"]));
-        let line = out.lines().find(|l| l.trim_start().starts_with("sh ")).unwrap_or_else(|| panic!("{out}"));
-        assert!(line.contains("opaque — resolves only the shell (applet of busybox)"), "{out}");
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("sh "))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            line.contains("opaque — resolves only the shell (applet of busybox)"),
+            "{out}"
+        );
         assert!(!line.contains('/'), "{out}");
     }
 
@@ -1668,16 +1915,27 @@ mod tests {
     #[test]
     fn escalated_wrapped_program_is_looked_up_at_run_time() {
         use crate::protocol::{Plan, RunAs};
-        let out = render_plan(Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["env", "X=1", "true"])) });
-        let line = out.lines().find(|l| l.trim_start().starts_with("true ")).unwrap_or_else(|| panic!("{out}"));
-        assert!(line.contains("(run by env; looked up at run time)"), "{out}");
+        let out = render_plan(Plan::RunAs {
+            who: RunAs::Root,
+            body: Box::new(exec(&["env", "X=1", "true"])),
+        });
+        let line = out
+            .lines()
+            .find(|l| l.trim_start().starts_with("true "))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(
+            line.contains("(run by env; looked up at run time)"),
+            "{out}"
+        );
         assert!(!line.contains('/'), "no path for a run-time lookup: {out}");
         let out = render_plan(Plan::RunAs {
             who: RunAs::Root,
             body: Box::new(exec(&["timeout", "5", "sh", "-c", "true"])),
         });
         assert!(
-            out.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"),
+            out.contains(
+                "opaque — resolves only the shell (run by timeout; looked up at run time)"
+            ),
             "{out}"
         );
     }
@@ -1692,9 +1950,15 @@ mod tests {
         let missing = "sudo-proxy-no-such-binary-xyz";
         let plan = Plan::Run {
             steps: vec![
-                Plan::Exec { argv: vec![missing.into(), "a".into()] },
-                Plan::Exec { argv: vec![missing.into(), "b".into()] },
-                Plan::Exec { argv: vec!["echo".into(), "done".into()] },
+                Plan::Exec {
+                    argv: vec![missing.into(), "a".into()],
+                },
+                Plan::Exec {
+                    argv: vec![missing.into(), "b".into()],
+                },
+                Plan::Exec {
+                    argv: vec!["echo".into(), "done".into()],
+                },
             ],
         };
         let req = ValidatedRequest::validate(Request::new_plan(
@@ -1709,7 +1973,14 @@ mod tests {
         .expect("valid");
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
         // Two stages run the missing binary, but it resolves once in the block.
@@ -1732,9 +2003,13 @@ mod tests {
     #[test]
     fn command_threads_ambient_sudo_for_privileged_request() {
         use crate::protocol::{Plan, Request, ValidatedRequest};
-        let exec = |a: &[&str]| Plan::Exec { argv: a.iter().map(|s| s.to_string()).collect() };
+        let exec = |a: &[&str]| Plan::Exec {
+            argv: a.iter().map(|s| s.to_string()).collect(),
+        };
         let mk = |privileged: bool| {
-            let plan = Plan::Run { steps: vec![exec(&["id", "-un"]), exec(&["id", "-u"])] };
+            let plan = Plan::Run {
+                steps: vec![exec(&["id", "-un"]), exec(&["id", "-u"])],
+            };
             ValidatedRequest::validate(Request::new_plan(
                 String::new(),
                 "t".into(),
@@ -1753,7 +2028,14 @@ mod tests {
     // Shared sentinel style for the coloring tests: LIGHT = ambient root,
     // BRIGHT = run-as boundary, R = reset.
     fn color_style() -> Style {
-        Style { bold: "", dim: "", reset: "R", root: "LIGHT", root_boundary: "BRIGHT", user: "YEL" }
+        Style {
+            bold: "",
+            dim: "",
+            reset: "R",
+            root: "LIGHT",
+            root_boundary: "BRIGHT",
+            user: "YEL",
+        }
     }
 
     /// Combination B — single escalated leaf amid default ones (unprivileged
@@ -1764,10 +2046,14 @@ mod tests {
         use crate::protocol::{Plan, Request, RunAs, ValidatedRequest};
         let plan = Plan::Run {
             steps: vec![
-                Plan::Exec { argv: vec!["echo".into(), "hi".into()] },
+                Plan::Exec {
+                    argv: vec!["echo".into(), "hi".into()],
+                },
                 Plan::RunAs {
                     who: RunAs::Root,
-                    body: Box::new(Plan::Exec { argv: vec!["whoami".into()] }),
+                    body: Box::new(Plan::Exec {
+                        argv: vec!["whoami".into()],
+                    }),
                 },
             ],
         };
@@ -1786,13 +2072,19 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("BRIGHTsudo whoamiR"), "run-as leaf must be bright red: {out}");
+        assert!(
+            out.contains("BRIGHTsudo whoamiR"),
+            "run-as leaf must be bright red: {out}"
+        );
         assert!(
             out.contains("echo hi") && !out.contains("LIGHTecho") && !out.contains("BRIGHTecho"),
             "the default leaf must stay uncolored: {out}"
         );
         // Mixed group → operator not tinted.
-        assert!(!out.contains("LIGHT &&"), "operator must not be tinted in a mixed group: {out}");
+        assert!(
+            !out.contains("LIGHT &&"),
+            "operator must not be tinted in a mixed group: {out}"
+        );
     }
 
     /// Combination A — wholly escalated (`privileged: true`, no `run-as`): every
@@ -1802,8 +2094,12 @@ mod tests {
         use crate::protocol::{Plan, Request, ValidatedRequest};
         let plan = Plan::Run {
             steps: vec![
-                Plan::Exec { argv: vec!["echo".into(), "a".into()] },
-                Plan::Exec { argv: vec!["echo".into(), "b".into()] },
+                Plan::Exec {
+                    argv: vec!["echo".into(), "a".into()],
+                },
+                Plan::Exec {
+                    argv: vec!["echo".into(), "b".into()],
+                },
             ],
         };
         let req = ValidatedRequest::validate(Request::new_plan(
@@ -1821,10 +2117,22 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("LIGHTsudo echo aR"), "leaf a must be light red: {out}");
-        assert!(out.contains("LIGHTsudo echo bR"), "leaf b must be light red: {out}");
-        assert!(out.contains("LIGHT &&R"), "operator must be tinted in an all-root group: {out}");
-        assert!(!out.contains("BRIGHT"), "no bright red without an explicit run-as: {out}");
+        assert!(
+            out.contains("LIGHTsudo echo aR"),
+            "leaf a must be light red: {out}"
+        );
+        assert!(
+            out.contains("LIGHTsudo echo bR"),
+            "leaf b must be light red: {out}"
+        );
+        assert!(
+            out.contains("LIGHT &&R"),
+            "operator must be tinted in an all-root group: {out}"
+        );
+        assert!(
+            !out.contains("BRIGHT"),
+            "no bright red without an explicit run-as: {out}"
+        );
     }
 
     /// Combination C — wholly escalated AND one explicit `run-as root`: ambient
@@ -1834,10 +2142,14 @@ mod tests {
         use crate::protocol::{Plan, Request, RunAs, ValidatedRequest};
         let plan = Plan::Run {
             steps: vec![
-                Plan::Exec { argv: vec!["id".into(), "-un".into()] },
+                Plan::Exec {
+                    argv: vec!["id".into(), "-un".into()],
+                },
                 Plan::RunAs {
                     who: RunAs::Root,
-                    body: Box::new(Plan::Exec { argv: vec!["whoami".into()] }),
+                    body: Box::new(Plan::Exec {
+                        argv: vec!["whoami".into()],
+                    }),
                 },
             ],
         };
@@ -1856,14 +2168,23 @@ mod tests {
         let st = color_style();
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        assert!(out.contains("LIGHTsudo id -unR"), "ambient leaf must be light red: {out}");
+        assert!(
+            out.contains("LIGHTsudo id -unR"),
+            "ambient leaf must be light red: {out}"
+        );
         assert_eq!(
             out.matches("BRIGHT").count(),
             1,
             "exactly the run-as leaf is bright red: {out}"
         );
-        assert!(out.contains("BRIGHTsudo whoamiR"), "run-as leaf must be bright red: {out}");
-        assert!(out.contains("LIGHT &&R"), "operator tinted in an all-root group: {out}");
+        assert!(
+            out.contains("BRIGHTsudo whoamiR"),
+            "run-as leaf must be bright red: {out}"
+        );
+        assert!(
+            out.contains("LIGHT &&R"),
+            "operator tinted in an all-root group: {out}"
+        );
     }
 
     /// A simple single unprivileged command keeps the classic one-line
@@ -1874,7 +2195,9 @@ mod tests {
         let req = ValidatedRequest::validate(Request::new_plan(
             String::new(),
             "t".into(),
-            Plan::Exec { argv: vec!["true".into()] },
+            Plan::Exec {
+                argv: vec!["true".into()],
+            },
             std::collections::HashMap::new(),
             String::new(),
             false,
@@ -1883,11 +2206,21 @@ mod tests {
         .expect("valid");
         let views = plan_display(&req).expect("compiles");
         let mut buf: Vec<u8> = Vec::new();
-        let st = Style { bold: "", dim: "", reset: "", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "",
+            dim: "",
+            reset: "",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         write_plan_stages(&mut buf, &req.exec_plan(), &views, req.privileged, &st).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
         assert!(out.starts_with("Resolves:"), "compact form expected: {out}");
-        assert!(!out.contains("1. "), "no numbered block for a single plain stage: {out}");
+        assert!(
+            !out.contains("1. "),
+            "no numbered block for a single plain stage: {out}"
+        );
     }
 
     #[test]
@@ -1905,11 +2238,19 @@ mod tests {
 
     #[test]
     fn injectable_tty_line_names_each_mechanism() {
-        let st = Style { bold: "B", dim: "D", reset: "R", root: "", root_boundary: "", user: "" };
+        let st = Style {
+            bold: "B",
+            dim: "D",
+            reset: "R",
+            root: "",
+            root_boundary: "",
+            user: "",
+        };
         assert_eq!(injectable_tty_line(&[], &st), None);
         let line = injectable_tty_line(
             &[
-                "terminal multiplexer (TERM=tmux-256color): `tmux send-keys` can type into it".into(),
+                "terminal multiplexer (TERM=tmux-256color): `tmux send-keys` can type into it"
+                    .into(),
                 "X11 session (DISPLAY=:0, no Wayland): any X client can synthesise keys".into(),
             ],
             &st,
@@ -1918,7 +2259,9 @@ mod tests {
         assert!(line.starts_with("B⚠"), "{line}");
         assert!(line.ends_with('R'), "{line}");
         assert!(
-            line.contains("terminal multiplexer (TERM=tmux-256color); X11 session (DISPLAY=:0, no Wayland)"),
+            line.contains(
+                "terminal multiplexer (TERM=tmux-256color); X11 session (DISPLAY=:0, no Wayland)"
+            ),
             "{line}"
         );
     }
@@ -1961,7 +2304,10 @@ mod tests {
         assert!(on.contains('\x07'), "bell byte missing: {on:?}");
         assert!(on.contains("\x1b[5m"), "blink-on missing: {on:?}");
         assert!(on.contains("\x1b[25m"), "blink-off missing: {on:?}");
-        assert!(on.contains("Execute as root? [y/N]"), "question text missing: {on:?}");
+        assert!(
+            on.contains("Execute as root? [y/N]"),
+            "question text missing: {on:?}"
+        );
 
         // Both cues suppressed: none of the three escapes appear, but the
         // question line is otherwise identical and still printed.
@@ -1969,7 +2315,10 @@ mod tests {
         assert!(!off.contains('\x07'), "bell leaked: {off:?}");
         assert!(!off.contains("\x1b[5m"), "blink-on leaked: {off:?}");
         assert!(!off.contains("\x1b[25m"), "blink-off leaked: {off:?}");
-        assert!(off.contains("Execute as root? [y/N]"), "question text missing: {off:?}");
+        assert!(
+            off.contains("Execute as root? [y/N]"),
+            "question text missing: {off:?}"
+        );
         assert_eq!(off, "Execute as root? [y/N] (60s timeout, default=N) ");
     }
 
@@ -1998,19 +2347,37 @@ mod tests {
     fn request_header_discloses_self_declared_requester() {
         let ai = render_header("ai:claude", &style_for(false));
         let banner = ai.find("[AI-AGENT REQUEST]").expect("banner missing");
-        assert!(banner < ai.find("Privilege Request").unwrap(), "banner must lead: {ai:?}");
-        assert!(ai.contains("\x1b[38;5;226m[AI-AGENT REQUEST]"), "banner not yellow: {ai:?}");
-        assert!(ai.contains("Requester: ai:claude (self-declared, not verified)"), "{ai:?}");
+        assert!(
+            banner < ai.find("Privilege Request").unwrap(),
+            "banner must lead: {ai:?}"
+        );
+        assert!(
+            ai.contains("\x1b[38;5;226m[AI-AGENT REQUEST]"),
+            "banner not yellow: {ai:?}"
+        );
+        assert!(
+            ai.contains("Requester: ai:claude (self-declared, not verified)"),
+            "{ai:?}"
+        );
 
         let human = render_header("human", &style_for(false));
         assert!(!human.contains("AI-AGENT"), "{human:?}");
-        assert!(human.contains("Requester: human (self-declared, not verified)"), "{human:?}");
+        assert!(
+            human.contains("Requester: human (self-declared, not verified)"),
+            "{human:?}"
+        );
 
         let legacy = render_header("", &style_for(false));
-        assert!(!legacy.contains("AI-AGENT") && !legacy.contains("Requester"), "{legacy:?}");
+        assert!(
+            !legacy.contains("AI-AGENT") && !legacy.contains("Requester"),
+            "{legacy:?}"
+        );
 
         let plain = render_header("ai", &style_for(true));
-        assert!(plain.contains("[AI-AGENT REQUEST]") && !plain.contains('\x1b'), "{plain:?}");
+        assert!(
+            plain.contains("[AI-AGENT REQUEST]") && !plain.contains('\x1b'),
+            "{plain:?}"
+        );
     }
 
     /// After the answer (or timeout) the blinking question is redrawn plain, in
@@ -2022,7 +2389,10 @@ mod tests {
             .expect("write");
         let s = String::from_utf8(buf).expect("utf8");
         assert_eq!(s, "\r\x1b[2KExecute? [y/N] (60s timeout, default=N) ");
-        assert!(!s.contains("\x1b[5m") && !s.contains('\x07'), "no blink, no bell: {s:?}");
+        assert!(
+            !s.contains("\x1b[5m") && !s.contains('\x07'),
+            "no blink, no bell: {s:?}"
+        );
 
         let mut buf: Vec<u8> = Vec::new();
         write_settled_question_line(&mut buf, &alert_for(false, true), "Execute?", "[y/N]", 60)
@@ -2165,9 +2535,7 @@ mod tests {
         // Stuff the input queue with a stray byte plus a newline so the
         // line discipline (still ICANON at this point) commits it.
         let stray = b"q\n";
-        let n = unsafe {
-            libc::write(master, stray.as_ptr() as *const libc::c_void, stray.len())
-        };
+        let n = unsafe { libc::write(master, stray.as_ptr() as *const libc::c_void, stray.len()) };
         assert_eq!(n as usize, stray.len(), "write to pty master failed");
         // Give the kernel a moment to enqueue.
         std::thread::sleep(Duration::from_millis(50));
@@ -2198,7 +2566,9 @@ mod tests {
     use crate::protocol::{Plan, Request, RunAs, ShellProc, ValidatedRequest};
 
     fn ex(argv: &[&str]) -> Plan {
-        Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+        Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     fn mk_req(plan: Plan, privileged: bool) -> ValidatedRequest {
@@ -2220,7 +2590,9 @@ mod tests {
         let lay = layout(&req.exec_plan(), &ambient_ctx(req.privileged));
         write_steps(&mut buf, &lay, &style_for(true)).expect("write");
         let out = String::from_utf8(buf).expect("utf8");
-        out.strip_prefix("Steps:\n").expect("Steps header").to_string()
+        out.strip_prefix("Steps:\n")
+            .expect("Steps header")
+            .to_string()
     }
 
     /// The agreed layouts (examples 1–4 of the design discussion; 5–6 are the
@@ -2229,27 +2601,57 @@ mod tests {
     fn steps_layout_matches_agreed_examples() {
         // 1. a && (b || c) — the case the old layout showed as (a && b) || c.
         let req = mk_req(
-            Plan::Run { steps: vec![ex(&["false"]), Plan::Alt { steps: vec![ex(&["true"]), ex(&["echo", "RAN"])] }] },
+            Plan::Run {
+                steps: vec![
+                    ex(&["false"]),
+                    Plan::Alt {
+                        steps: vec![ex(&["true"]), ex(&["echo", "RAN"])],
+                    },
+                ],
+            },
             false,
         );
         assert_eq!(command_summary(&req), "false && (true || echo RAN)");
-        assert_eq!(steps_block(&req), "0  false && (\n1    true ||\n2    echo RAN\n   )\n");
+        assert_eq!(
+            steps_block(&req),
+            "0  false && (\n1    true ||\n2    echo RAN\n   )\n"
+        );
 
         // 2. (a; b) && c — a group with no line before its `(`.
         let req = mk_req(
-            Plan::Run { steps: vec![Plan::Seq { steps: vec![ex(&["false"]), ex(&["true"])] }, ex(&["echo", "C"])] },
+            Plan::Run {
+                steps: vec![
+                    Plan::Seq {
+                        steps: vec![ex(&["false"]), ex(&["true"])],
+                    },
+                    ex(&["echo", "C"]),
+                ],
+            },
             false,
         );
         assert_eq!(command_summary(&req), "(false; true) && echo C");
-        assert_eq!(steps_block(&req), "   (\n0    false ;\n1    true ) &&\n2  echo C\n");
+        assert_eq!(
+            steps_block(&req),
+            "   (\n0    false ;\n1    true ) &&\n2  echo C\n"
+        );
 
         // 3. (a || b) && c — mixed operators always get their own group.
         let req = mk_req(
-            Plan::Run { steps: vec![Plan::Alt { steps: vec![ex(&["false"]), ex(&["true"])] }, ex(&["echo", "C"])] },
+            Plan::Run {
+                steps: vec![
+                    Plan::Alt {
+                        steps: vec![ex(&["false"]), ex(&["true"])],
+                    },
+                    ex(&["echo", "C"]),
+                ],
+            },
             false,
         );
         assert_eq!(command_summary(&req), "(false || true) && echo C");
-        assert_eq!(steps_block(&req), "   (\n0    false ||\n1    true ) &&\n2  echo C\n");
+        assert_eq!(
+            steps_block(&req),
+            "   (\n0    false ||\n1    true ) &&\n2  echo C\n"
+        );
 
         // 4. Showcase — export scope, parenthesized pipe, `sudo` on the run-as leaf.
         let req = mk_req(
@@ -2259,8 +2661,13 @@ mod tests {
                 body: Box::new(Plan::Run {
                     steps: vec![
                         ex(&["echo", "a;b"]),
-                        Plan::Pipe { stages: vec![ex(&["echo", "hello world"]), ex(&["wc", "-w"])] },
-                        Plan::RunAs { who: RunAs::Root, body: Box::new(ex(&["id", "-un"])) },
+                        Plan::Pipe {
+                            stages: vec![ex(&["echo", "hello world"]), ex(&["wc", "-w"])],
+                        },
+                        Plan::RunAs {
+                            who: RunAs::Root,
+                            body: Box::new(ex(&["id", "-un"])),
+                        },
                     ],
                 }),
             },
@@ -2290,7 +2697,10 @@ mod tests {
         let req = mk_req(
             Plan::Run {
                 steps: vec![
-                    Plan::WithAcceptedExitCodes { codes: vec![1], body: Box::new(ex(&["false"])) },
+                    Plan::WithAcceptedExitCodes {
+                        codes: vec![1],
+                        body: Box::new(ex(&["false"])),
+                    },
                     ex(&["echo", "ran"]),
                 ],
             },
@@ -2298,16 +2708,28 @@ mod tests {
         );
         let cmd = command_summary(&req);
         assert_eq!(cmd, "{ false || [ $? -eq 1 ]; } && echo ran");
-        assert_eq!(steps_block(&req), "0  { false || [ $? -eq 1 ]; } &&  # exit 1 accepted\n1  echo ran\n");
+        assert_eq!(
+            steps_block(&req),
+            "0  { false || [ $? -eq 1 ]; } &&  # exit 1 accepted\n1  echo ran\n"
+        );
         assert_eq!(run_sh(&cmd), "ran\n");
         assert_eq!(run_sh(&steps_shell_text(&req)), "ran\n");
 
         let req = mk_req(
-            Plan::WithAcceptedExitCodes { codes: vec![2, 1, 0], body: Box::new(ex(&["false"])) },
+            Plan::WithAcceptedExitCodes {
+                codes: vec![2, 1, 0],
+                body: Box::new(ex(&["false"])),
+            },
             false,
         );
-        assert_eq!(command_summary(&req), "{ false || case $? in 1|2) ;; *) false ;; esac; }");
-        assert_eq!(steps_block(&req), "0  { false || case $? in 1|2) ;; *) false ;; esac; }  # exits 1, 2 accepted\n");
+        assert_eq!(
+            command_summary(&req),
+            "{ false || case $? in 1|2) ;; *) false ;; esac; }"
+        );
+        assert_eq!(
+            steps_block(&req),
+            "0  { false || case $? in 1|2) ;; *) false ;; esac; }  # exits 1, 2 accepted\n"
+        );
     }
 
     /// Adjacent openers are written `( (`: bash reads `((` as arithmetic.
@@ -2319,7 +2741,9 @@ mod tests {
                     ex(&["echo", "x"]),
                     Plan::Run {
                         steps: vec![
-                            Plan::Pipe { stages: vec![ex(&["echo", "a"]), ex(&["cat"])] },
+                            Plan::Pipe {
+                                stages: vec![ex(&["echo", "a"]), ex(&["cat"])],
+                            },
                             ex(&["echo", "kept"]),
                         ],
                     },
@@ -2338,8 +2762,16 @@ mod tests {
         let req = mk_req(
             Plan::Seq {
                 steps: vec![
-                    Plan::RunAs { who: RunAs::Root, body: Box::new(ex(&["id"])) },
-                    Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(ex(&["id"])) },
+                    Plan::RunAs {
+                        who: RunAs::Root,
+                        body: Box::new(ex(&["id"])),
+                    },
+                    Plan::RunAs {
+                        who: RunAs::User {
+                            name: "nobody".into(),
+                        },
+                        body: Box::new(ex(&["id"])),
+                    },
                 ],
             },
             false,
@@ -2352,17 +2784,33 @@ mod tests {
     #[test]
     fn failed_cd_skips_the_scope_body_in_display_and_executor() {
         let req = mk_req(
-            Plan::Chdir { dir: "/nonexistent-sudo-proxy-dir".into(), body: Box::new(ex(&["echo", "body-ran"])) },
+            Plan::Chdir {
+                dir: "/nonexistent-sudo-proxy-dir".into(),
+                body: Box::new(ex(&["echo", "body-ran"])),
+            },
             false,
         );
         let cmd = command_summary(&req);
         assert_eq!(cmd, "(cd /nonexistent-sudo-proxy-dir && (echo body-ran))");
-        let resp = crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
-        let via_plan =
-            String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
-        assert!(!via_plan.contains("body-ran"), "executor ran the body: {via_plan:?}");
-        assert!(!run_sh(&cmd).contains("body-ran"), "Command line ran the body");
-        assert!(!run_sh(&steps_shell_text(&req)).contains("body-ran"), "Steps ran the body");
+        let resp =
+            crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
+        let via_plan = String::from_utf8_lossy(
+            &B64.decode(resp.stdout.as_deref().unwrap_or(""))
+                .expect("b64"),
+        )
+        .into_owned();
+        assert!(
+            !via_plan.contains("body-ran"),
+            "executor ran the body: {via_plan:?}"
+        );
+        assert!(
+            !run_sh(&cmd).contains("body-ran"),
+            "Command line ran the body"
+        );
+        assert!(
+            !run_sh(&steps_shell_text(&req)).contains("body-ran"),
+            "Steps ran the body"
+        );
     }
 
     /// `bash`'s canonical form of a script (`declare -f` of a wrapper
@@ -2374,8 +2822,15 @@ mod tests {
             .arg(format!("f() {{\n{text}\n}}\ndeclare -f f"))
             .output()
             .expect("run bash");
-        assert!(out.status.success(), "bash rejected:\n{text}\n{}", String::from_utf8_lossy(&out.stderr));
-        String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ")
+        assert!(
+            out.status.success(),
+            "bash rejected:\n{text}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     fn pick<'a>(rng: &mut crate::prop::Rng, xs: &[&'a str]) -> &'a str {
@@ -2387,32 +2842,68 @@ mod tests {
     fn random_any(rng: &mut crate::prop::Rng, depth: usize) -> Plan {
         const WORDS: &[&str] = &["a", "x y", "a;b", "$v", "(", ")", "it's", "&&", "-n", "*"];
         let leaf = |rng: &mut crate::prop::Rng| match rng.below(8) {
-            0 => Plan::Shell { shell: ShellProc::Sh, script: "echo s; exit 1".into() },
+            0 => Plan::Shell {
+                shell: ShellProc::Sh,
+                script: "echo s; exit 1".into(),
+            },
             _ => Plan::Exec {
-                argv: (0..1 + rng.below(3)).map(|_| pick(rng, WORDS).to_string()).collect(),
+                argv: (0..1 + rng.below(3))
+                    .map(|_| pick(rng, WORDS).to_string())
+                    .collect(),
             },
         };
         if depth == 0 || rng.below(4) == 0 {
             return leaf(rng);
         }
         let kids = |rng: &mut crate::prop::Rng, min: usize| -> Vec<Plan> {
-            (0..min + rng.below(3)).map(|_| random_any(rng, depth - 1)).collect()
+            (0..min + rng.below(3))
+                .map(|_| random_any(rng, depth - 1))
+                .collect()
         };
         match rng.below(11) {
-            0 => Plan::Run { steps: kids(rng, 1) },
-            1 => Plan::Alt { steps: kids(rng, 1) },
-            2 => Plan::Seq { steps: kids(rng, 1) },
-            3 => Plan::Pipe { stages: (0..2 + rng.below(2)).map(|_| leaf(rng)).collect() },
-            4 => Plan::Chdir { dir: "/tmp/a b".into(), body: Box::new(random_any(rng, depth - 1)) },
-            5 => Plan::Setenv { key: "TZ".into(), value: "x y".into(), body: Box::new(random_any(rng, depth - 1)) },
-            6 => Plan::RunAs { who: RunAs::Root, body: Box::new(random_any(rng, depth - 1)) },
-            7 => Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(random_any(rng, depth - 1)) },
+            0 => Plan::Run {
+                steps: kids(rng, 1),
+            },
+            1 => Plan::Alt {
+                steps: kids(rng, 1),
+            },
+            2 => Plan::Seq {
+                steps: kids(rng, 1),
+            },
+            3 => Plan::Pipe {
+                stages: (0..2 + rng.below(2)).map(|_| leaf(rng)).collect(),
+            },
+            4 => Plan::Chdir {
+                dir: "/tmp/a b".into(),
+                body: Box::new(random_any(rng, depth - 1)),
+            },
+            5 => Plan::Setenv {
+                key: "TZ".into(),
+                value: "x y".into(),
+                body: Box::new(random_any(rng, depth - 1)),
+            },
+            6 => Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(random_any(rng, depth - 1)),
+            },
+            7 => Plan::RunAs {
+                who: RunAs::User {
+                    name: "nobody".into(),
+                },
+                body: Box::new(random_any(rng, depth - 1)),
+            },
             8 => Plan::Redirect {
                 stream: [Stream::Stdout, Stream::Stderr, Stream::Both][rng.below(3)],
-                target: RedirTarget::File { path: "/tmp/o u t".into(), mode: crate::protocol::WriteMode::Append },
+                target: RedirTarget::File {
+                    path: "/tmp/o u t".into(),
+                    mode: crate::protocol::WriteMode::Append,
+                },
                 body: Box::new(leaf(rng)),
             },
-            9 => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(leaf(rng)) },
+            9 => Plan::WithStdinFrom {
+                path: "/dev/null".into(),
+                body: Box::new(leaf(rng)),
+            },
             _ => Plan::WithAcceptedExitCodes {
                 codes: [vec![1], vec![1, 2]][rng.below(2)].clone(),
                 body: Box::new(random_any(rng, depth - 1)),
@@ -2431,7 +2922,11 @@ mod tests {
             let steps = steps_shell_text(&req);
             let cmd = command_summary(&req);
             assert!(!cmd.contains("(("), "{cmd}");
-            assert_eq!(bash_tree(&steps), bash_tree(&cmd), "Steps:\n{steps}\nCommand: {cmd}");
+            assert_eq!(
+                bash_tree(&steps),
+                bash_tree(&cmd),
+                "Steps:\n{steps}\nCommand: {cmd}"
+            );
         }
     }
 
@@ -2443,21 +2938,31 @@ mod tests {
             1 => ex(&["true"]),
             2 => ex(&["pwd"]),
             3 => ex(&["printenv", "TZ"]),
-            4 => Plan::Shell { shell: ShellProc::Sh, script: "echo s; exit 1".into() },
-            5 => Plan::Shell { shell: ShellProc::Sh, script: "echo t; exit 2".into() },
+            4 => Plan::Shell {
+                shell: ShellProc::Sh,
+                script: "echo s; exit 1".into(),
+            },
+            5 => Plan::Shell {
+                shell: ShellProc::Sh,
+                script: "echo t; exit 2".into(),
+            },
             _ => ex(&["echo", pick(rng, &["1", "2", "3", "4", "5"])]),
         };
         if depth == 0 || rng.below(4) == 0 {
             return leaf(rng);
         }
         let kids = |rng: &mut crate::prop::Rng| -> Vec<Plan> {
-            (0..1 + rng.below(3)).map(|_| random_runnable(rng, depth - 1)).collect()
+            (0..1 + rng.below(3))
+                .map(|_| random_runnable(rng, depth - 1))
+                .collect()
         };
         match rng.below(10) {
             0 => Plan::Run { steps: kids(rng) },
             1 => Plan::Alt { steps: kids(rng) },
             2 => Plan::Seq { steps: kids(rng) },
-            3 => Plan::Pipe { stages: vec![leaf(rng), ex(&["cat"])] },
+            3 => Plan::Pipe {
+                stages: vec![leaf(rng), ex(&["cat"])],
+            },
             4 => Plan::Chdir {
                 dir: pick(rng, &["/tmp", "/usr", "/usr/bin"]).into(),
                 body: Box::new(random_runnable(rng, depth - 1)),
@@ -2466,9 +2971,20 @@ mod tests {
                 codes: [vec![1], vec![1, 2], vec![0, 7]][rng.below(3)].clone(),
                 body: Box::new(random_runnable(rng, depth - 1)),
             },
-            5 => Plan::Setenv { key: "TZ".into(), value: "UTC".into(), body: Box::new(random_runnable(rng, depth - 1)) },
-            6 => Plan::Redirect { stream: Stream::Stdout, target: RedirTarget::DevNull, body: Box::new(leaf(rng)) },
-            _ => Plan::WithStdinFrom { path: "/dev/null".into(), body: Box::new(ex(&["cat"])) },
+            5 => Plan::Setenv {
+                key: "TZ".into(),
+                value: "UTC".into(),
+                body: Box::new(random_runnable(rng, depth - 1)),
+            },
+            6 => Plan::Redirect {
+                stream: Stream::Stdout,
+                target: RedirTarget::DevNull,
+                body: Box::new(leaf(rng)),
+            },
+            _ => Plan::WithStdinFrom {
+                path: "/dev/null".into(),
+                body: Box::new(ex(&["cat"])),
+            },
         }
     }
 
@@ -2477,7 +2993,10 @@ mod tests {
             .arg("-c")
             .arg(text)
             .env_clear()
-            .env("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            .env(
+                "PATH",
+                "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            )
             .current_dir("/")
             .output()
             .expect("run sh");
@@ -2492,9 +3011,13 @@ mod tests {
         let mut rng = crate::prop::Rng::new(0xD15B_1A7E_u64);
         for _ in 0..150 {
             let req = mk_req(random_runnable(&mut rng, 4), false);
-            let resp = crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
-            let via_plan =
-                String::from_utf8_lossy(&B64.decode(resp.stdout.as_deref().unwrap_or("")).expect("b64")).into_owned();
+            let resp =
+                crate::executor::prepare_and_exec_direct(&req, &std::collections::HashMap::new());
+            let via_plan = String::from_utf8_lossy(
+                &B64.decode(resp.stdout.as_deref().unwrap_or(""))
+                    .expect("b64"),
+            )
+            .into_owned();
             let cmd = command_summary(&req);
             let steps = steps_shell_text(&req);
             assert_eq!(run_sh(&cmd), via_plan, "Command: {cmd}");
@@ -2527,7 +3050,11 @@ mod tests {
     /// A `Resolves:` row or line: up to three clipped strings (name, resolved,
     /// canonical) and fixed separators.
     const RESOLVES_BOUND: usize = 3 * (MAX_DISPLAY_LINE_CHARS + MARKER_MAX) + 32;
-    const PLAN_BOUND: usize = if STEPS_BOUND > RESOLVES_BOUND { STEPS_BOUND } else { RESOLVES_BOUND };
+    const PLAN_BOUND: usize = if STEPS_BOUND > RESOLVES_BOUND {
+        STEPS_BOUND
+    } else {
+        RESOLVES_BOUND
+    };
 
     /// `s` with every CSI escape removed: what the terminal shows.
     fn strip_csi(s: &str) -> String {
@@ -2549,12 +3076,12 @@ mod tests {
 
     /// The plan section exactly as `prompt_tty` writes it.
     fn plan_output(req: &ValidatedRequest, style: &Style) -> String {
-        let prepared = crate::executor::prepare(req, &std::collections::HashMap::new()).expect("compiles");
+        let prepared =
+            crate::executor::prepare(req, &std::collections::HashMap::new()).expect("compiles");
         let mut buf = Vec::new();
         write_plan_section(&mut buf, &prepared, style).expect("write");
         String::from_utf8(buf).expect("utf8")
     }
-
 
     /// The `Steps:` lines and the `Resolves:` lines (block rows included) of a
     /// rendered plan, escapes stripped.
@@ -2591,7 +3118,10 @@ mod tests {
         assert!(big.chars().count() - 10 <= MARKER_MAX, "{big}");
         // `truncate_for_display` keeps its own wording.
         let cmd = truncate_for_display(&"y".repeat(MAX_DISPLAY_CMD_CHARS + 1_048_576));
-        assert!(cmd.ends_with("… [1048576 more chars hidden — full command not shown]"), "{cmd}");
+        assert!(
+            cmd.ends_with("… [1048576 more chars hidden — full command not shown]"),
+            "{cmd}"
+        );
         assert!(cmd.chars().count() - MAX_DISPLAY_CMD_CHARS <= CMD_MARKER_MAX);
     }
 
@@ -2601,11 +3131,17 @@ mod tests {
         let line = format!("\x1b[38;5;210m{}\x1b[0m", "A".repeat(300));
         let out = clip_styled(&line, MAX_DISPLAY_LINE_CHARS, &st);
         let marker = format!("{}… [140 more chars hidden]{}", st.bold, st.reset);
-        assert!(out.ends_with(&format!("{}{marker}", st.reset)), "reset before the marker: {out:?}");
+        assert!(
+            out.ends_with(&format!("{}{marker}", st.reset)),
+            "reset before the marker: {out:?}"
+        );
         let head = out.strip_suffix(&marker).unwrap();
         assert_eq!(strip_csi(head), "A".repeat(MAX_DISPLAY_LINE_CHARS));
         // A line that fits passes through byte-identical, escapes and all.
-        let short = format!("\x1b[38;5;210m{}\x1b[0m", "A".repeat(MAX_DISPLAY_LINE_CHARS));
+        let short = format!(
+            "\x1b[38;5;210m{}\x1b[0m",
+            "A".repeat(MAX_DISPLAY_LINE_CHARS)
+        );
         assert_eq!(clip_styled(&short, MAX_DISPLAY_LINE_CHARS, &st), short);
         // Without colour, no escape at all.
         let plain = clip_styled(&"A".repeat(300), MAX_DISPLAY_LINE_CHARS, &style_for(true));
@@ -2614,7 +3150,10 @@ mod tests {
         // A tab counts as one char and is passed through unchanged.
         let tabs = format!("a\tb{}", "\t".repeat(200));
         let out = clip_styled(&tabs, 10, &style_for(true));
-        assert_eq!(out, format!("a\tb{}… [193 more chars hidden]", "\t".repeat(7)));
+        assert_eq!(
+            out,
+            format!("a\tb{}… [193 more chars hidden]", "\t".repeat(7))
+        );
     }
 
     #[test]
@@ -2625,10 +3164,18 @@ mod tests {
             assert!(out.len() < 4096, "{} bytes", out.len());
             let (steps, resolves) = split_plan_output(&out);
             for l in &steps {
-                assert!(l.chars().count() <= STEPS_BOUND, "Steps line of {} chars", l.chars().count());
+                assert!(
+                    l.chars().count() <= STEPS_BOUND,
+                    "Steps line of {} chars",
+                    l.chars().count()
+                );
             }
             for l in &resolves {
-                assert!(l.chars().count() <= RESOLVES_BOUND, "Resolves line of {} chars", l.chars().count());
+                assert!(
+                    l.chars().count() <= RESOLVES_BOUND,
+                    "Resolves line of {} chars",
+                    l.chars().count()
+                );
             }
             // Line 0, escapes (dim gutter, root colour) stripped, gutter removed.
             let line0 = steps[0].strip_prefix("0  ").expect("gutter");
@@ -2642,17 +3189,36 @@ mod tests {
         // (a) A long, resolvable absolute argv[0] in a multi-leaf plan.
         let long = long_echo_path(1_000);
         assert_eq!(long.len(), 2_009);
-        let req = mk_req(Plan::Run { steps: vec![ex(&[&long, "x"]), ex(&["id"])] }, true);
+        let req = mk_req(
+            Plan::Run {
+                steps: vec![ex(&[&long, "x"]), ex(&["id"])],
+            },
+            true,
+        );
         let out = plan_output(&req, &style_for(true));
         let (_, resolves) = split_plan_output(&out);
-        let row = resolves.iter().find(|l| l.starts_with("  /./")).expect("long row");
+        let row = resolves
+            .iter()
+            .find(|l| l.starts_with("  /./"))
+            .expect("long row");
         assert!(row.contains("->"), "{row}");
-        assert_eq!(row.matches("more chars hidden").count(), 2, "name and resolved path clipped: {row}");
+        assert_eq!(
+            row.matches("more chars hidden").count(),
+            2,
+            "name and resolved path clipped: {row}"
+        );
         for l in &resolves {
-            assert!(l.chars().count() <= RESOLVES_BOUND, "Resolves row of {} chars", l.chars().count());
+            assert!(
+                l.chars().count() <= RESOLVES_BOUND,
+                "Resolves row of {} chars",
+                l.chars().count()
+            );
         }
         // The short entry's padding follows the clipped name, not the 2 009-char one.
-        let id_row = resolves.iter().find(|l| l.starts_with("  id ")).expect("id row");
+        let id_row = resolves
+            .iter()
+            .find(|l| l.starts_with("  id "))
+            .expect("id row");
         assert!(
             id_row.chars().count() <= MAX_DISPLAY_LINE_CHARS + MARKER_MAX + 64,
             "id row of {} chars",
@@ -2660,11 +3226,21 @@ mod tests {
         );
 
         // (b) 40 distinct binaries: 32 rows, then the marker.
-        let steps = (0..40).map(|i| ex(&[&format!("sudo-proxy-no-such-binary-{i}")])).collect();
+        let steps = (0..40)
+            .map(|i| ex(&[&format!("sudo-proxy-no-such-binary-{i}")]))
+            .collect();
         let out = plan_output(&mk_req(Plan::Seq { steps }, false), &style_for(true));
         let (_, resolves) = split_plan_output(&out);
-        assert_eq!(resolves.iter().filter(|l| l.starts_with("  ")).count(), MAX_DISPLAY_RESOLVES, "{out}");
-        assert_eq!(resolves.last().map(String::as_str), Some("… 8 more binaries hidden"), "{out}");
+        assert_eq!(
+            resolves.iter().filter(|l| l.starts_with("  ")).count(),
+            MAX_DISPLAY_RESOLVES,
+            "{out}"
+        );
+        assert_eq!(
+            resolves.last().map(String::as_str),
+            Some("… 8 more binaries hidden"),
+            "{out}"
+        );
     }
 
     #[test]
@@ -2674,8 +3250,15 @@ mod tests {
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 1, "{out}");
         assert!(lines[0].starts_with("Resolves: "), "{out}");
-        assert!(lines[0].contains("->") && lines[0].contains("more chars hidden"), "{out}");
-        assert!(lines[0].chars().count() <= RESOLVES_BOUND, "{} chars", lines[0].chars().count());
+        assert!(
+            lines[0].contains("->") && lines[0].contains("more chars hidden"),
+            "{out}"
+        );
+        assert!(
+            lines[0].chars().count() <= RESOLVES_BOUND,
+            "{} chars",
+            lines[0].chars().count()
+        );
     }
 
     /// A long path is clipped in the middle: its start and the binary's name
@@ -2686,7 +3269,10 @@ mod tests {
         let out = shown_path(&long);
         assert!(out.starts_with("/usr/ddd"), "{out}");
         assert!(out.ends_with("/bin/the-tool"), "{out}");
-        assert!(out.contains("…[") && out.contains("more chars hidden]…"), "{out}");
+        assert!(
+            out.contains("…[") && out.contains("more chars hidden]…"),
+            "{out}"
+        );
         assert!(out.chars().count() < MAX_DISPLAY_LINE_CHARS + 40, "{out}");
         assert_eq!(shown_path("/usr/bin/x"), "/usr/bin/x");
     }
@@ -2704,7 +3290,10 @@ mod tests {
         };
         assert_eq!(line(&r), "");
         r.user_writable = true;
-        assert_eq!(line(&r), "Resolves: /home/u/.venv/bin/tool (user-writable)\n");
+        assert_eq!(
+            line(&r),
+            "Resolves: /home/u/.venv/bin/tool (user-writable)\n"
+        );
         assert!(resolve_detail(Some(&r), &st).ends_with("(user-writable)"));
     }
 
@@ -2719,7 +3308,10 @@ mod tests {
         let mut buf = Vec::new();
         write_resolve_block(&mut buf, &views, &st).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        let line = out.lines().find(|l| l.contains("opaque — ")).unwrap_or_else(|| panic!("{out}"));
+        let line = out
+            .lines()
+            .find(|l| l.contains("opaque — "))
+            .unwrap_or_else(|| panic!("{out}"));
         assert!(line.contains("/sh (user-writable)"), "{out}");
     }
 
@@ -2736,11 +3328,16 @@ mod tests {
         ];
         let uid = unsafe { libc::geteuid() };
         let pats = crate::inherit::parse_patterns("PYTHONPATH,REPO_ROOT").unwrap();
-        let i = crate::inherit::Inherited::from_env(crate::inherit::InheritMode::Env, pats, env, uid).unwrap();
+        let i =
+            crate::inherit::Inherited::from_env(crate::inherit::InheritMode::Env, pats, env, uid)
+                .unwrap();
         let mut buf = Vec::new();
         write_inherit_line(&mut buf, Some(&i), &st).unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert_eq!(out, "Env:     daemon environment (--inherit-env) with code-loading PYTHONPATH\n");
+        assert_eq!(
+            out,
+            "Env:     daemon environment (--inherit-env) with code-loading PYTHONPATH\n"
+        );
         let mut buf = Vec::new();
         write_inherit_line(&mut buf, None, &st).unwrap();
         assert!(buf.is_empty());
@@ -2757,7 +3354,9 @@ mod tests {
         };
 
         let long = "r".repeat(10_000);
-        let env = (0..5_000).map(|i| (format!("K{i}"), "v".repeat(300))).collect();
+        let env = (0..5_000)
+            .map(|i| (format!("K{i}"), "v".repeat(300)))
+            .collect();
         let mut raw = Request::new(
             long.clone(),
             long.clone(),
@@ -2773,7 +3372,11 @@ mod tests {
         for st in [style_for(false), style_for(true)] {
             let out = render(&req, &st);
             for line in out.lines().map(strip_csi) {
-                assert!(line.chars().count() <= META_BOUND, "line of {} chars", line.chars().count());
+                assert!(
+                    line.chars().count() <= META_BOUND,
+                    "line of {} chars",
+                    line.chars().count()
+                );
             }
             assert!(out.contains("Command: ") && out.contains("full command not shown"));
             assert!(out.contains("Env:     ") && out.contains("(agent forwarded)"));
@@ -2845,9 +3448,9 @@ mod tests {
                 }
                 lengthen(body, rng);
             }
-            Plan::Setenv { body, .. } | Plan::RunAs { body, .. } | Plan::WithAcceptedExitCodes { body, .. } => {
-                lengthen(body, rng)
-            }
+            Plan::Setenv { body, .. }
+            | Plan::RunAs { body, .. }
+            | Plan::WithAcceptedExitCodes { body, .. } => lengthen(body, rng),
             Plan::Run { steps } | Plan::Alt { steps } | Plan::Seq { steps } => {
                 steps.iter_mut().for_each(|s| lengthen(s, rng))
             }
@@ -2873,25 +3476,46 @@ mod tests {
             let mut plan = random_any(&mut rng, 4);
             lengthen(&mut plan, &mut rng);
             let req = mk_req(plan, rng.below(2) == 0);
-            let full = steps_lines(&layout(&req.exec_plan(), &ambient_ctx(req.privileged)), &style_for(true));
+            let full = steps_lines(
+                &layout(&req.exec_plan(), &ambient_ctx(req.privileged)),
+                &style_for(true),
+            );
             for st in [style_for(false), style_for(true)] {
                 let out = plan_output(&req, &st);
                 let lines: Vec<String> = out.lines().map(strip_csi).collect();
-                assert!(lines.len() <= 1 + MAX_DISPLAY_RESOLVES + 1 + 1 + MAX_DISPLAY_STAGES + 1, "{out}");
+                assert!(
+                    lines.len() <= 1 + MAX_DISPLAY_RESOLVES + 1 + 1 + MAX_DISPLAY_STAGES + 1,
+                    "{out}"
+                );
                 for l in &lines {
-                    assert!(l.chars().count() <= PLAN_BOUND, "line of {} chars", l.chars().count());
+                    assert!(
+                        l.chars().count() <= PLAN_BOUND,
+                        "line of {} chars",
+                        l.chars().count()
+                    );
                 }
                 let (steps, _) = split_plan_output(&out);
                 let shown = full.len().min(MAX_DISPLAY_STAGES);
                 let numbered = full[..shown].iter().filter(|l| l.numbered).count();
                 let width = numbered.saturating_sub(1).to_string().len();
                 for (l, f) in steps.iter().zip(&full[..shown]) {
-                    assert!(l.chars().count() <= STEPS_BOUND, "Steps line of {} chars", l.chars().count());
+                    assert!(
+                        l.chars().count() <= STEPS_BOUND,
+                        "Steps line of {} chars",
+                        l.chars().count()
+                    );
                     let shown_text: String = l.chars().skip(width).collect();
-                    let unclipped =
-                        format!("{}{}{}", "  ".repeat(f.depth + 1), f.text, f.comment(&style_for(true)));
+                    let unclipped = format!(
+                        "{}{}{}",
+                        "  ".repeat(f.depth + 1),
+                        f.text,
+                        f.comment(&style_for(true))
+                    );
                     let head = unmark(&shown_text);
-                    assert!(unclipped.starts_with(head), "not a prefix:\n{head}\nof\n{unclipped}");
+                    assert!(
+                        unclipped.starts_with(head),
+                        "not a prefix:\n{head}\nof\n{unclipped}"
+                    );
                     if head.len() == shown_text.len() {
                         assert_eq!(head, unclipped);
                     }
@@ -2911,11 +3535,16 @@ mod tests {
         r.user_writable = true;
         for st in [style_for(false), style_for(true)] {
             let mut buf = Vec::new();
-            write_resolves_line(&mut buf, &format!("{}x", "n".repeat(4000)), Some(&r), &st).unwrap();
+            write_resolves_line(&mut buf, &format!("{}x", "n".repeat(4000)), Some(&r), &st)
+                .unwrap();
             let out = String::from_utf8(buf).unwrap();
             let line = strip_csi(out.lines().next().unwrap());
             assert!(line.ends_with("(user-writable)"), "{line}");
-            assert!(line.chars().count() <= PLAN_BOUND, "line of {} chars", line.chars().count());
+            assert!(
+                line.chars().count() <= PLAN_BOUND,
+                "line of {} chars",
+                line.chars().count()
+            );
         }
     }
 
@@ -2941,7 +3570,8 @@ mod tests {
             assert!(text.contains("->"), "canonical arm not taken: {text:?}");
         };
 
-        let pinned = crate::executor::resolve_command(link.to_str().unwrap(), "/").expect("resolves");
+        let pinned =
+            crate::executor::resolve_command(link.to_str().unwrap(), "/").expect("resolves");
         let detail = resolve_detail(Some(&pinned), &style);
         check(&detail);
         assert!(!detail.contains('\n'), "raw newline: {detail:?}");

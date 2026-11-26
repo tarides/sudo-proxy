@@ -76,7 +76,10 @@ fn redirect_stdout_to_file_truncate() {
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     let written = std::fs::read_to_string(&path).expect("read redirect file");
     assert_eq!(written, "hello-file");
-    assert!(decode_stdout(&resp).is_empty(), "redirected stdout must not be captured");
+    assert!(
+        decode_stdout(&resp).is_empty(),
+        "redirected stdout must not be captured"
+    );
 }
 
 /// `>>` appends rather than truncating.
@@ -345,9 +348,12 @@ fn pkexec_mode_still_prompts_for_run_as_plans() {
         pkexec_only: true,
         ..Default::default()
     });
-    server
-        .prompter
-        .set_response(|_| (std::time::Duration::ZERO, sudo_proxy::tui::PromptResult::Denied));
+    server.prompter.set_response(|_| {
+        (
+            std::time::Duration::ZERO,
+            sudo_proxy::tui::PromptResult::Denied,
+        )
+    });
     let dir = tempfile::tempdir_in("/tmp").expect("tempdir");
     let marker = dir.path().join("ran");
     let plan = Plan::Run {
@@ -376,7 +382,11 @@ fn pkexec_mode_still_prompts_for_run_as_plans() {
         false,
     );
     let resp = server.send(&req);
-    assert_eq!(server.prompter.call_count(), 1, "the TUI prompt was skipped");
+    assert_eq!(
+        server.prompter.call_count(),
+        1,
+        "the TUI prompt was skipped"
+    );
     assert_eq!(resp.status, Status::Denied, "got {resp:?}");
     assert!(!marker.exists(), "an unescalated step ran without approval");
 }

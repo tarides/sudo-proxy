@@ -1,0 +1,9 @@
+# Commits that only reformat code. GitHub's blame view skips them
+# automatically; for local blame, run once:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# The hashes must survive the merge: merge PRs that add one here with a
+# merge commit, not squash or rebase.
+
+# Run cargo fmt over the tree (#119)
+c73e2737c4ed5a8f1bc73542134da3cff493ad4a

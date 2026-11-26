@@ -64,7 +64,10 @@ fn every_ui_plan_has_a_case() {
 
 /// Send every case to one daemon, deny each, and return `(stem, raw block)`.
 fn capture_all(color: bool) -> Vec<(&'static str, String)> {
-    let mut d = PtyDaemon::spawn(PtyOpts { color, ..Default::default() });
+    let mut d = PtyDaemon::spawn(PtyOpts {
+        color,
+        ..Default::default()
+    });
     let mut out = Vec::new();
     for &(stem, privileged) in CASES {
         let text = std::fs::read_to_string(ui_dir().join(format!("{stem}.json"))).unwrap();
@@ -91,7 +94,11 @@ fn capture_all(color: bool) -> Vec<(&'static str, String)> {
         assert_eq!(resp.status, Status::Denied, "{stem}: {resp:?}");
         out.push((stem, block));
     }
-    assert!(d.shim_log().is_empty(), "a denied plan reached sudo: {:?}", d.shim_log());
+    assert!(
+        d.shim_log().is_empty(),
+        "a denied plan reached sudo: {:?}",
+        d.shim_log()
+    );
     out
 }
 
@@ -115,7 +122,8 @@ fn mask(block: &str) -> String {
         } else if in_resolves && body.starts_with("  ") {
             // `  name<pad>  detail`: keep the name column, mask the detail.
             let name_end = 2 + body[2..].find(' ').unwrap_or(body.len() - 2);
-            let detail_start = name_end + body[name_end..].len() - body[name_end..].trim_start().len();
+            let detail_start =
+                name_end + body[name_end..].len() - body[name_end..].trim_start().len();
             out += &body[..detail_start];
             out += "<PATH>";
         } else {
@@ -159,7 +167,10 @@ fn check_goldens(blocks: &[(&str, String)], kind: &str) {
 /// The `Steps:` line that holds `needle` (a command, uncoloured text).
 fn step_line<'a>(block: &'a str, needle: &str) -> &'a str {
     let steps = &block[block.find("Steps:").expect("Steps: block")..];
-    steps.lines().find(|l| l.contains(needle)).unwrap_or_else(|| panic!("no step {needle:?} in {block:?}"))
+    steps
+        .lines()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no step {needle:?} in {block:?}"))
 }
 
 fn get<'a>(blocks: &'a [(&str, String)], stem: &str) -> &'a str {
@@ -178,27 +189,54 @@ fn ui_prompts_color() {
 
     let a = get(&blocks, "escalation-a-ambient");
     // Every step light red, and the `&&` between them tinted too.
-    assert!(step_line(a, "sudo id -un").contains(&format!("{AMBIENT_ROOT} &&")), "a: && not tinted");
-    assert!(step_line(a, "sudo id -u\x1b").contains(AMBIENT_ROOT), "a: id -u not light red");
-    assert!(!a.contains(ROOT_BOUNDARY), "a: ambient root shown as a boundary");
+    assert!(
+        step_line(a, "sudo id -un").contains(&format!("{AMBIENT_ROOT} &&")),
+        "a: && not tinted"
+    );
+    assert!(
+        step_line(a, "sudo id -u\x1b").contains(AMBIENT_ROOT),
+        "a: id -u not light red"
+    );
+    assert!(
+        !a.contains(ROOT_BOUNDARY),
+        "a: ambient root shown as a boundary"
+    );
 
     let b = get(&blocks, "escalation-b-boundary");
-    assert!(step_line(b, "whoami").contains(&format!("{ROOT_BOUNDARY}sudo whoami")), "b: whoami not bright red");
+    assert!(
+        step_line(b, "whoami").contains(&format!("{ROOT_BOUNDARY}sudo whoami")),
+        "b: whoami not bright red"
+    );
     for plain in ["echo hi", "echo bye"] {
-        assert!(!step_line(b, plain).contains("\x1b[38;5;"), "b: {plain} coloured");
+        assert!(
+            !step_line(b, plain).contains("\x1b[38;5;"),
+            "b: {plain} coloured"
+        );
     }
 
     let c = get(&blocks, "escalation-c-ambient-plus-boundary");
-    assert!(step_line(c, "id -un").contains(&format!("{AMBIENT_ROOT}sudo id -un")), "c: id -un not light red");
-    assert!(step_line(c, "id -un").contains(&format!("{AMBIENT_ROOT} &&")), "c: && not tinted");
-    assert!(step_line(c, "whoami").contains(&format!("{ROOT_BOUNDARY}sudo whoami")), "c: whoami not bright red");
+    assert!(
+        step_line(c, "id -un").contains(&format!("{AMBIENT_ROOT}sudo id -un")),
+        "c: id -un not light red"
+    );
+    assert!(
+        step_line(c, "id -un").contains(&format!("{AMBIENT_ROOT} &&")),
+        "c: && not tinted"
+    );
+    assert!(
+        step_line(c, "whoami").contains(&format!("{ROOT_BOUNDARY}sudo whoami")),
+        "c: whoami not bright red"
+    );
 
     let dd = get(&blocks, "escalation-d-named-user");
     assert!(
         step_line(dd, "id -un").contains(&format!("{NAMED_USER}sudo -u nobody id -un")),
         "d: id -un not bright yellow"
     );
-    assert!(!step_line(dd, "echo hi").contains("\x1b[38;5;"), "d: echo hi coloured");
+    assert!(
+        !step_line(dd, "echo hi").contains("\x1b[38;5;"),
+        "d: echo hi coloured"
+    );
     assert!(!dd.contains(ROOT_BOUNDARY), "d: named user shown as root");
 
     check_goldens(&blocks, "color");
@@ -234,9 +272,14 @@ fn huge_argument_prompt_is_bounded() {
     // line has a smaller bound.
     const META_BOUND: usize = 1024 + 64 + 64;
 
-    let mut d = PtyDaemon::spawn(PtyOpts { color: true, ..Default::default() });
+    let mut d = PtyDaemon::spawn(PtyOpts {
+        color: true,
+        ..Default::default()
+    });
     let mut r = common::make_req("ui-huge-argument", vec![]);
-    r.plan = Some(Plan::Exec { argv: vec!["echo".into(), "A".repeat(900_000)] });
+    r.plan = Some(Plan::Exec {
+        argv: vec!["echo".into(), "A".repeat(900_000)],
+    });
     r.privileged = true;
     let h = d.request_async(&r);
     let head = d.expect("Privilege Request");
@@ -244,15 +287,30 @@ fn huge_argument_prompt_is_bounded() {
     let mut block = head[start..].to_string();
     block += &d.expect("default=N) ");
 
-    assert!(block.len() < 16 * 1024, "prompt block of {} bytes", block.len());
+    assert!(
+        block.len() < 16 * 1024,
+        "prompt block of {} bytes",
+        block.len()
+    );
     let shown = strip_escapes(&block);
     for line in shown.lines() {
-        assert!(line.chars().count() <= META_BOUND, "line of {} chars", line.chars().count());
+        assert!(
+            line.chars().count() <= META_BOUND,
+            "line of {} chars",
+            line.chars().count()
+        );
     }
     assert!(shown.contains("\nCommand: "), "{shown}");
     assert!(shown.contains("\nSteps:\n"), "{shown}");
-    let steps0 = shown.lines().skip_while(|l| *l != "Steps:").nth(1).expect("Steps line 0");
-    assert!(steps0.starts_with("0  sudo echo AAAA") && steps0.contains("more chars hidden"), "{steps0}");
+    let steps0 = shown
+        .lines()
+        .skip_while(|l| *l != "Steps:")
+        .nth(1)
+        .expect("Steps line 0");
+    assert!(
+        steps0.starts_with("0  sudo echo AAAA") && steps0.contains("more chars hidden"),
+        "{steps0}"
+    );
     let last = shown.lines().last().expect("a line").trim_end();
     assert!(
         last.starts_with("Execute as root? [y/N] (") && last.ends_with("s timeout, default=N)"),
@@ -263,27 +321,42 @@ fn huge_argument_prompt_is_bounded() {
     d.expect("→ Denied");
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Denied, "{resp:?}");
-    assert!(d.shim_log().is_empty(), "a denied plan reached sudo: {:?}", d.shim_log());
+    assert!(
+        d.shim_log().is_empty(),
+        "a denied plan reached sudo: {:?}",
+        d.shim_log()
+    );
 }
 
 #[test]
 fn ui_prompts_no_color() {
     let blocks = capture_all(false);
     for (stem, block) in &blocks {
-        assert!(!block.contains('\x1b'), "{stem}: escape under NO_COLOR: {}", visible(block.as_bytes()));
+        assert!(
+            !block.contains('\x1b'),
+            "{stem}: escape under NO_COLOR: {}",
+            visible(block.as_bytes())
+        );
     }
     // Without colour, escalation still reads from the `sudo` prefix.
     assert!(step_line(get(&blocks, "showcase"), "id -un").contains("sudo id -un"));
     assert!(step_line(get(&blocks, "escalation-a-ambient"), "id -un").contains("sudo id -un"));
     assert!(step_line(get(&blocks, "escalation-b-boundary"), "whoami").contains("sudo whoami"));
     assert!(!step_line(get(&blocks, "escalation-b-boundary"), "echo hi").contains("sudo"));
-    assert!(step_line(get(&blocks, "escalation-c-ambient-plus-boundary"), "whoami").contains("sudo whoami"));
-    assert!(step_line(get(&blocks, "escalation-d-named-user"), "id -un").contains("sudo -u nobody id -un"));
+    assert!(
+        step_line(get(&blocks, "escalation-c-ambient-plus-boundary"), "whoami")
+            .contains("sudo whoami")
+    );
+    assert!(step_line(get(&blocks, "escalation-d-named-user"), "id -un")
+        .contains("sudo -u nobody id -un"));
 
     // `mask` replaces the whole detail column, so the wrapper suffixes are
     // checked on the raw block.
     let w = get(&blocks, "wrappers");
-    assert!(w.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"), "{w}");
+    assert!(
+        w.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"),
+        "{w}"
+    );
     assert!(w.contains("(run by env; looked up at run time)"), "{w}");
 
     // #91: plain rsync stays transparent; `rsync -e` is opaque.

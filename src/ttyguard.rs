@@ -81,7 +81,10 @@ pub struct Probe {
 
 impl Probe {
     fn get(&self, k: &str) -> Option<&str> {
-        self.env.get(k).map(String::as_str).filter(|v| !v.is_empty())
+        self.env
+            .get(k)
+            .map(String::as_str)
+            .filter(|v| !v.is_empty())
     }
 }
 
@@ -101,13 +104,19 @@ pub fn probe() -> Probe {
     let env = VARS
         .iter()
         .filter_map(|k| {
-            std::env::var(k).ok().filter(|v| !v.is_empty()).map(|v| (k.to_string(), v))
+            std::env::var(k)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .map(|v| (k.to_string(), v))
         })
         .collect();
     let legacy_tiocsti = std::fs::read_to_string("/proc/sys/dev/tty/legacy_tiocsti")
         .ok()
         .map(|s| s.trim().to_string());
-    Probe { env, legacy_tiocsti }
+    Probe {
+        env,
+        legacy_tiocsti,
+    }
 }
 
 /// Classify a [`Probe`]. Pure.
@@ -119,7 +128,10 @@ pub fn assess(p: &Probe) -> Assessment {
     // (`tmux send-keys`, `screen -X stuff`, `zellij action write-chars`) and
     // read it back to time the key. TERM survives ssh and nesting; the
     // socket variables catch a pane whose TERM was overridden.
-    if let Some(t) = p.get("TERM").filter(|t| t.starts_with("tmux") || t.starts_with("screen")) {
+    if let Some(t) = p
+        .get("TERM")
+        .filter(|t| t.starts_with("tmux") || t.starts_with("screen"))
+    {
         inj.push(format!("terminal multiplexer (TERM={t}): `tmux send-keys` / `screen -X stuff` can type into it"));
     } else if p.get("TMUX").is_some() {
         inj.push("tmux pane ($TMUX set): `tmux send-keys` can type into it".into());
@@ -140,13 +152,20 @@ pub fn assess(p: &Probe) -> Assessment {
         inj.push("WezTerm ($WEZTERM_PANE set): `wezterm cli send-text` can type into it".into());
     }
     if p.get("KONSOLE_DBUS_SERVICE").is_some() {
-        inj.push("Konsole ($KONSOLE_DBUS_SERVICE set): its D-Bus `sendText` can type into it".into());
+        inj.push(
+            "Konsole ($KONSOLE_DBUS_SERVICE set): its D-Bus `sendText` can type into it".into(),
+        );
     }
     if p.get("TERM_PROGRAM") == Some("vscode") {
-        inj.push("VS Code integrated terminal (TERM_PROGRAM=vscode): extensions can `sendText` into it".into());
+        inj.push(
+            "VS Code integrated terminal (TERM_PROGRAM=vscode): extensions can `sendText` into it"
+                .into(),
+        );
     }
     if p.get("INSIDE_EMACS").is_some() {
-        inj.push("Emacs terminal ($INSIDE_EMACS set): `emacsclient --eval` can send input to it".into());
+        inj.push(
+            "Emacs terminal ($INSIDE_EMACS set): `emacsclient --eval` can send input to it".into(),
+        );
     }
 
     // X11: any client may synthesise keys (XTEST, e.g. `xdotool key y`).
@@ -202,7 +221,10 @@ mod tests {
 
     fn probe_of(vars: &[(&str, &str)], tiocsti: Option<&str>) -> Probe {
         Probe {
-            env: vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            env: vars
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             legacy_tiocsti: tiocsti.map(str::to_string),
         }
     }
@@ -238,11 +260,27 @@ mod tests {
             assert!(i[0].contains(term));
         }
         // TERM overridden inside the multiplexer: the socket variable still counts.
-        assert_eq!(injectors(&[("TERM", "xterm-256color"), ("TMUX", "/tmp/tmux-1/default,1,0")]).len(), 1);
-        assert_eq!(injectors(&[("TERM", "xterm-256color"), ("STY", "123.pts-0")]).len(), 1);
-        assert_eq!(injectors(&[("TERM", "xterm-256color"), ("ZELLIJ", "0")]).len(), 1);
+        assert_eq!(
+            injectors(&[
+                ("TERM", "xterm-256color"),
+                ("TMUX", "/tmp/tmux-1/default,1,0")
+            ])
+            .len(),
+            1
+        );
+        assert_eq!(
+            injectors(&[("TERM", "xterm-256color"), ("STY", "123.pts-0")]).len(),
+            1
+        );
+        assert_eq!(
+            injectors(&[("TERM", "xterm-256color"), ("ZELLIJ", "0")]).len(),
+            1
+        );
         // One line for tmux, not one per signal.
-        assert_eq!(injectors(&[("TERM", "tmux-256color"), ("TMUX", "x")]).len(), 1);
+        assert_eq!(
+            injectors(&[("TERM", "tmux-256color"), ("TMUX", "x")]).len(),
+            1
+        );
     }
 
     #[test]
@@ -273,7 +311,12 @@ mod tests {
         assert!(injectors(&[("DISPLAY", ":0"), ("WAYLAND_DISPLAY", "wayland-0")]).is_empty());
         // A Wayland socket in an X11 session (nested compositor) does not clear it.
         assert_eq!(
-            injectors(&[("DISPLAY", ":0"), ("WAYLAND_DISPLAY", "w"), ("XDG_SESSION_TYPE", "x11")]).len(),
+            injectors(&[
+                ("DISPLAY", ":0"),
+                ("WAYLAND_DISPLAY", "w"),
+                ("XDG_SESSION_TYPE", "x11")
+            ])
+            .len(),
             1
         );
         // ssh -X forwarding exposes the local X server too.
@@ -282,7 +325,11 @@ mod tests {
 
     #[test]
     fn several_mechanisms_are_all_listed() {
-        let i = injectors(&[("TERM", "tmux-256color"), ("DISPLAY", ":0"), ("KITTY_WINDOW_ID", "1")]);
+        let i = injectors(&[
+            ("TERM", "tmux-256color"),
+            ("DISPLAY", ":0"),
+            ("KITTY_WINDOW_ID", "1"),
+        ]);
         assert_eq!(i.len(), 3, "{i:?}");
     }
 
@@ -304,7 +351,10 @@ mod tests {
 
     #[test]
     fn refusal_names_every_reason_and_the_override() {
-        let a = assess(&probe_of(&[("TERM", "tmux-256color"), ("DISPLAY", ":0")], Some("0")));
+        let a = assess(&probe_of(
+            &[("TERM", "tmux-256color"), ("DISPLAY", ":0")],
+            Some("0"),
+        ));
         let m = refusal_message(&a);
         for i in &a.injectors {
             assert!(m.contains(i.as_str()));

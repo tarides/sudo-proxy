@@ -52,7 +52,10 @@ fn request_queued_behind_slow_prompt_completes_normally() {
     // Wait until A has actually entered the prompter (so the TTY lock is
     // taken and we're in the wedge window). The grant warmup already counted
     // as call 1, so A entering the prompter is call 2.
-    assert!(wait_until(Duration::from_secs(5), || s.prompter.call_count() == 2));
+    assert!(wait_until(Duration::from_secs(5), || s
+        .prompter
+        .call_count()
+        == 2));
 
     let t_b = thread::spawn(move || {
         // privileged=false + granted session → no prompter, no TTY lock.
@@ -161,7 +164,10 @@ fn trickle_feed_client_disconnected_within_handshake_deadline() {
     let parsed: serde_json::Value = serde_json::from_str(buf.trim()).unwrap();
     assert_eq!(parsed["status"], "error");
     assert!(
-        parsed["message"].as_str().unwrap_or("").contains("handshake")
+        parsed["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("handshake")
             || parsed["message"]
                 .as_str()
                 .unwrap_or("")
@@ -170,5 +176,8 @@ fn trickle_feed_client_disconnected_within_handshake_deadline() {
         parsed["message"]
     );
 
-    assert!(wait_until(Duration::from_secs(2), || s.in_flight.load(Ordering::Relaxed) == 0));
+    assert!(wait_until(Duration::from_secs(2), || s
+        .in_flight
+        .load(Ordering::Relaxed)
+        == 0));
 }

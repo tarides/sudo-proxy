@@ -1,3 +1,4 @@
+use crate::inherit::Inherited;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Read;
@@ -8,7 +9,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
-use crate::inherit::Inherited;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -60,8 +60,7 @@ pub fn sanitize_env(env: &HashMap<String, String>) -> Result<HashMap<String, Str
         // arbitrary socket. Use `forward_agent: true` instead.
         if k == "SSH_AUTH_SOCK" {
             return Err(
-                "SSH_AUTH_SOCK cannot be set in request env; use forward_agent instead"
-                    .to_string(),
+                "SSH_AUTH_SOCK cannot be set in request env; use forward_agent instead".to_string(),
             );
         }
         if !is_env_allowed(k) {
@@ -74,8 +73,7 @@ pub fn sanitize_env(env: &HashMap<String, String>) -> Result<HashMap<String, Str
 
 /// Default PATH injected when none is set in the request. Mirrors
 /// `/etc/login.defs`'s ENV_PATH on Debian/Ubuntu.
-const DEFAULT_LOGIN_PATH: &str =
-    "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const DEFAULT_LOGIN_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// Login-shell env (HOME/USER/LOGNAME/PATH) for the daemon's effective
 /// uid. PAM's `session` stack would set these on an interactive SSH
@@ -205,14 +203,21 @@ impl Resolved {
                 Ok(magic == *b"\x7fELF")
             })
             .unwrap_or(false);
-        let file = if proc_fd_available() { proc_path.as_path() } else { path.as_path() };
+        let file = if proc_fd_available() {
+            proc_path.as_path()
+        } else {
+            path.as_path()
+        };
         // Owning counts as writing: the owner can `chmod u+w` first, as the
         // helper check (1.2.3) already treats ownership as control.
         let euid = unsafe { libc::geteuid() };
         let user_writable = st.st_uid == euid
             || writable_by_me(file)
             || path.parent().is_some_and(|d| controlled_by(d, euid))
-            || canonical.as_deref().and_then(Path::parent).is_some_and(|d| controlled_by(d, euid));
+            || canonical
+                .as_deref()
+                .and_then(Path::parent)
+                .is_some_and(|d| controlled_by(d, euid));
         Some(Resolved {
             path,
             canonical,
@@ -272,10 +277,15 @@ static STARTUP_NOFILE: OnceLock<libc::rlimit> = OnceLock::new();
 /// daemon start.
 pub fn raise_fd_limit() {
     let mut lim: libc::rlimit = unsafe { std::mem::zeroed() };
-    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 || lim.rlim_cur >= lim.rlim_max {
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0
+        || lim.rlim_cur >= lim.rlim_max
+    {
         return;
     }
-    let raised = libc::rlimit { rlim_cur: lim.rlim_max, rlim_max: lim.rlim_max };
+    let raised = libc::rlimit {
+        rlim_cur: lim.rlim_max,
+        rlim_max: lim.rlim_max,
+    };
     if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raised) } == 0 {
         let _ = STARTUP_NOFILE.set(lim);
     }
@@ -452,14 +462,20 @@ enum InSpec {
 enum OutSpec {
     /// Captured into the response (piped + drained).
     Capture,
-    File { path: String, append: bool },
+    File {
+        path: String,
+        append: bool,
+    },
     DevNull,
 }
 
 #[derive(Clone, Debug)]
 enum ErrSpec {
     Capture,
-    File { path: String, append: bool },
+    File {
+        path: String,
+        append: bool,
+    },
     DevNull,
     /// `2>&1` — stderr follows wherever stdout points.
     ToStdout,
@@ -575,7 +591,10 @@ fn compile_plan(
     let plan = req.exec_plan();
     let mut leaves = Vec::new();
     let seq = compile_seq(&plan, ctx, &mut leaves)?;
-    if leaves.iter().any(|l| l.inherit.is_some() && l.runas.is_escalated()) {
+    if leaves
+        .iter()
+        .any(|l| l.inherit.is_some() && l.runas.is_escalated())
+    {
         return Err("internal error: daemon environment reached an escalated step".into());
     }
     Ok(Compiled { leaves, seq })
@@ -698,7 +717,11 @@ fn compile_leaf(plan: &Plan, mut ctx: Ctx, leaves: &mut Vec<LeafPlan>) -> Result
             ctx.accepted = codes.clone();
             compile_leaf(body, ctx, leaves)
         }
-        Plan::Redirect { stream, target, body } => {
+        Plan::Redirect {
+            stream,
+            target,
+            body,
+        } => {
             apply_redirect(&mut ctx, *stream, target)?;
             compile_leaf(body, ctx, leaves)
         }
@@ -1030,7 +1053,12 @@ pub fn prepare_with<'a>(
 ) -> Result<PreparedRequest<'a>, String> {
     let compiled = compile_plan(req, env, inherit.as_ref())?;
     let views = leaf_views(&compiled);
-    Ok(PreparedRequest { req, compiled, views, inherit })
+    Ok(PreparedRequest {
+        req,
+        compiled,
+        views,
+        inherit,
+    })
 }
 
 /// The prompt's view of a request with no environment: the structure and
@@ -1144,7 +1172,11 @@ struct StepStatus {
     success: bool,
 }
 
-fn run_plan(prepared: &PreparedRequest, mode: EscalationMode, tty_lock: Option<&Mutex<()>>) -> Response {
+fn run_plan(
+    prepared: &PreparedRequest,
+    mode: EscalationMode,
+    tty_lock: Option<&Mutex<()>>,
+) -> Response {
     let req = prepared.req;
     let compiled = &prepared.compiled;
     if mode == EscalationMode::Pkexec {
@@ -1216,7 +1248,9 @@ fn env_supports_chdir() -> bool {
         let (Ok(env), Ok(truth)) = (trusted_env(), truth) else {
             return false;
         };
-        env_chdir_probe(env, &truth).status().is_ok_and(|s| s.success())
+        env_chdir_probe(env, &truth)
+            .status()
+            .is_ok_and(|s| s.success())
     })
 }
 
@@ -1228,12 +1262,17 @@ fn env_supports_chdir() -> bool {
 /// the daemon's user.
 fn env_chdir_probe(env: &Path, truth: &Path) -> Command {
     let mut c = Command::new(env);
-    c.args(["-C".as_ref(), "/".as_ref(), "--".as_ref(), truth.as_os_str()])
-        .env_clear()
-        .env("PATH", crate::helper::HELPER_PATH)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+    c.args([
+        "-C".as_ref(),
+        "/".as_ref(),
+        "--".as_ref(),
+        truth.as_os_str(),
+    ])
+    .env_clear()
+    .env("PATH", crate::helper::HELPER_PATH)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null());
     c
 }
 
@@ -1454,8 +1493,14 @@ fn run_one(
     }
     let _fg = fg_lock.and_then(|m| ForegroundGuard::take(cpid, m));
 
-    let stdout_handle = child.stdout.take().map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
-    let stderr_handle = child.stderr.take().map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
+    let stdout_handle = child
+        .stdout
+        .take()
+        .map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
+    let stderr_handle = child
+        .stderr
+        .take()
+        .map(|s| spawn_drain(s, MAX_OUTPUT_BYTES));
 
     let exit = match wait_with_deadline(&mut child, deadline) {
         Ok(s) => s.code().unwrap_or(-1),
@@ -1657,7 +1702,11 @@ fn leaf_program(leaf: &LeafPlan) -> Option<&Path> {
 /// prompt already says it cannot show what that leaf runs.
 fn spawn_argv(leaf: &LeafPlan) -> Result<Vec<String>, String> {
     let mut argv = leaf.argv.clone();
-    for prog in leaf.programs.iter().filter(|p| p.argv_index != 0 && !p.applet && !p.runtime_lookup) {
+    for prog in leaf
+        .programs
+        .iter()
+        .filter(|p| p.argv_index != 0 && !p.applet && !p.runtime_lookup)
+    {
         if runs_from_match_dir(leaf, prog) {
             continue;
         }
@@ -1691,10 +1740,10 @@ fn spawn_argv(leaf: &LeafPlan) -> Result<Vec<String>, String> {
 /// The wrapper that runs `prog` is of `kind`, by its name as written or by
 /// the canonical name of its pinned binary (`innocuous -> env`).
 fn via_kind_is(leaf: &LeafPlan, prog: &ProgramHop, kind: crate::wrappers::Kind) -> bool {
-    let Some(at) = prog.via_index else { return false };
-    let is = |name: &str| {
-        matches!(crate::wrappers::classify(name), crate::wrappers::Class::Wrapper(w) if w.kind == kind)
+    let Some(at) = prog.via_index else {
+        return false;
     };
+    let is = |name: &str| matches!(crate::wrappers::classify(name), crate::wrappers::Class::Wrapper(w) if w.kind == kind);
     let canonical = leaf
         .programs
         .iter()
@@ -1711,7 +1760,9 @@ fn runs_from_match_dir(leaf: &LeafPlan, prog: &ProgramHop) -> bool {
     prog.name.contains('/')
         && via_kind_is(leaf, prog, crate::wrappers::Kind::FindExec)
         && matches!(
-            leaf.argv.get(prog.argv_index.wrapping_sub(1)).map(String::as_str),
+            leaf.argv
+                .get(prog.argv_index.wrapping_sub(1))
+                .map(String::as_str),
             Some("-execdir" | "-okdir")
         )
 }
@@ -1730,7 +1781,10 @@ fn check_pins(leaf: &LeafPlan) -> Result<(), String> {
         .iter()
         .filter(|p| p.argv_index != 0)
         .filter_map(|p| p.resolved.as_ref().map(|r| (p.name.as_str(), r)));
-    let argv0 = leaf.resolved_bin.as_ref().map(|r| (leaf.argv[0].as_str(), r));
+    let argv0 = leaf
+        .resolved_bin
+        .as_ref()
+        .map(|r| (leaf.argv[0].as_str(), r));
     for (name, r) in argv0.into_iter().chain(hops) {
         if !r.still_pinned() {
             return Err(format!(
@@ -1788,7 +1842,11 @@ fn set_stdin(cmd: &mut Command, spec: &InSpec) -> std::io::Result<()> {
     Ok(())
 }
 
-fn set_stderr(cmd: &mut Command, spec: &ErrSpec, stdout_file: Option<&File>) -> std::io::Result<()> {
+fn set_stderr(
+    cmd: &mut Command,
+    spec: &ErrSpec,
+    stdout_file: Option<&File>,
+) -> std::io::Result<()> {
     match spec {
         ErrSpec::Capture => {
             cmd.stderr(Stdio::piped());
@@ -1855,7 +1913,8 @@ fn run_pipe(
     // stage before any starts: a stage refused later would leave the earlier
     // ones killed part-way. The pins are checked again just before each
     // spawn.
-    let preflight = |leaf: &LeafPlan| check_pins(leaf).and_then(|()| build_command(leaf, mode).map(drop));
+    let preflight =
+        |leaf: &LeafPlan| check_pins(leaf).and_then(|()| build_command(leaf, mode).map(drop));
     if let Some(e) = indices.iter().find_map(|&li| preflight(&leaves[li]).err()) {
         return spawn_error_status(e);
     }
@@ -2063,9 +2122,7 @@ struct ForegroundGuard<'a> {
 
 impl<'a> ForegroundGuard<'a> {
     fn take(child_pgid: libc::pid_t, tty_lock: &'a Mutex<()>) -> Option<Self> {
-        let lock = tty_lock
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let lock = tty_lock.lock().unwrap_or_else(|e| e.into_inner());
 
         unsafe {
             let tty_fd = libc::open(c"/dev/tty".as_ptr(), libc::O_RDWR | libc::O_NOCTTY);
@@ -2269,7 +2326,10 @@ mod tests {
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
         let truth = Path::new("/trusted/true");
         assert!(env_chdir_probe(&fake, truth).status().unwrap().success());
-        assert_eq!(std::fs::read_to_string(&args).unwrap(), "-C\n/\n--\n/trusted/true\n");
+        assert_eq!(
+            std::fs::read_to_string(&args).unwrap(),
+            "-C\n/\n--\n/trusted/true\n"
+        );
         let seen = std::fs::read_to_string(&out).unwrap();
         let names: Vec<&str> = seen
             .lines()
@@ -2308,7 +2368,11 @@ mod tests {
         }
         let path = format!("{}:{}", a.display(), b.display());
         let r = resolve_on("tool", "/", &path).expect("resolves");
-        assert_eq!(r.path, b.join("tool"), "group-only x bit is not executable by its owner");
+        assert_eq!(
+            r.path,
+            b.join("tool"),
+            "group-only x bit is not executable by its owner"
+        );
     }
 
     /// A program the daemon's user owns is `user-writable` even when its mode
@@ -2338,7 +2402,17 @@ mod tests {
         for k in ["TERM", "LANG", "LC_ALL", "LC_CTYPE"] {
             assert!(sudo_env_keep(OsStr::new(k)), "{k}");
         }
-        for k in ["DISPLAY", "PATH", "HOME", "XAUTHORITY", "SSH_AUTH_SOCK", "LD_PRELOAD", "TERMINFO", "LANGUAGE", "XLC_X"] {
+        for k in [
+            "DISPLAY",
+            "PATH",
+            "HOME",
+            "XAUTHORITY",
+            "SSH_AUTH_SOCK",
+            "LD_PRELOAD",
+            "TERMINFO",
+            "LANGUAGE",
+            "XLC_X",
+        ] {
             assert!(!sudo_env_keep(OsStr::new(k)), "{k}");
         }
     }
@@ -2356,15 +2430,24 @@ mod tests {
         // can be built.
         if let (Ok(pkexec), Ok(env)) = (crate::helper::pkexec(), trusted_env()) {
             let c = build_command(&l, EscalationMode::Pkexec).unwrap();
-            let args: Vec<_> = c.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+            let args: Vec<_> = c
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
             assert_eq!(Path::new(c.get_program()), pkexec);
             assert!(env.is_absolute(), "{env:?}");
-            assert_eq!(args, [&*env.to_string_lossy(), "-C", "/srv", "--", "/usr/bin/id"]);
+            assert_eq!(
+                args,
+                [&*env.to_string_lossy(), "-C", "/srv", "--", "/usr/bin/id"]
+            );
         } else {
             assert!(build_command(&l, EscalationMode::Pkexec).is_err());
         }
 
-        let ok = [leaf(&["id"], LeafRunAs::Root), leaf(&["A=B"], LeafRunAs::Direct)];
+        let ok = [
+            leaf(&["id"], LeafRunAs::Root),
+            leaf(&["A=B"], LeafRunAs::Direct),
+        ];
         assert!(check_pkexec_leaves(&ok, true).is_ok());
         assert!(check_pkexec_leaves(&ok, false).unwrap_err().contains("-C"));
         let bad = [leaf(&["LD_PRELOAD=/x", "id"], LeafRunAs::Root)];
@@ -2507,7 +2590,11 @@ mod tests {
         if depth == 0 || rng.below(2) == 0 {
             if rng.below(6) == 0 {
                 return Plan::Shell {
-                    shell: if rng.below(2) == 0 { ShellProc::Sh } else { ShellProc::Bash },
+                    shell: if rng.below(2) == 0 {
+                        ShellProc::Sh
+                    } else {
+                        ShellProc::Bash
+                    },
                     script: word(rng),
                 };
             }
@@ -2667,15 +2754,23 @@ mod tests {
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert!(args.contains(&"--".to_string()), "sudo must use -- : {args:?}");
-        assert!(args.ends_with(&["/usr/sbin/sysctl".into(), "-w".into(), "vm.mmap_rnd_bits=28".into()]));
+        assert!(
+            args.contains(&"--".to_string()),
+            "sudo must use -- : {args:?}"
+        );
+        assert!(args.ends_with(&[
+            "/usr/sbin/sysctl".into(),
+            "-w".into(),
+            "vm.mmap_rnd_bits=28".into()
+        ]));
         assert!(
             !args.iter().any(|a| a == "-c"),
             "no shell -c on the privileged path: {args:?}"
         );
 
         // Named user under sudo: `sudo -u alice -- …`.
-        let c = build_command(&leaf(LeafRunAs::User("alice".into())), EscalationMode::Sudo).unwrap();
+        let c =
+            build_command(&leaf(LeafRunAs::User("alice".into())), EscalationMode::Sudo).unwrap();
         let args: Vec<String> = c
             .get_args()
             .map(|a| a.to_string_lossy().into_owned())
@@ -2730,10 +2825,15 @@ mod tests {
         assert_eq!(resolve_command("only-here-62", "/"), None);
         // …while a system binary resolves on the child's default PATH.
         let sh = resolve_command("sh", "/").expect("sh on default PATH");
-        assert!(DEFAULT_LOGIN_PATH.split(':').any(|d| sh.path.parent() == Some(Path::new(d))));
+        assert!(DEFAULT_LOGIN_PATH
+            .split(':')
+            .any(|d| sh.path.parent() == Some(Path::new(d))));
         // A relative name resolves against the leaf cwd.
         let cwd = dir.to_str().unwrap();
-        assert_eq!(resolve_command("bin/only-here-62", cwd).map(|r| r.path), Some(dir.join("bin/only-here-62")));
+        assert_eq!(
+            resolve_command("bin/only-here-62", cwd).map(|r| r.path),
+            Some(dir.join("bin/only-here-62"))
+        );
         assert_eq!(resolve_command("./bin/only-here-62", "/"), None);
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -2762,7 +2862,9 @@ mod tests {
         assert_eq!(opaque(ex(&["shellcheck", "x"])), [false]);
         assert_eq!(opaque(ex(&["true"])), [false]);
         assert_eq!(
-            opaque(Plan::Pipe { stages: vec![ex(&["echo", "x"]), ex(&["dash", "-c", "cat"])] }),
+            opaque(Plan::Pipe {
+                stages: vec![ex(&["echo", "x"]), ex(&["dash", "-c", "cat"])]
+            }),
             [false, true]
         );
 
@@ -2782,7 +2884,11 @@ mod tests {
             vec!["bash".into(), "-lc".into(), "cat".into()],
         ];
         let req = ValidatedRequest::validate(req).expect("valid");
-        let flags: Vec<bool> = plan_display(&req).unwrap().iter().map(|v| v.opaque).collect();
+        let flags: Vec<bool> = plan_display(&req)
+            .unwrap()
+            .iter()
+            .map(|v| v.opaque)
+            .collect();
         assert_eq!(flags, [false, true]);
 
         // Issue #87: a shell or an inline-code interpreter behind a wrapper is
@@ -2821,10 +2927,15 @@ mod tests {
     /// escalated leaf (the wrapper searches sudo's `secure_path`, not ours).
     #[test]
     fn plan_display_lists_wrapped_programs() {
-        let ex = Plan::Exec { argv: vec!["env".into(), "X=1".into(), "true".into()] };
+        let ex = Plan::Exec {
+            argv: vec!["env".into(), "X=1".into(), "true".into()],
+        };
         let views = plan_display(&mk_plan_req(ex.clone(), false)).unwrap();
         let p = &views[0].programs;
-        assert_eq!(p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["env", "true"]);
+        assert_eq!(
+            p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            ["env", "true"]
+        );
         assert_eq!(p[0].via, None);
         assert_eq!(p[1].via.as_deref(), Some("env"));
         assert_eq!(p[0].resolved, views[0].resolved_bin);
@@ -2833,7 +2944,10 @@ mod tests {
         assert!(!p[0].runtime_lookup && !p[1].runtime_lookup);
         assert!(!views[0].opaque);
 
-        let rooted = Plan::RunAs { who: RunAs::Root, body: Box::new(ex) };
+        let rooted = Plan::RunAs {
+            who: RunAs::Root,
+            body: Box::new(ex),
+        };
         let views = plan_display(&mk_plan_req(rooted, false)).unwrap();
         let p = &views[0].programs;
         assert!(!p[0].runtime_lookup && p[0].resolved.is_some());
@@ -2845,10 +2959,15 @@ mod tests {
     /// applet's PATH resolution is not shown.
     #[test]
     fn plan_display_shows_no_path_for_an_applet() {
-        let ex = Plan::Exec { argv: vec!["busybox".into(), "true".into()] };
+        let ex = Plan::Exec {
+            argv: vec!["busybox".into(), "true".into()],
+        };
         let views = plan_display(&mk_plan_req(ex, false)).unwrap();
         let p = &views[0].programs;
-        assert_eq!(p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(), ["busybox", "true"]);
+        assert_eq!(
+            p.iter().map(|h| h.name.as_str()).collect::<Vec<_>>(),
+            ["busybox", "true"]
+        );
         assert!(!p[0].applet && p[1].applet);
         assert!(!p[1].runtime_lookup);
         assert_eq!(p[1].resolved, None);
@@ -2867,7 +2986,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let link = dir.path().join("innocuous");
         std::os::unix::fs::symlink(&sh, &link).expect("symlink");
-        let ex = |argv: &[&str]| Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() };
+        let ex = |argv: &[&str]| Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        };
         let views = plan_display(&mk_plan_req(ex(&[link.to_str().unwrap()]), false)).unwrap();
         assert!(views[0].opaque);
         assert!(views[0].opaque_reason.as_ref().unwrap().is_shell);
@@ -2893,7 +3014,8 @@ mod tests {
         let ex = |argv: Vec<String>| Plan::Exec { argv };
         let views = plan_display(&mk_plan_req(ex(vec![link.clone(), "sh".into()]), false)).unwrap();
         assert!(views[0].opaque, "innocuous -> env running sh");
-        let views = plan_display(&mk_plan_req(ex(vec![link.clone(), "true".into()]), false)).unwrap();
+        let views =
+            plan_display(&mk_plan_req(ex(vec![link.clone(), "true".into()]), false)).unwrap();
         assert!(!views[0].opaque);
         let names: Vec<&str> = views[0].programs.iter().map(|h| h.name.as_str()).collect();
         assert_eq!(names, [link.as_str(), "true"]);
@@ -2907,7 +3029,10 @@ mod tests {
         let r = resolve_command("true", "/").expect("true on the login PATH");
         let m = std::fs::metadata(&r.path).unwrap();
         assert_eq!((r.dev, r.ino), (m.dev(), m.ino()));
-        assert_eq!(r.canonical().unwrap(), std::fs::canonicalize(&r.path).unwrap());
+        assert_eq!(
+            r.canonical().unwrap(),
+            std::fs::canonicalize(&r.path).unwrap()
+        );
         assert!(r.still_pinned());
 
         let dir = tempfile::tempdir().unwrap();
@@ -2924,14 +3049,22 @@ mod tests {
     /// argv[0] is the requested word.
     #[test]
     fn direct_binary_execs_its_descriptor() {
-        let Some(r) = resolve_command("true", "/").filter(|r| r.native) else { return };
+        let Some(r) = resolve_command("true", "/").filter(|r| r.native) else {
+            return;
+        };
         if !proc_fd_available() {
             return;
         }
         let mut l = leaf(&["true"], LeafRunAs::Direct);
         l.resolved_bin = Some(r);
         let c = build_command(&l, EscalationMode::Direct).unwrap();
-        assert!(c.get_program().to_str().unwrap().starts_with("/proc/self/fd/"), "{c:?}");
+        assert!(
+            c.get_program()
+                .to_str()
+                .unwrap()
+                .starts_with("/proc/self/fd/"),
+            "{c:?}"
+        );
     }
 
     fn hop(name: &str, argv_index: usize, resolved: Option<Resolved>) -> ProgramHop {
@@ -2953,26 +3086,47 @@ mod tests {
     #[test]
     fn spawn_argv_names_wrapped_programs_by_path() {
         let mut l = leaf(&["env", "X=1", "just", "deploy"], LeafRunAs::Direct);
-        l.programs = vec![hop("env", 0, None), hop("just", 2, Some(Resolved::fake("/opt/bin/just")))];
-        assert_eq!(spawn_argv(&l).unwrap(), ["env", "X=1", "/opt/bin/just", "deploy"]);
+        l.programs = vec![
+            hop("env", 0, None),
+            hop("just", 2, Some(Resolved::fake("/opt/bin/just"))),
+        ];
+        assert_eq!(
+            spawn_argv(&l).unwrap(),
+            ["env", "X=1", "/opt/bin/just", "deploy"]
+        );
 
         l.programs[1].applet = true;
-        assert_eq!(spawn_argv(&l).unwrap()[2], "just", "applets keep their name");
+        assert_eq!(
+            spawn_argv(&l).unwrap()[2],
+            "just",
+            "applets keep their name"
+        );
         l.programs[1].applet = false;
 
         l.programs[1].resolved = None;
         let err = spawn_argv(&l).unwrap_err();
-        assert!(err.contains("command not found: just (run by env)"), "{err}");
+        assert!(
+            err.contains("command not found: just (run by env)"),
+            "{err}"
+        );
 
         l.programs[1].resolved = Some(Resolved::fake("/opt/a=b/just"));
         assert!(spawn_argv(&l).unwrap_err().contains("'='"));
 
         // Only `env` reads a word with '=' as an assignment.
         let mut n = leaf(&["nice", "just"], LeafRunAs::Direct);
-        n.programs = vec![hop("nice", 0, None), hop("just", 1, Some(Resolved::fake("/opt/a=b/just")))];
+        n.programs = vec![
+            hop("nice", 0, None),
+            hop("just", 1, Some(Resolved::fake("/opt/a=b/just"))),
+        ];
         assert_eq!(spawn_argv(&n).unwrap(), ["nice", "/opt/a=b/just"]);
 
-        l.opaque = Some(Opacity { at: 1, reason: "r".into(), is_shell: false, names_program: true });
+        l.opaque = Some(Opacity {
+            at: 1,
+            reason: "r".into(),
+            is_shell: false,
+            names_program: true,
+        });
         assert_eq!(spawn_argv(&l).unwrap()[2], "just");
         l.programs[1].resolved = None;
         assert_eq!(spawn_argv(&l).unwrap()[2], "just");
@@ -2983,16 +3137,29 @@ mod tests {
     /// is still pinned, since `find` looks it up on PATH.
     #[test]
     fn spawn_argv_keeps_execdir_relative_programs() {
-        let mut l = leaf(&["find", ".", "-execdir", "./configure", ";"], LeafRunAs::Direct);
+        let mut l = leaf(
+            &["find", ".", "-execdir", "./configure", ";"],
+            LeafRunAs::Direct,
+        );
         l.programs = vec![hop("find", 0, None), hop("./configure", 3, None)];
         assert_eq!(spawn_argv(&l).unwrap()[3], "./configure");
 
         let mut l = leaf(&["find", ".", "-execdir", "make", ";"], LeafRunAs::Direct);
-        l.programs = vec![hop("find", 0, None), hop("make", 3, Some(Resolved::fake("/usr/bin/make")))];
+        l.programs = vec![
+            hop("find", 0, None),
+            hop("make", 3, Some(Resolved::fake("/usr/bin/make"))),
+        ];
         assert_eq!(spawn_argv(&l).unwrap()[3], "/usr/bin/make");
 
         let mut l = leaf(&["find", ".", "-exec", "./tool", ";"], LeafRunAs::Direct);
-        l.programs = vec![hop("find", 0, None), hop("./tool", 3, Some(Resolved::fake("/srv/./tool")))];
-        assert_eq!(spawn_argv(&l).unwrap()[3], "/srv/./tool", "-exec runs from the leaf cwd");
+        l.programs = vec![
+            hop("find", 0, None),
+            hop("./tool", 3, Some(Resolved::fake("/srv/./tool"))),
+        ];
+        assert_eq!(
+            spawn_argv(&l).unwrap()[3],
+            "/srv/./tool",
+            "-exec runs from the leaf cwd"
+        );
     }
 }

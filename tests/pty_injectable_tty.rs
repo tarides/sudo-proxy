@@ -27,5 +27,8 @@ fn override_puts_a_warning_line_in_every_prompt() {
         assert_eq!(h.join().unwrap().status, Status::Denied);
     }
     let log = d.daemon_log();
-    assert!(log.contains("WARNING: other processes running as you can type"), "{log}");
+    assert!(
+        log.contains("WARNING: other processes running as you can type"),
+        "{log}"
+    );
 }

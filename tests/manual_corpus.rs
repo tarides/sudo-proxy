@@ -27,13 +27,27 @@ fn ui_check_plans_parse_validate_and_render() {
 #[test]
 fn env_wrapped_corpus_cases_are_not_opaque() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/manual/log-corpus");
-    for name in ["06-check-mocked-under-tsan.json", "22-run-g6-under-tsan.json"] {
+    for name in [
+        "06-check-mocked-under-tsan.json",
+        "22-run-g6-under-tsan.json",
+    ] {
         let text = std::fs::read_to_string(dir.join(name)).unwrap();
         let plan: Plan = serde_json::from_str(&text).unwrap();
-        let req = Request::new_plan(String::new(), "test".into(), plan, HashMap::new(), String::new(), false, false);
+        let req = Request::new_plan(
+            String::new(),
+            "test".into(),
+            plan,
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
+        );
         let leaves = plan_display(&ValidatedRequest::validate(req).unwrap()).unwrap();
         assert!(leaves.iter().all(|l| !l.opaque), "{name}: an opaque stage");
-        let env = leaves.iter().find(|l| l.argv[0] == "env").unwrap_or_else(|| panic!("{name}: no env stage"));
+        let env = leaves
+            .iter()
+            .find(|l| l.argv[0] == "env")
+            .unwrap_or_else(|| panic!("{name}: no env stage"));
         let names: Vec<&str> = env.programs.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, ["env", "opam"], "{name}");
     }
@@ -47,7 +61,11 @@ fn check_dir(rel: &str) {
         .filter(|p| p.extension().is_some_and(|e| e == "json"))
         .collect();
     files.sort();
-    assert!(!files.is_empty(), "no corpus plans found in {}", dir.display());
+    assert!(
+        !files.is_empty(),
+        "no corpus plans found in {}",
+        dir.display()
+    );
 
     for path in &files {
         let name = path.file_name().unwrap().to_string_lossy();
@@ -66,11 +84,14 @@ fn check_dir(rel: &str) {
         );
         let req = ValidatedRequest::validate(req)
             .unwrap_or_else(|e| panic!("{name}: rejected by validation: {e}"));
-        let leaves = plan_display(&req)
-            .unwrap_or_else(|e| panic!("{name}: rejected before prompting: {e}"));
+        let leaves =
+            plan_display(&req).unwrap_or_else(|e| panic!("{name}: rejected before prompting: {e}"));
         assert!(!leaves.is_empty(), "{name}: no stages");
         let line = command_summary(&req);
-        assert!(!line.contains("bash -lc"), "{name}: Command line still wraps bash -lc: {line}");
+        assert!(
+            !line.contains("bash -lc"),
+            "{name}: Command line still wraps bash -lc: {line}"
+        );
         let steps = steps_shell_text(&req);
         assert_eq!(
             bash_tree(&steps),
@@ -90,5 +111,8 @@ fn bash_tree(text: &str) -> String {
         .output()
         .expect("run bash");
     assert!(out.status.success(), "bash rejected:\n{text}");
-    String::from_utf8_lossy(&out.stdout).split_whitespace().collect::<Vec<_>>().join(" ")
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }

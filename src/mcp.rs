@@ -75,8 +75,8 @@ fn build_request(params: &ExecuteParams, host: String) -> Result<Request, String
     let reason = sanitize_description(params.description.as_deref().unwrap_or_default());
 
     let mut req = if let Some(plan_json) = &params.plan {
-        let plan: protocol::Plan = serde_json::from_value(plan_json.clone())
-            .map_err(|e| format!("invalid plan: {e}"))?;
+        let plan: protocol::Plan =
+            serde_json::from_value(plan_json.clone()).map_err(|e| format!("invalid plan: {e}"))?;
         Request::new_plan(
             host,
             session,
@@ -479,7 +479,11 @@ impl McpProxy {
             }
             Ok(resp) if is_pre_action_daemon(&resp) => {
                 touch_host(&host_name, &resp.version);
-                let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+                let ver = if resp.version.is_empty() {
+                    "unknown"
+                } else {
+                    &resp.version
+                };
                 Ok(error_result(format!(
                     "{host_name} runs sudo-proxy {ver}, which predates remote stop. \
                      Press q or Ctrl+C in that daemon's terminal window to stop it."
@@ -576,13 +580,21 @@ async fn probe_one(host: Option<&str>) -> String {
     match send_request(&sock, &req, Some(CONTROL_TIMEOUT)).await {
         Ok(resp) if resp.status == Status::Ok => {
             touch_host(name, &resp.version);
-            let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+            let ver = if resp.version.is_empty() {
+                "unknown"
+            } else {
+                &resp.version
+            };
             format!("running (sudo-proxy {ver})")
         }
         Ok(resp) if is_pre_action_daemon(&resp) => {
             // The version is still learned from the error reply.
             touch_host(name, &resp.version);
-            let ver = if resp.version.is_empty() { "unknown" } else { &resp.version };
+            let ver = if resp.version.is_empty() {
+                "unknown"
+            } else {
+                &resp.version
+            };
             format!("running (sudo-proxy {ver}, predates ping)")
         }
         Ok(resp) => format!(
@@ -645,8 +657,8 @@ pub fn build_instructions(config: &HostsConfig, have_proxy_binary: bool) -> Stri
 impl ServerHandler for McpProxy {
     fn get_info(&self) -> ServerInfo {
         let config = HostsConfig::load();
-        let have_proxy_binary = find_sibling_binary("sudo-proxy").is_some()
-            || which("sudo-proxy").is_some();
+        let have_proxy_binary =
+            find_sibling_binary("sudo-proxy").is_some() || which("sudo-proxy").is_some();
         let instructions = build_instructions(&config, have_proxy_binary);
 
         ServerInfo {
@@ -697,8 +709,7 @@ impl ServerHandler for McpProxy {
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, McpError>> + Send + '_ {
         std::future::ready(if request.uri == "sudo-proxy://hosts" {
             let config = HostsConfig::load();
-            let json =
-                serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into());
+            let json = serde_json::to_string_pretty(&config).unwrap_or_else(|_| "{}".into());
             Ok(ReadResourceResult {
                 contents: vec![ResourceContents::TextResourceContents {
                     uri: "sudo-proxy://hosts".into(),
@@ -739,34 +750,38 @@ impl ServerHandler for McpProxy {
 /// A real daemon will never spontaneously emit bytes before receiving a
 /// request, so a 100 ms quiet window is a reliable positive signal.
 async fn remote_socket_ready(local_sock: &Path) -> bool {
-    let mut stream = match tokio::time::timeout(
-        Duration::from_millis(500),
-        UnixStream::connect(local_sock),
-    )
-    .await
-    {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            mcp_trace!("readiness: connect({}) failed: {e}", local_sock.display());
-            return false;
-        }
-        Err(_) => {
-            mcp_trace!("readiness: connect({}) timed out", local_sock.display());
-            return false;
-        }
-    };
+    let mut stream =
+        match tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(local_sock))
+            .await
+        {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                mcp_trace!("readiness: connect({}) failed: {e}", local_sock.display());
+                return false;
+            }
+            Err(_) => {
+                mcp_trace!("readiness: connect({}) timed out", local_sock.display());
+                return false;
+            }
+        };
 
     let mut buf = [0u8; 1];
     match tokio::time::timeout(Duration::from_millis(100), stream.read(&mut buf)).await {
         Err(_) => true, // read timeout — peer is silently waiting → ready
         Ok(Ok(0)) => {
-            mcp_trace!("readiness: peer EOF on {} → not ready", local_sock.display());
+            mcp_trace!(
+                "readiness: peer EOF on {} → not ready",
+                local_sock.display()
+            );
             false
         }
         Ok(Ok(_)) => {
             // A daemon should never speak first. Treat unexpected data
             // as "something is listening but it isn't us" — fail closed.
-            mcp_trace!("readiness: unexpected pre-request bytes on {}", local_sock.display());
+            mcp_trace!(
+                "readiness: unexpected pre-request bytes on {}",
+                local_sock.display()
+            );
             false
         }
         Ok(Err(e)) => {
@@ -792,8 +807,7 @@ async fn start_local() -> Result<CallToolResult, McpError> {
     // Find the sudo-proxy binary next to our own executable, or in PATH
     let proxy_bin = find_sibling_binary("sudo-proxy").unwrap_or_else(|| "sudo-proxy".into());
 
-    let terminal = find_terminal()
-        .map_err(|e| McpError::internal_error(e, None))?;
+    let terminal = find_terminal().map_err(|e| McpError::internal_error(e, None))?;
 
     let proxy_bin_str = proxy_bin.to_string_lossy().into_owned();
 
@@ -865,8 +879,7 @@ async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult,
     // Find the sudo-proxy binary next to our own executable, or in PATH
     let proxy_bin = find_sibling_binary("sudo-proxy").unwrap_or_else(|| "sudo-proxy".into());
 
-    let terminal = find_terminal()
-        .map_err(|e| McpError::internal_error(e, None))?;
+    let terminal = find_terminal().map_err(|e| McpError::internal_error(e, None))?;
 
     let proxy_bin_str = proxy_bin.to_string_lossy().into_owned();
 
@@ -928,7 +941,8 @@ async fn start_remote(host: &str, forward_agent: bool) -> Result<CallToolResult,
 }
 
 /// Appended to a start timeout: the most likely silent cause since 1.2.2.
-const REFUSAL_HINT: &str = "If the window says sudo-proxy refused to start because other processes \
+const REFUSAL_HINT: &str =
+    "If the window says sudo-proxy refused to start because other processes \
 can type into its terminal (GHSA-cpmp-67wf-gwmx), ask the user to start `sudo-proxy` themselves \
 in a terminal of their own (outside tmux/screen, on Wayland); this tool will then find it running. \
 Do not start it yourself with --allow-injectable-tty: that flag is for the user to decide.";
@@ -973,15 +987,11 @@ async fn send_request(
         match send_request_once(socket_path, req, read_timeout).await {
             Ok(resp) => {
                 if eof_retries > 0 {
-                    mcp_trace!(
-                        "send_request: succeeded after {eof_retries} eof-retry"
-                    );
+                    mcp_trace!("send_request: succeeded after {eof_retries} eof-retry");
                 }
                 return Ok(resp);
             }
-            Err(SendError::TransientEof)
-                if tokio::time::Instant::now() < retry_deadline =>
-            {
+            Err(SendError::TransientEof) if tokio::time::Instant::now() < retry_deadline => {
                 eof_retries += 1;
                 mcp_trace!("send_request: eof-retry #{eof_retries} (transient EOF)");
                 tokio::time::sleep(EOF_RETRY_INTERVAL).await;
@@ -1031,7 +1041,8 @@ async fn send_request_once(
     let (read, mut write) = stream.into_split();
 
     // Phase 2: Write (5s)
-    let json = serde_json::to_string(req).map_err(|e| SendError::Hard(format!("serialize: {e}")))?;
+    let json =
+        serde_json::to_string(req).map_err(|e| SendError::Hard(format!("serialize: {e}")))?;
     let write_result: Result<(), SendError> = tokio::time::timeout(PHASE_TIMEOUT, async {
         write
             .write_all(format!("{json}\n").as_bytes())
@@ -1144,8 +1155,11 @@ fn format_response(resp: Response) -> CallToolResult {
 
             if parts.is_empty() || exit_code != 0 {
                 if multi_stage {
-                    let codes: Vec<String> =
-                        resp.stages.iter().map(|s| s.exit_code.to_string()).collect();
+                    let codes: Vec<String> = resp
+                        .stages
+                        .iter()
+                        .map(|s| s.exit_code.to_string())
+                        .collect();
                     parts.push(format!("[exit codes: {}]", codes.join(", ")));
                 } else {
                     parts.push(format!("[exit code: {exit_code}]"));
@@ -1160,13 +1174,9 @@ fn format_response(resp: Response) -> CallToolResult {
             }
         }
         Status::Denied => error_result("Request denied by user.".to_string()),
-        Status::Timeout => {
-            error_result("Request timed out waiting for user approval.".to_string())
-        }
+        Status::Timeout => error_result("Request timed out waiting for user approval.".to_string()),
         Status::Error => {
-            let msg = resp
-                .message
-                .unwrap_or_else(|| "unknown error".to_string());
+            let msg = resp.message.unwrap_or_else(|| "unknown error".to_string());
             let server_ver = if resp.version.is_empty() {
                 "unknown".to_string()
             } else {
@@ -1356,4 +1366,3 @@ mod tests {
         );
     }
 }
-

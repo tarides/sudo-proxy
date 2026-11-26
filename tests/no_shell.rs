@@ -36,14 +36,19 @@ fn opaque_requests() -> Vec<Request> {
     let mut reqs = vec![
         plan_req(
             "shell-op",
-            Plan::Shell { shell: ShellProc::Sh, script: "echo hi".into() },
+            Plan::Shell {
+                shell: ShellProc::Sh,
+                script: "echo hi".into(),
+            },
         ),
         plan_req("exec-sh-c", exec(&["sh", "-c", "echo hi"])),
         plan_req("exec-abs-bash", exec(&["/bin/bash", "-lc", "echo hi"])),
         plan_req("exec-sh-no-c", exec(&["sh"])),
         plan_req(
             "pipe-stage",
-            Plan::Pipe { stages: vec![exec(&["echo", "x"]), exec(&["bash", "-c", "cat"])] },
+            Plan::Pipe {
+                stages: vec![exec(&["echo", "x"]), exec(&["bash", "-c", "cat"])],
+            },
         ),
         common::make_req("flat-pipeline", vec![vec!["sh", "-c", "echo hi"]]),
         plan_req("env-sh", exec(&["env", "sh", "-c", "true"])),
@@ -51,15 +56,32 @@ fn opaque_requests() -> Vec<Request> {
         plan_req("timeout-sh", exec(&["timeout", "5", "sh", "-c", "true"])),
         plan_req(
             "pipe-env-bash",
-            Plan::Pipe { stages: vec![exec(&["echo", "x"]), exec(&["env", "bash", "-c", "cat"])] },
+            Plan::Pipe {
+                stages: vec![exec(&["echo", "x"]), exec(&["env", "bash", "-c", "cat"])],
+            },
         ),
         // Review C2: `-printf` absorbs the first `-exec`; find runs the second.
         plan_req(
             "find-printf-exec",
-            exec(&["find", ".", "-maxdepth", "0", "-printf", "-exec", "-exec", "sh", "-c", "true", ";"]),
+            exec(&[
+                "find",
+                ".",
+                "-maxdepth",
+                "0",
+                "-printf",
+                "-exec",
+                "-exec",
+                "sh",
+                "-c",
+                "true",
+                ";",
+            ]),
         ),
         // Review C3: uutils `timeout` skips the `--` and runs `sh`.
-        plan_req("timeout-dashdash-sh", exec(&["timeout", "5", "--", "sh", "-c", "true"])),
+        plan_req(
+            "timeout-dashdash-sh",
+            exec(&["timeout", "5", "--", "sh", "-c", "true"]),
+        ),
         // Review C8: uutils `timeout` parses options after the duration.
         plan_req(
             "timeout-opt-after-operand",
@@ -69,7 +91,10 @@ fn opaque_requests() -> Vec<Request> {
         plan_req("xargs-replace", exec(&["xargs", "-I{}", "{}"])),
     ];
     if sudo_proxy::executor::resolve_command("coreutils", "/").is_some() {
-        reqs.push(plan_req("coreutils-env-sh", exec(&["coreutils", "env", "sh", "-c", "true"])));
+        reqs.push(plan_req(
+            "coreutils-env-sh",
+            exec(&["coreutils", "env", "sh", "-c", "true"]),
+        ));
     }
     reqs
 }
@@ -81,37 +106,76 @@ fn opaque_rejected_only() -> Vec<Request> {
     vec![
         plan_req("python3-c", exec(&["python3", "-c", "print(1)"])),
         // Review C1: inline code attached after a switch cluster.
-        plan_req("python3-Bc-attached", exec(&["python3", "-Bcprint(1)", "foo"])),
-        plan_req("perl-le-attached", exec(&["perl", "-le'print 1'", "/dev/null"])),
+        plan_req(
+            "python3-Bc-attached",
+            exec(&["python3", "-Bcprint(1)", "foo"]),
+        ),
+        plan_req(
+            "perl-le-attached",
+            exec(&["perl", "-le'print 1'", "/dev/null"]),
+        ),
         plan_req("sudo-true", exec(&["sudo", "true"])),
         plan_req("env-split", exec(&["env", "-S", "true"])),
         plan_req("env-path", exec(&["env", "PATH=/tmp", "true"])),
-        plan_req("env-ld-preload", exec(&["env", "LD_PRELOAD=/nonexistent.so", "true"])),
-        plan_req("find-exec-found", exec(&["find", ".", "-maxdepth", "0", "-exec", "{}", ";"])),
+        plan_req(
+            "env-ld-preload",
+            exec(&["env", "LD_PRELOAD=/nonexistent.so", "true"]),
+        ),
+        plan_req(
+            "find-exec-found",
+            exec(&["find", ".", "-maxdepth", "0", "-exec", "{}", ";"]),
+        ),
         // #91: a command string run remotely or through a shell.
         plan_req("ssh-cmd", exec(&["ssh", "h", "true"])),
         plan_req("ssh-bare", exec(&["ssh", "h"])),
         plan_req("rsync-e", exec(&["rsync", "-e", "x", "a", "b"])),
-        plan_req("rsync-path", exec(&["timeout", "5", "rsync", "--rsync-path=x", "a", "h:b"])),
+        plan_req(
+            "rsync-path",
+            exec(&["timeout", "5", "rsync", "--rsync-path=x", "a", "h:b"]),
+        ),
         plan_req("scp-S", exec(&["scp", "-S", "x", "a", "h:b"])),
-        plan_req("scp-proxycommand", exec(&["scp", "-o", "ProxyCommand=x", "a", "h:b"])),
+        plan_req(
+            "scp-proxycommand",
+            exec(&["scp", "-o", "ProxyCommand=x", "a", "h:b"]),
+        ),
         plan_req("git-c", exec(&["git", "-c", "core.sshCommand=x", "fetch"])),
         plan_req("git-ext", exec(&["git", "clone", "ext::x", "d"])),
-        plan_req("git-rebase-exec", exec(&["git", "rebase", "--exec", "x", "main"])),
-        plan_req("git-submodule-foreach", exec(&["git", "submodule", "foreach", "x"])),
-        plan_req("env-rsync-rsh", exec(&["env", "RSYNC_RSH=x", "rsync", "a", "h:b"])),
+        plan_req(
+            "git-rebase-exec",
+            exec(&["git", "rebase", "--exec", "x", "main"]),
+        ),
+        plan_req(
+            "git-submodule-foreach",
+            exec(&["git", "submodule", "foreach", "x"]),
+        ),
+        plan_req(
+            "env-rsync-rsh",
+            exec(&["env", "RSYNC_RSH=x", "rsync", "a", "h:b"]),
+        ),
         // Review of PR #117.
-        plan_req("scp-o-blank", exec(&["scp", "-o", " ProxyCommand=x", "a", "h:b"])),
+        plan_req(
+            "scp-o-blank",
+            exec(&["scp", "-o", " ProxyCommand=x", "a", "h:b"]),
+        ),
         plan_req("scp-legacy", exec(&["scp", "-O", "a", "h:b"])),
-        plan_req("scp-pkcs11", exec(&["scp", "-o", "PKCS11Provider=/x.so", "a", "h:b"])),
+        plan_req(
+            "scp-pkcs11",
+            exec(&["scp", "-o", "PKCS11Provider=/x.so", "a", "h:b"]),
+        ),
         plan_req("rsync-old-args", exec(&["rsync", "--old-args", "a", "h:b"])),
         plan_req("rsync-daemon", exec(&["rsync", "--daemon", "--config=x"])),
         plan_req("git-abbrev", exec(&["git", "fetch", "--upload=x", "o"])),
         plan_req("git-grep-O", exec(&["git", "grep", "-Ox", "p"])),
-        plan_req("git-template", exec(&["git", "clone", "--template=t", "o", "d"])),
+        plan_req(
+            "git-template",
+            exec(&["git", "clone", "--template=t", "o", "d"]),
+        ),
         plan_req("git-unlisted", exec(&["git", "remote-ext", "x", "id"])),
         plan_req("git-dashed", exec(&["git-rebase", "-x", "id", "main"])),
-        plan_req("env-git-external-diff", exec(&["env", "GIT_EXTERNAL_DIFF=x", "git", "diff"])),
+        plan_req(
+            "env-git-external-diff",
+            exec(&["env", "GIT_EXTERNAL_DIFF=x", "git", "diff"]),
+        ),
         plan_req("ssh-agent", exec(&["ssh-agent", "true"])),
     ]
 }
@@ -124,8 +188,14 @@ fn no_shell_rejects_opaque_stages_without_prompting() {
         let resp = s.send(&req);
         assert_eq!(resp.status, Status::Error, "{id}: got {resp:?}");
         let msg = resp.message.as_deref().unwrap_or("");
-        assert!(msg.contains("no_shell"), "{id}: message names the policy: {msg}");
-        assert!(msg.contains("opaque — "), "{id}: message gives the reason: {msg}");
+        assert!(
+            msg.contains("no_shell"),
+            "{id}: message names the policy: {msg}"
+        );
+        assert!(
+            msg.contains("opaque — "),
+            "{id}: message gives the reason: {msg}"
+        );
         assert!(resp.stdout.is_none(), "{id}: nothing ran");
     }
     assert_eq!(s.prompter.call_count(), 0, "rejected before any prompt");
@@ -136,7 +206,9 @@ fn no_shell_still_runs_structured_requests() {
     let s = server(true);
     let resp = s.send(&plan_req(
         "structured",
-        Plan::Pipe { stages: vec![exec(&["echo", "sh"]), exec(&["cat"])] },
+        Plan::Pipe {
+            stages: vec![exec(&["echo", "sh"]), exec(&["cat"])],
+        },
     ));
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(s.prompter.call_count(), 1, "structured request is prompted");
@@ -152,7 +224,11 @@ fn no_shell_still_runs_structured_requests() {
         let resp = s.send(&plan_req(&format!("wrapped-{i}"), plan));
         assert_eq!(resp.status, Status::Ok, "wrapped-{i}: got {resp:?}");
     }
-    assert_eq!(s.prompter.call_count(), 1 + n, "wrapped requests are prompted");
+    assert_eq!(
+        s.prompter.call_count(),
+        1 + n,
+        "wrapped requests are prompted"
+    );
 
     // git with no command-string option stays structured (#91).
     if sudo_proxy::executor::resolve_command("git", "/").is_some() {
@@ -181,7 +257,10 @@ fn no_shell_message_names_the_wrapped_program() {
     let s = server(true);
     let resp = s.send(&plan_req("msg", exec(&["env", "sh", "-c", "true"])));
     let msg = resp.message.as_deref().unwrap_or("");
-    assert!(msg.contains("stage 0 runs sh via env: opaque — resolves only the shell"), "{msg}");
+    assert!(
+        msg.contains("stage 0 runs sh via env: opaque — resolves only the shell"),
+        "{msg}"
+    );
 }
 
 #[test]
@@ -193,5 +272,9 @@ fn without_no_shell_opaque_stages_are_prompted() {
         let resp = s.send(&req);
         assert_ne!(resp.status, Status::Error, "{id}: got {resp:?}");
     }
-    assert_eq!(s.prompter.call_count(), n, "every opaque request is prompted");
+    assert_eq!(
+        s.prompter.call_count(),
+        n,
+        "every opaque request is prompted"
+    );
 }

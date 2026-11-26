@@ -141,7 +141,10 @@ fn unprivileged_runs_during_privileged_prompt() {
     });
 
     // Warmup already counted as 1; wait until A is also in the prompter.
-    assert!(wait_until(Duration::from_secs(2), || s.prompter.call_count() >= 2));
+    assert!(wait_until(Duration::from_secs(2), || s
+        .prompter
+        .call_count()
+        >= 2));
 
     let t_b = thread::spawn(move || {
         // Unprivileged + granted → bypasses the prompter entirely.
@@ -265,12 +268,7 @@ fn prompter_called_once_per_request() {
     s.send(&make_req("c-3", vec![vec!["true"]]));
 
     assert_eq!(s.prompter.call_count(), 3);
-    let ids: Vec<_> = s
-        .prompter
-        .calls()
-        .into_iter()
-        .map(|c| c.req.id)
-        .collect();
+    let ids: Vec<_> = s.prompter.calls().into_iter().map(|c| c.req.id).collect();
     assert_eq!(ids, vec!["c-1", "c-2", "c-3"]);
 }
 
@@ -416,7 +414,11 @@ fn burst_connections_above_cap_get_busy_response() {
 
     let overflow_results: Vec<_> = overflow.into_iter().map(|h| h.join().unwrap()).collect();
     for r in &overflow_results {
-        assert_eq!(r.status, Status::Error, "overflow request should be rejected");
+        assert_eq!(
+            r.status,
+            Status::Error,
+            "overflow request should be rejected"
+        );
         assert!(
             r.message.as_deref().unwrap_or("").contains("busy"),
             "expected busy message, got {:?}",
@@ -465,7 +467,8 @@ fn burst_connections_above_cap_get_busy_response() {
 #[test]
 fn in_flight_decremented_after_handler_panic() {
     let s = start_test_server(TestServerOpts::default());
-    s.prompter.set_response(|_| panic!("synthetic prompter panic"));
+    s.prompter
+        .set_response(|_| panic!("synthetic prompter panic"));
 
     let mut req = make_req("panic-1", vec![vec!["true"]]);
     req.privileged = true;
@@ -497,22 +500,16 @@ fn concurrent_same_id_one_wins() {
     let path1 = s.socket_path.clone();
     let path2 = s.socket_path.clone();
 
-    let t1 = thread::spawn(move || {
-        send_request(&path1, &make_req("race-id", vec![vec!["true"]]))
-    });
+    let t1 = thread::spawn(move || send_request(&path1, &make_req("race-id", vec![vec!["true"]])));
     // Tiny stagger so we test the post-try_insert state: t1's thread has
     // already consumed the id; t2 must observe it.
     thread::sleep(Duration::from_millis(50));
-    let t2 = thread::spawn(move || {
-        send_request(&path2, &make_req("race-id", vec![vec!["true"]]))
-    });
+    let t2 = thread::spawn(move || send_request(&path2, &make_req("race-id", vec![vec!["true"]])));
 
     let r1 = t1.join().unwrap();
     let r2 = t2.join().unwrap();
 
-    let (oks, errs): (Vec<_>, Vec<_>) = [r1, r2]
-        .into_iter()
-        .partition(|r| r.status == Status::Ok);
+    let (oks, errs): (Vec<_>, Vec<_>) = [r1, r2].into_iter().partition(|r| r.status == Status::Ok);
     assert_eq!(oks.len(), 1, "exactly one request should succeed");
     assert_eq!(errs.len(), 1, "exactly one should be rejected as duplicate");
     assert!(

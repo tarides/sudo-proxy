@@ -14,8 +14,8 @@ use sudo_proxy::server;
 
 mod common;
 use common::{
-    iso_offset, make_control_req, make_req, send_request, start_test_server, ScriptedPrompter,
-    RecordingSink, TestServerOpts,
+    iso_offset, make_control_req, make_req, send_request, start_test_server, RecordingSink,
+    ScriptedPrompter, TestServerOpts,
 };
 
 /// A stop request gets an Ok response, never reaches the prompter, and makes
@@ -59,12 +59,19 @@ fn stop_request_shuts_down_run_without_prompt() {
     }
 
     let resp = send_request(&path, &make_control_req("stop-1", Action::Stop));
-    assert_eq!(resp.status, Status::Ok, "stop must be acknowledged: {resp:?}");
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "stop must be acknowledged: {resp:?}"
+    );
 
     // The accept loop polls the flag every 50ms; run must return Ok soon.
     let start = Instant::now();
     let result = handle.join().expect("run thread must not panic");
-    assert!(result.is_ok(), "run must return cleanly after stop: {result:?}");
+    assert!(
+        result.is_ok(),
+        "run must return cleanly after stop: {result:?}"
+    );
     assert!(
         start.elapsed() < Duration::from_secs(2),
         "run took too long to notice the stop flag"
@@ -132,7 +139,11 @@ fn stop_dated_before_daemon_start_is_rejected() {
     );
 
     let resp = s.send(&make_req("still-alive-63", vec![vec!["true"]]));
-    assert_eq!(resp.status, Status::Ok, "daemon must survive a pre-start stop");
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "daemon must survive a pre-start stop"
+    );
 }
 
 /// Issue #63 repro: a stop accepted by one daemon instance is replayed,
@@ -155,12 +166,20 @@ fn captured_stop_does_not_stop_restarted_daemon() {
 
     let b = start_test_server(TestServerOpts::default());
     let resp = b.send(&captured);
-    assert_eq!(resp.status, Status::Error, "replayed stop must be refused: {resp:?}");
+    assert_eq!(
+        resp.status,
+        Status::Error,
+        "replayed stop must be refused: {resp:?}"
+    );
     assert!(
         resp.message.as_deref().unwrap_or("").contains("predates"),
         "expected start-time rejection, got: {resp:?}"
     );
 
     let resp = b.send(&make_req("restarted-alive", vec![vec!["true"]]));
-    assert_eq!(resp.status, Status::Ok, "restarted daemon must survive the replay");
+    assert_eq!(
+        resp.status,
+        Status::Ok,
+        "restarted daemon must survive the replay"
+    );
 }

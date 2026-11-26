@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::executor::PreparedRequest;
 use crate::helper::{find_trusted, HELPER_PATH};
 use crate::protocol::escape_dangerous;
-use crate::tui::{self, pipeline_join, Prompter, PromptResult};
+use crate::tui::{self, pipeline_join, PromptResult, Prompter};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -58,10 +58,17 @@ fn format_prompt_text(req: &PreparedRequest) -> String {
     lines.push(format!(
         "From: {} @ {}",
         req.session,
-        if req.host.is_empty() { "local" } else { &req.host }
+        if req.host.is_empty() {
+            "local"
+        } else {
+            &req.host
+        }
     ));
     if !req.requester.is_empty() {
-        lines.push(format!("Requester: {} (self-declared, not verified)", req.requester));
+        lines.push(format!(
+            "Requester: {} (self-declared, not verified)",
+            req.requester
+        ));
     }
     if !req.reason.is_empty() {
         lines.push(format!("Reason: {}", req.reason));
@@ -71,7 +78,9 @@ fn format_prompt_text(req: &PreparedRequest) -> String {
     // #62, #105), so the dialog names the files that will run.
     let mut seen = std::collections::HashSet::new();
     for view in req.views() {
-        let Some(cmd_name) = view.argv.first() else { continue };
+        let Some(cmd_name) = view.argv.first() else {
+            continue;
+        };
         let shown = match &view.resolved_bin {
             Some(r) => r.path.display().to_string(),
             None => "(not found in PATH)".to_string(),
@@ -150,24 +159,46 @@ mod tests {
 
     #[test]
     fn zenity_known_statuses() {
-        assert!(matches!(map_zenity_status(Some(0)), Ok(PromptResult::Approved)));
-        assert!(matches!(map_zenity_status(Some(1)), Ok(PromptResult::Denied)));
-        assert!(matches!(map_zenity_status(Some(5)), Ok(PromptResult::Timeout)));
+        assert!(matches!(
+            map_zenity_status(Some(0)),
+            Ok(PromptResult::Approved)
+        ));
+        assert!(matches!(
+            map_zenity_status(Some(1)),
+            Ok(PromptResult::Denied)
+        ));
+        assert!(matches!(
+            map_zenity_status(Some(5)),
+            Ok(PromptResult::Timeout)
+        ));
     }
 
     #[test]
     fn zenity_unknown_status_is_error() {
-        assert!(map_zenity_status(Some(127)).is_err(),
-            "unexpected exit must surface as error, not silent denial");
-        assert!(map_zenity_status(None).is_err(),
-            "signal-death must surface as error, not silent denial");
+        assert!(
+            map_zenity_status(Some(127)).is_err(),
+            "unexpected exit must surface as error, not silent denial"
+        );
+        assert!(
+            map_zenity_status(None).is_err(),
+            "signal-death must surface as error, not silent denial"
+        );
     }
 
     #[test]
     fn kdialog_known_statuses() {
-        assert!(matches!(map_kdialog_status(Some(0)), Ok(PromptResult::Approved)));
-        assert!(matches!(map_kdialog_status(Some(1)), Ok(PromptResult::Denied)));
-        assert!(matches!(map_kdialog_status(Some(2)), Ok(PromptResult::Denied)));
+        assert!(matches!(
+            map_kdialog_status(Some(0)),
+            Ok(PromptResult::Approved)
+        ));
+        assert!(matches!(
+            map_kdialog_status(Some(1)),
+            Ok(PromptResult::Denied)
+        ));
+        assert!(matches!(
+            map_kdialog_status(Some(2)),
+            Ok(PromptResult::Denied)
+        ));
     }
 
     #[test]

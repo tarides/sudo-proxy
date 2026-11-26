@@ -49,7 +49,10 @@ fn privileged_denied_is_not_executed() {
     let resp = s.send(&privileged_req("p-denied"));
 
     assert_eq!(resp.status, Status::Denied);
-    assert!(resp.stdout.is_none(), "denied request must not produce output");
+    assert!(
+        resp.stdout.is_none(),
+        "denied request must not produce output"
+    );
     // The prompter was consulted: the keypress gate was not bypassed.
     assert_eq!(s.prompter.call_count(), 1);
 }
@@ -184,7 +187,8 @@ fn grant_is_keyed_by_session() {
     assert_eq!(s.prompter.call_count(), 1, "session A is granted");
 
     // Session B: A's grant does not apply, so it is prompted.
-    s.prompter.set_response(|_| (Duration::ZERO, PromptResult::Denied));
+    s.prompter
+        .set_response(|_| (Duration::ZERO, PromptResult::Denied));
     assert_eq!(s.send(&req_in("k-b-1", "project-b")).status, Status::Denied);
     assert_eq!(s.prompter.call_count(), 2, "session B must be prompted");
 
@@ -195,5 +199,9 @@ fn grant_is_keyed_by_session() {
         .set_response(|_| (Duration::ZERO, PromptResult::ApprovedAlways));
     assert_eq!(s.send(&req_in("k-b-2", "project-b")).status, Status::Ok);
     assert_eq!(s.send(&req_in("k-b-3", "project-b")).status, Status::Ok);
-    assert_eq!(s.prompter.call_count(), 3, "session B granted by its own `a`");
+    assert_eq!(
+        s.prompter.call_count(),
+        3,
+        "session B granted by its own `a`"
+    );
 }
