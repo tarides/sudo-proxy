@@ -20,10 +20,17 @@ under Wayland).
 - Review found the dialog's `Command:` line blank for every plan request (it
   joined the empty `pipeline`). It is now the TUI's `command_summary`,
   bounded like it, with `sudo` on escalated steps. `pipeline_join` had no
-  other caller and is gone. zenity's timeout comes from `PROMPT_TIMEOUT`.
+  other caller and is gone.
+- Review also found kdialog had no timeout: an unanswered dialog waited
+  forever instead of being denied after 60 s, and `GuiPrompter` ignored the
+  timeout the server passes. Both dialogs now run under that timeout
+  (`run_dialog`, reusing `executor::wait_with_deadline`): one still open at
+  the deadline is killed and denied as a timeout; zenity also gets it,
+  rounded up, as `--timeout`. `prompt_gui` keeps its signature (60 s).
 - Assurance case: G4 stays the TUI's; G4.8/Sn4.8 claims only literal text
   for the dialogs and lists what they lack (`Steps:`, opaque marker, `->
-  target`, `Env:`, bounds on the other lines, kdialog timeout) for #98.1.
+  target`, `Env:`, bounds on the other lines) for #98.1. Sn5.2 covers the
+  dialogs' timeout.
   Threat model: a B3 row, attack-tree branch 3.9, B3 named for both.
 - `GuiPrompter` is still not used by the `sudo-proxy` binary.
 

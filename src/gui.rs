@@ -1,13 +1,14 @@
 use std::io;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use crate::executor::PreparedRequest;
+use crate::executor::{wait_with_deadline, PreparedRequest, WaitError};
 use crate::helper::{find_trusted, HELPER_PATH};
 use crate::protocol::escape_dangerous;
 use crate::tui::{self, PromptResult, Prompter};
 
+/// The timeout of [`prompt_gui`]; [`GuiPrompter`] uses the one it is given.
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct GuiPrompter;
@@ -20,33 +21,42 @@ impl Prompter for GuiPrompter {
         &self,
         req: &PreparedRequest,
         eligible: bool,
-        _timeout: Duration,
+        timeout: Duration,
     ) -> io::Result<PromptResult> {
-        prompt_gui(req, eligible)
+        prompt_gui_within(req, eligible, timeout)
     }
 }
 
-/// Show a Y/N confirmation dialog for a command request.
+/// Show a Y/N confirmation dialog for a command request, denied as
+/// [`PromptResult::Timeout`] after 60 s.
 /// Auto-detects: zenity → kdialog → TUI (/dev/tty) fallback.
 pub fn prompt_gui(req: &PreparedRequest, eligible: bool) -> io::Result<PromptResult> {
+    prompt_gui_within(req, eligible, PROMPT_TIMEOUT)
+}
+
+fn prompt_gui_within(
+    req: &PreparedRequest,
+    eligible: bool,
+    timeout: Duration,
+) -> io::Result<PromptResult> {
     let text = format_prompt_text(req);
 
     // The dialog answers the approval, so it is found like an escalator:
     // never on the daemon's own PATH (GHSA-gx9w-4f7x-2gcp).
     if let Ok(zenity) = find_trusted("zenity", false, HELPER_PATH) {
-        if let Ok(result) = prompt_zenity(&zenity, &text) {
+        if let Ok(result) = prompt_zenity(&zenity, &text, timeout) {
             return Ok(result);
         }
     }
 
     if let Ok(kdialog) = find_trusted("kdialog", false, HELPER_PATH) {
-        if let Ok(result) = prompt_kdialog(&kdialog, &text) {
+        if let Ok(result) = prompt_kdialog(&kdialog, &text, timeout) {
             return Ok(result);
         }
     }
 
     // Fall back to TUI
-    tui::prompt_tty(req, eligible, PROMPT_TIMEOUT)
+    tui::prompt_tty(req, eligible, timeout)
 }
 
 /// The dialog text, as plain text: request fields go in verbatim. Each backend
@@ -108,15 +118,38 @@ fn format_prompt_text(req: &PreparedRequest) -> String {
     lines.join("\n")
 }
 
-fn prompt_zenity(zenity: &Path, text: &str) -> io::Result<PromptResult> {
-    let status = Command::new(zenity)
-        .args(zenity_args(text))
+fn prompt_zenity(zenity: &Path, text: &str, timeout: Duration) -> io::Result<PromptResult> {
+    let mut cmd = Command::new(zenity);
+    cmd.args(zenity_args(text, timeout));
+    run_dialog(cmd, timeout, map_zenity_status)
+}
+
+/// Run a dialog and map its exit status, denying it as
+/// [`PromptResult::Timeout`] once `timeout` has passed: kdialog has no timeout
+/// of its own, and zenity's `--timeout` is not relied on alone. A dialog
+/// still open then is killed, so an unanswered request never holds its slot
+/// past the prompt timeout.
+fn run_dialog(
+    mut cmd: Command,
+    timeout: Duration,
+    map: fn(Option<i32>) -> io::Result<PromptResult>,
+) -> io::Result<PromptResult> {
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()?;
-
-    map_zenity_status(status.code())
+        .spawn()?;
+    match wait_with_deadline(&mut child, Instant::now() + timeout) {
+        Ok(status) => map(status.code()),
+        Err(e) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            match e {
+                WaitError::Timeout => Ok(PromptResult::Timeout),
+                WaitError::Io(e) => Err(e),
+            }
+        }
+    }
 }
 
 /// zenity's arguments. Without `--no-markup`, zenity parses `--text` as Pango
@@ -124,25 +157,22 @@ fn prompt_zenity(zenity: &Path, text: &str) -> io::Result<PromptResult> {
 /// could hide part of the dialog and a literal `\n` would draw a line break
 /// (a fake `Command:` line). With it, zenity calls `gtk_label_set_text` on the
 /// text as given (zenity `src/msg.c`).
-fn zenity_args(text: &str) -> Vec<String> {
+fn zenity_args(text: &str, timeout: Duration) -> Vec<String> {
+    // zenity counts whole seconds; round up so it never denies early.
+    let secs = timeout.as_secs() + u64::from(timeout.subsec_nanos() > 0);
     vec![
         "--question".into(),
         "--title=Command Request".into(),
-        format!("--timeout={}", PROMPT_TIMEOUT.as_secs()),
+        format!("--timeout={}", secs.max(1)),
         "--no-markup".into(),
         format!("--text={text}"),
     ]
 }
 
-fn prompt_kdialog(kdialog: &Path, text: &str) -> io::Result<PromptResult> {
-    let status = Command::new(kdialog)
-        .args(kdialog_args(text))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-
-    map_kdialog_status(status.code())
+fn prompt_kdialog(kdialog: &Path, text: &str, timeout: Duration) -> io::Result<PromptResult> {
+    let mut cmd = Command::new(kdialog);
+    cmd.args(kdialog_args(text));
+    run_dialog(cmd, timeout, map_kdialog_status)
 }
 
 fn kdialog_args(text: &str) -> Vec<String> {
@@ -308,7 +338,7 @@ mod tests {
 
     #[test]
     fn zenity_args_disable_markup() {
-        let args = zenity_args(HOSTILE);
+        let args = zenity_args(HOSTILE, PROMPT_TIMEOUT);
         assert!(args.iter().any(|a| a == "--no-markup"), "{args:?}");
         let texts: Vec<_> = args.iter().filter(|a| a.starts_with("--text=")).collect();
         assert_eq!(texts, [&format!("--text={HOSTILE}")]);
@@ -368,6 +398,39 @@ mod tests {
         }
     }
 
+    /// An unanswered dialog is killed and denied as `Timeout` at the deadline,
+    /// not left waiting (kdialog has no timeout of its own).
+    #[test]
+    fn run_dialog_denies_an_unanswered_dialog_at_the_deadline() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let result = run_dialog(cmd, Duration::from_millis(200), map_kdialog_status);
+        assert!(matches!(result, Ok(PromptResult::Timeout)), "{result:?}");
+        assert!(start.elapsed() < Duration::from_secs(5), "child not killed");
+    }
+
+    #[test]
+    fn run_dialog_maps_an_answer_before_the_deadline() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
+        let result = run_dialog(cmd, Duration::from_secs(30), map_kdialog_status);
+        assert!(matches!(result, Ok(PromptResult::Denied)), "{result:?}");
+    }
+
+    #[test]
+    fn zenity_timeout_rounds_up_to_whole_seconds() {
+        let timeout_arg = |d| {
+            zenity_args("t", d)
+                .into_iter()
+                .find(|a| a.starts_with("--timeout="))
+                .expect("--timeout")
+        };
+        assert_eq!(timeout_arg(Duration::from_secs(60)), "--timeout=60");
+        assert_eq!(timeout_arg(Duration::from_millis(1500)), "--timeout=2");
+        assert_eq!(timeout_arg(Duration::from_millis(1)), "--timeout=1");
+    }
+
     /// A plan request has an empty `pipeline`: the `Command:` line is the
     /// TUI's, escalated steps included, never blank.
     #[test]
@@ -407,6 +470,9 @@ mod tests {
         let zenity = find_trusted("zenity", false, HELPER_PATH).expect("trusted zenity");
         let text = hostile_text();
         eprintln!("--- expected dialog text ---\n{text}\n---");
-        eprintln!("result: {:?}", prompt_zenity(&zenity, &text));
+        eprintln!(
+            "result: {:?}",
+            prompt_zenity(&zenity, &text, PROMPT_TIMEOUT)
+        );
     }
 }
