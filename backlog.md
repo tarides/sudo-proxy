@@ -6,20 +6,6 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## After 1.3.0: daemons, NixOS check
-
-1.3.0 is out (see changelog). Left over:
-
-1. **Daemons:** the daemons on the registered hosts still run older versions
-   until they are upgraded and restarted.
-2. **NixOS:** run `--pkexec` on a real NixOS host; #107 was only reproduced
-   in a container. Did not block 1.3.0; a bug found here goes into 1.3.1.
-
-Known gaps left from the #101 review (low; pick up if they matter): the
-`PATH` check ignores ACLs on directories; a symlink reached inside a
-user-owned symlink's target is not ownership-checked;
-`tests/inherit.rs::mcp_never_passes_the_flags` greps the source.
-
 ## 1.3.1: Phase 1 of #89, and #91, #92, #95, #97, #98
 
 Order decided 2026-11-26 (option B: the security gap and small fixes first,
