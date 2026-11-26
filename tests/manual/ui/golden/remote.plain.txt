@@ -1,0 +1,19 @@
+
+━━━ Privilege Request ━━━
+From:    test @ local
+Client:  sudo-proxy 0.0.0-golden
+Time:    <TIME>
+ID:      ui-remote
+Reason:  ui golden remote
+Command: sudo env rsync -a a b; sudo timeout 5 rsync -e 'sh -c true' a b
+Resolves:
+  env      <PATH>
+  rsync    <PATH>
+  timeout  <PATH>
+  rsync    <PATH>
+Steps:
+0  sudo env rsync -a a b ;
+1  sudo timeout 5 rsync -e 'sh -c true' a b
+Execute as root? [y/N] (60s timeout, default=N) 
+→ Denied
+━━━━━━━━━━━━━━━━━━━━━━━━━

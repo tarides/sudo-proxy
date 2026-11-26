@@ -1,0 +1,6 @@
+{"op": "run-as", "as": "root", "do":
+  {"op": "seq", "steps": [
+    {"op": "exec", "argv": ["env", "rsync", "-a", "a", "b"]},
+    {"op": "exec", "argv": ["timeout", "5", "rsync", "-e", "sh -c true", "a", "b"]}
+  ]}
+}

@@ -76,8 +76,29 @@ each one:
   the code attached (`python3 -Bcprint(1)`, `perl -le'…'`), or with no script
   operand (the program is read from stdin). A script or module (`python3 x.py`, `-m pip`) is not
   flagged;
+- **command-string program** (issue #91): the prompt shows its argv
+  faithfully, but part of what runs is a string another shell interprets,
+  locally or on the remote host. Opaque, *runs a command string remotely or
+  through a shell (`<trigger>`)*, when:
+  - `ssh`/`slogin`: always, *runs a command string remotely (`<word>`)*, or
+    *runs a remote login shell* when no command is given (it reads commands
+    from stdin);
+  - `scp`/`sftp`: `-S`, `-D`, `-F` (a config file can set `ProxyCommand`),
+    `-o` with a key ending in `Command` (`ProxyCommand`, `LocalCommand`,
+    `KnownHostsCommand`, …), and `sftp -s`;
+  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`, also
+    inside a switch cluster (`-avze`) or abbreviated (`--rsync-p=`);
+  - `git`: `-c`, `--config-env`, `--exec-path` or any global option not
+    listed (many config keys run a command); an `ext::` remote;
+    `--upload-pack`, `--receive-pack`, `--exec`; `clone -u`/`-c`/`--config`,
+    `ls-remote -u`, `rebase -x`, `difftool -x`/`--extcmd`,
+    `submodule foreach`, `bisect run`, `filter-branch`.
+
+  A plain transfer (`rsync -a src dst`, `scp src host:dst`, `git fetch`,
+  `git push -u origin main`) stays transparent. The scan is coarse and fails
+  closed: a word that only looks like a trigger also flags;
 - **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
-  `unshare`, `nsenter`, `flock`, `watch`, `script`, `ssh`, `systemd-run`):
+  `unshare`, `nsenter`, `flock`, `watch`, `script`, `systemd-run`):
   always opaque, *runs a program the prompt does not unwrap*;
 - anything else is transparent.
 
@@ -87,7 +108,8 @@ uutils accepts more spellings than GNU, and those are rejected too), a missing
 option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
 changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
 assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
-`BASH_ENV`, `ENV`, `IFS`), a `find -exec` program word containing `{}`, an
+`BASH_ENV`, `ENV`, `IFS`, and the transport commands `GIT_SSH_COMMAND`,
+`GIT_SSH`, `GIT_PROXY_COMMAND`, `RSYNC_RSH`, `RSYNC_CONNECT_PROG`), a `find -exec` program word containing `{}`, an
 action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
 command (a test such as `-printf` may have absorbed the one before it), an
 `xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
@@ -111,10 +133,13 @@ not the binary of that name on PATH.
 The `no_shell` rejection gives the same reason as the prompt, e.g.
 `stage 0 runs sh via env: opaque — resolves only the shell`.
 
-Not detected (residuals): `awk`/`sed` `e`/`system()`, `git -c`/aliases,
-`make`, `opam exec`, `dune exec`, `nix-shell --run`, `docker run` and other
-open-ended command runners; interpreters running a script file; env names
-that some program interprets (`PYTHONSTARTUP`, `PERL5OPT`, …).
+Not detected (residuals): `awk`/`sed` `e`/`system()`, `make`, `opam exec`,
+`dune exec`, `nix-shell --run`, `docker run` and other open-ended command
+runners; interpreters running a script file; commands set in files the
+program reads (git hooks, aliases and `core.pager`/`core.sshCommand` in a
+repository's or the user's git config, `ProxyCommand` in `~/.ssh/config`);
+env names that some program interprets (`PYTHONSTARTUP`, `PERL5OPT`,
+`GIT_PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, …).
 
 ## Command-line
 

@@ -126,6 +126,7 @@ compare the prompt with the expected column:
 | `escalation-c-ambient-plus-boundary.json` | (privileged) | Everything light red, `whoami` bright red, operators tinted. |
 | `escalation-d-named-user.json` | `--no-privilege` | `id -un` bright yellow (`run-as` a named non-root user). |
 | `long-argument.json` | (privileged) | `Command:` shows the whole 600-char argument (under 1024); `Steps:` line 0 is cut at 160 chars and ends with `… [450 more chars hidden]` (#85). |
+| `remote.json` | (privileged) | `Resolves:` lists `env`, `rsync (run by env; looked up at run time)` with no opaque mark, `timeout`, and `rsync` marked `opaque — runs a command string remotely or through a shell (-e) (run by timeout; looked up at run time)` (#91). |
 | `wrappers.json` | (privileged) | `Resolves:` takes the block form and lists `env`, `true (run by env; looked up at run time)`, `timeout`, and `sh` marked `opaque — resolves only the shell (run by timeout; looked up at run time)`. |
 
 Run once more with `NO_COLOR=1` set in the daemon's environment: the structure

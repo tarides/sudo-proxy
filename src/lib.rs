@@ -10,6 +10,7 @@
 
 pub mod audit;
 pub mod cli;
+pub mod command_string;
 pub mod datetime;
 pub mod executor;
 pub mod gui;

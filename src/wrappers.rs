@@ -13,6 +13,10 @@
 //! - **Inline-code interpreter** ([`INTERPRETERS`]): opaque when an inline-code
 //!   flag is present, or when no script operand is present (the program is read
 //!   from stdin).
+//! - **Command-string program** (`ssh`, `scp`, `sftp`, `rsync`, `git`;
+//!   [`crate::command_string`]): opaque when an option or word makes it run a
+//!   command string remotely or through a shell (`rsync -e`, `git -c`, …);
+//!   `ssh` always.
 //! - **Runner** ([`RUNNERS`]): always opaque; the prompt does not unwrap it.
 //! - anything else: transparent; the walk stops.
 //!
@@ -28,6 +32,8 @@
 //! This module is pure: no filesystem access and no I/O. The only
 //! filesystem-dependent input, the canonical name of a hop's resolved binary,
 //! is supplied by the caller as a closure.
+
+use crate::command_string::{scan, Prog, Trigger};
 
 /// Shell interpreters. A leaf that runs one of these runs a script the prompt
 /// cannot show stage by stage (`sh -c '…'`, `bash script.sh`, a shell reading
@@ -51,7 +57,6 @@ pub const RUNNERS: &[&str] = &[
     "flock",
     "watch",
     "script",
-    "ssh",
     "systemd-run",
 ];
 
@@ -380,13 +385,19 @@ pub enum Class {
     Shell,
     Wrapper(&'static WrapperSpec),
     Interpreter(&'static InterpSpec),
+    /// A program that can run a command string remotely or through a shell
+    /// ([`crate::command_string`], issue #91).
+    CommandString(Prog),
     Runner,
     Plain,
 }
 
 impl Class {
     fn is_opaque(self) -> bool {
-        matches!(self, Class::Shell | Class::Interpreter(_) | Class::Runner)
+        matches!(
+            self,
+            Class::Shell | Class::Interpreter(_) | Class::CommandString(_) | Class::Runner
+        )
     }
 }
 
@@ -399,6 +410,8 @@ pub fn classify(name: &str) -> Class {
         Class::Wrapper(w)
     } else if let Some(i) = INTERPRETERS.iter().find(|i| i.matches(base)) {
         Class::Interpreter(i)
+    } else if let Some(p) = Prog::from_name(base) {
+        Class::CommandString(p)
     } else if RUNNERS.contains(&base) {
         Class::Runner
     } else {
@@ -458,6 +471,11 @@ pub enum OpaqueReason {
         hop: usize,
         flag: String,
     },
+    /// A command string run remotely or through a shell (#91).
+    CommandString {
+        hop: usize,
+        trigger: Trigger,
+    },
     Runner {
         hop: usize,
     },
@@ -495,6 +513,7 @@ impl OpaqueReason {
             OpaqueReason::ShellOp | OpaqueReason::TooDeep => 0,
             OpaqueReason::Shell { hop }
             | OpaqueReason::InlineCode { hop, .. }
+            | OpaqueReason::CommandString { hop, .. }
             | OpaqueReason::Runner { hop }
             | OpaqueReason::Unparsable { hop, .. }
             | OpaqueReason::PathChanged { hop }
@@ -518,6 +537,7 @@ impl OpaqueReason {
             OpaqueReason::ShellOp
                 | OpaqueReason::Shell { .. }
                 | OpaqueReason::InlineCode { .. }
+                | OpaqueReason::CommandString { .. }
                 | OpaqueReason::Runner { .. }
                 | OpaqueReason::Ambiguous { .. }
         )
@@ -537,6 +557,7 @@ impl OpaqueReason {
                 "reads its program from stdin".into()
             }
             OpaqueReason::InlineCode { flag, .. } => format!("inline code ({flag})"),
+            OpaqueReason::CommandString { trigger, .. } => trigger.describe(),
             OpaqueReason::Runner { .. } => "runs a program the prompt does not unwrap".into(),
             OpaqueReason::Unparsable { why, .. } => format!("cannot unwrap {name}: {why}"),
             OpaqueReason::PathChanged { .. } => {
@@ -646,6 +667,10 @@ pub fn unwrap(
             Class::Runner => Err(OpaqueReason::Runner { hop }),
             Class::Interpreter(spec) => match inline_code(spec, &argv[r.start + 1..r.end]) {
                 Some(flag) => Err(OpaqueReason::InlineCode { hop, flag }),
+                None => continue,
+            },
+            Class::CommandString(prog) => match scan(prog, &argv[r.start + 1..r.end]) {
+                Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
                 None => continue,
             },
             Class::Wrapper(spec) => parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches),
@@ -884,7 +909,11 @@ pub const CODE_LOADING: &[&str] = &[
     "JAVA_TOOL_OPTIONS",
     "_JAVA_OPTIONS",
     "GIT_SSH_COMMAND",
+    "GIT_SSH",
+    "GIT_PROXY_COMMAND",
     "GIT_EXEC_PATH",
+    "RSYNC_RSH",
+    "RSYNC_CONNECT_PROG",
 ];
 
 /// Whether `name` is a code-loading variable ([`CODE_LOADING`],
@@ -1514,12 +1543,58 @@ mod tests {
     fn runners_are_opaque() {
         for argv in [
             &["sudo", "true"][..],
-            &["ssh", "h", "true"],
             &["watch", "ls"],
             &["env", "sudo", "true"],
         ] {
             assert!(
                 matches!(run(argv).1, Some(OpaqueReason::Runner { .. })),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// #91: the ssh family is opaque when it carries a command string, also
+    /// behind a wrapper; a plain transfer stays transparent.
+    #[test]
+    fn command_string_programs() {
+        for (argv, hop) in [
+            (&["ssh", "h"][..], 0),
+            (&["ssh", "h", "true"], 0),
+            (&["slogin", "h"], 0),
+            (&["rsync", "-e", "x", "a", "h:b"], 0),
+            (&["scp", "-S", "x", "a", "h:b"], 0),
+            (&["sftp", "-D", "x"], 0),
+            (&["git", "-c", "core.sshCommand=x", "fetch"], 0),
+            (&["env", "rsync", "-e", "x", "a", "b"], 1),
+            (&["timeout", "5", "git", "-c", "a=b", "fetch"], 1),
+            (&["nice", "ssh", "h", "id"], 1),
+            (&["find", ".", "-exec", "rsync", "-e", "x", "{}", "d", ";"], 1),
+            (&["xargs", "git", "clone", "ext::x"], 1),
+        ] {
+            assert!(
+                matches!(run(argv).1, Some(OpaqueReason::CommandString { hop: h, .. }) if h == hop),
+                "{argv:?}: {:?}",
+                run(argv).1
+            );
+        }
+        for argv in [
+            &["rsync", "-a", "a", "h:b"][..],
+            &["scp", "a", "h:b"],
+            &["git", "fetch"],
+            &["env", "git", "status"],
+            &["timeout", "5", "rsync", "a", "b"],
+        ] {
+            assert_eq!(run(argv).1, None, "{argv:?}");
+        }
+        // The env names that pick a transport command are rejected.
+        for argv in [
+            &["env", "RSYNC_RSH=x", "rsync", "a", "h:b"][..],
+            &["env", "GIT_SSH=x", "git", "fetch"],
+            &["env", "GIT_PROXY_COMMAND=x", "git", "fetch"],
+            &["env", "RSYNC_CONNECT_PROG=x", "rsync", "h::m", "d"],
+        ] {
+            assert!(
+                matches!(run(argv).1, Some(OpaqueReason::EnvRejected { .. })),
                 "{argv:?}"
             );
         }
@@ -1560,6 +1635,12 @@ mod tests {
         // A wrapper whose binary is a plain name keeps the written class.
         let (hops, r) = with(&["env", "sh"], &[(0, "env.real")]);
         assert_eq!((hops.len(), r), (2, Some(OpaqueReason::Shell { hop: 1 })));
+        // A renamed rsync is scanned as rsync (#91).
+        assert!(matches!(
+            with(&["innocuous", "-e", "x", "a", "b"], &[(0, "rsync")]).1,
+            Some(OpaqueReason::CommandString { hop: 0, .. })
+        ));
+        assert_eq!(with(&["innocuous", "a", "b"], &[(0, "rsync")]).1, None);
     }
 
     /// The cases `prop_wrapping_preserves_opacity` excludes by construction:
@@ -1602,6 +1683,15 @@ mod tests {
             "runs a program the prompt does not unwrap"
         );
         assert_eq!(
+            d(&["ssh", "h", "true"]),
+            "runs a command string remotely (true)"
+        );
+        assert_eq!(d(&["ssh", "h"]), "runs a remote login shell");
+        assert_eq!(
+            d(&["env", "rsync", "--rsync-path=x", "a", "h:b"]),
+            "runs a command string remotely or through a shell (--rsync-path)"
+        );
+        assert_eq!(
             d(&["xargs", "-I{}", "{}"]),
             "xargs takes the program from its input ({})"
         );
@@ -1636,6 +1726,9 @@ mod tests {
         "node",
         "sudo",
         "ssh",
+        "scp",
+        "rsync",
+        "git",
         "true",
         "make",
         "opam",
@@ -1675,6 +1768,11 @@ mod tests {
         "-oL",
         "-iu",
         "--help",
+        "-e",
+        "--rsh=x",
+        "ext::x",
+        "rebase",
+        "--exec",
     ];
 
     fn token(rng: &mut Rng) -> String {
