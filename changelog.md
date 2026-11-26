@@ -3,6 +3,20 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-25 — Tagged and published v1.3.0-rc.1 (#114)
+
+- The `Unreleased` entries were gathered under `v1.3.0-rc.1`, and the version
+  was bumped in `Cargo.toml`, `Cargo.lock`, `server.json` and the mcpb
+  manifest (`.claude-plugin/plugin.json` stays at 1.2.3). Merged as #114.
+- CI's commands ran locally first: clippy, both release builds, tests,
+  `cargo audit`, `cargo deny`, `cargo publish --dry-run`. One flake seen
+  (`env_chdir_probe_clears_the_environment`, now in the backlog).
+- The tag's runs: the crate is on crates.io, the GitHub release is marked
+  pre-release with the tarball, the `.mcpb` and both `.sig`, and the MCP
+  Registry was skipped (it still lists 1.2.3).
+- Merged local branches deleted (`release/1.2.3`, `merge/release-1.2.3`,
+  `fix/helper-sticky-dirs`).
+
 ## v1.3.0-rc.1 — 2026-11-25 (pre-release)
 
 The first release candidate for 1.3.0: everything on `main` since 1.2.0,
