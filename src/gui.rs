@@ -49,6 +49,9 @@ pub fn prompt_gui(req: &PreparedRequest, eligible: bool) -> io::Result<PromptRes
     tui::prompt_tty(req, eligible, PROMPT_TIMEOUT)
 }
 
+/// The dialog text, as plain text: request fields go in verbatim. Each backend
+/// makes it literal for its own toolkit (issue #95): zenity with
+/// `--no-markup` ([`zenity_args`]), kdialog by escaping ([`kdialog_text`]).
 fn format_prompt_text(req: &PreparedRequest) -> String {
     let mut lines = Vec::new();
     // Same disclosure as the TUI header (issue #25); plain text, no styling.
@@ -102,8 +105,7 @@ fn format_prompt_text(req: &PreparedRequest) -> String {
 
 fn prompt_zenity(zenity: &Path, text: &str) -> io::Result<PromptResult> {
     let status = Command::new(zenity)
-        .args(["--question", "--title=Command Request", "--timeout=60"])
-        .arg(format!("--text={text}"))
+        .args(zenity_args(text))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -112,15 +114,67 @@ fn prompt_zenity(zenity: &Path, text: &str) -> io::Result<PromptResult> {
     map_zenity_status(status.code())
 }
 
+/// zenity's arguments. Without `--no-markup`, zenity parses `--text` as Pango
+/// markup after `g_strcompress`, so request text such as `<span size="1">`
+/// could hide part of the dialog and a literal `\n` would draw a line break
+/// (a fake `Command:` line). With it, zenity calls `gtk_label_set_text` on the
+/// text as given (zenity `src/msg.c`).
+fn zenity_args(text: &str) -> Vec<String> {
+    vec![
+        "--question".into(),
+        "--title=Command Request".into(),
+        "--timeout=60".into(),
+        "--no-markup".into(),
+        format!("--text={text}"),
+    ]
+}
+
 fn prompt_kdialog(kdialog: &Path, text: &str) -> io::Result<PromptResult> {
     let status = Command::new(kdialog)
-        .args(["--yesno", text, "--title", "Command Request"])
+        .args(kdialog_args(text))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()?;
 
     map_kdialog_status(status.code())
+}
+
+fn kdialog_args(text: &str) -> Vec<String> {
+    vec![
+        "--yesno".into(),
+        kdialog_text(text),
+        "--title".into(),
+        "Command Request".into(),
+    ]
+}
+
+const KDIALOG_OPEN: &str = "<qt><p style=\"white-space:pre-wrap\">";
+const KDIALOG_CLOSE: &str = "</p></qt>";
+
+/// The text kdialog shows exactly as `text`. kdialog has no plain-text option:
+/// it expands `\n` and `\\` in its argument (`Utils::parseString`), and its
+/// label guesses rich text from the first line, which holds request fields,
+/// with links enabled (`KMessageBox::AllowLink`). So the text is always rich
+/// text: entity-escaped, inside a `<qt>` element Qt recognises, with
+/// `white-space:pre-wrap` keeping newlines and runs of spaces; and every `\`
+/// is doubled for `parseString` to undo.
+fn kdialog_text(text: &str) -> String {
+    let mut out = String::with_capacity(KDIALOG_OPEN.len() + text.len() + KDIALOG_CLOSE.len());
+    out.push_str(KDIALOG_OPEN);
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            '\\' => out.push_str("\\\\"),
+            c => out.push(c),
+        }
+    }
+    out.push_str(KDIALOG_CLOSE);
+    out
 }
 
 /// Map zenity's documented exit codes. Anything else (signal death, crash,
@@ -205,5 +259,118 @@ mod tests {
     fn kdialog_unknown_status_is_error() {
         assert!(map_kdialog_status(Some(127)).is_err());
         assert!(map_kdialog_status(None).is_err());
+    }
+
+    /// Text that markup, rich-text guessing or backslash escapes would
+    /// misrender (issue #95): a tag on the first line (where kdialog guesses
+    /// the format), a span that hides text, a link, a lone `<` and `&`, an
+    /// entity, quotes, and a literal `\n` forging a `Command:` line.
+    const HOSTILE: &str = "From: <b>s</b> @ h&lt;\n\
+        Reason: <span size=\"1\">hidden</span> <a href='https://x'>x</a> a < b && c\\nCommand: ls \\\\ \\t\n\
+        Command: echo 'a  b'";
+
+    /// kdialog's `Utils::parseString`: `\\` → `\`, `\n` → newline, any other
+    /// escape kept as is.
+    fn kdialog_parse_string(s: &str) -> String {
+        let mut out = String::new();
+        let mut it = s.chars();
+        while let Some(c) = it.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match it.next() {
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some(o) => {
+                    out.push('\\');
+                    out.push(o);
+                }
+                None => out.push('\\'),
+            }
+        }
+        out
+    }
+
+    fn html_unescape(s: &str) -> String {
+        s.replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&amp;", "&")
+    }
+
+    #[test]
+    fn zenity_args_disable_markup() {
+        let args = zenity_args(HOSTILE);
+        assert!(args.iter().any(|a| a == "--no-markup"), "{args:?}");
+        let texts: Vec<_> = args.iter().filter(|a| a.starts_with("--text=")).collect();
+        assert_eq!(texts, [&format!("--text={HOSTILE}")]);
+    }
+
+    #[test]
+    fn kdialog_text_is_literal() {
+        let args = kdialog_args(HOSTILE);
+        assert_eq!(args[0], "--yesno");
+        let shown = &args[1];
+        let body = shown
+            .strip_prefix(KDIALOG_OPEN)
+            .and_then(|b| b.strip_suffix(KDIALOG_CLOSE))
+            .expect("wrapped in <qt>");
+        assert!(!body.contains(['<', '>', '"', '\'']), "{body}");
+        // What kdialog displays, after its own unescaping and Qt's.
+        let rendered = html_unescape(&kdialog_parse_string(body));
+        assert_eq!(rendered, HOSTILE);
+        // No escape survives `parseString` as a line break.
+        assert_eq!(
+            kdialog_parse_string(shown).lines().count(),
+            HOSTILE.lines().count()
+        );
+    }
+
+    fn hostile_request() -> crate::protocol::ValidatedRequest {
+        let mut req = crate::protocol::Request::new(
+            "h<i>&amp;".into(),
+            "<b>s</b>".into(),
+            vec![vec!["echo".into(), "a<b && c\\nCommand: ls".into()]],
+            std::collections::HashMap::new(),
+            "<span size=\"1\">hidden</span> \\n".into(),
+            false,
+            false,
+        );
+        req.requester = "<a href='x'>me</a>".into();
+        crate::protocol::ValidatedRequest::validate(req).expect("valid")
+    }
+
+    fn hostile_text() -> String {
+        let req = hostile_request();
+        format_prompt_text(
+            &crate::executor::prepare(&req, &std::collections::HashMap::new()).expect("compiles"),
+        )
+    }
+
+    #[test]
+    fn format_prompt_text_carries_fields_verbatim() {
+        let text = hostile_text();
+        for field in [
+            "<b>s</b> @ h<i>&amp;",
+            "Requester: <a href='x'>me</a>",
+            "Reason: <span size=\"1\">hidden</span> \\n",
+            "a<b && c\\nCommand: ls",
+        ] {
+            assert!(text.contains(field), "{field:?} missing from {text:?}");
+        }
+    }
+
+    /// Manual check against the real zenity (issue #95): the dialog must show
+    /// the request fields as typed, tags and `\n` included, on their own lines.
+    /// Run with `cargo test --lib gui::tests::manual_zenity -- --ignored`.
+    #[test]
+    #[ignore = "opens a zenity dialog for a human"]
+    fn manual_zenity() {
+        let zenity = find_trusted("zenity", false, HELPER_PATH).expect("trusted zenity");
+        let text = hostile_text();
+        eprintln!("--- expected dialog text ---\n{text}\n---");
+        eprintln!("result: {:?}", prompt_zenity(&zenity, &text));
     }
 }

@@ -73,6 +73,7 @@ invariant at a given boundary are omitted.
 |--------|--------|---------|-----|
 | Spoofing | ANSI / control / bidi sequences forge a benign-looking command in the prompt. | `has_dangerous_chars()` rejects control, format, separator and default-ignorable (Cc/Cf/Zl/Zp/DICP) characters on every displayed field; resolved absolute path of argv[0] shown with `-> target` on symlinks; filesystem-derived `Resolves:` paths escaped (#86). | G4.1, G4.2 / F1 |
 | Tampering | A huge argument pushes the real command and `[y/N]` off-screen. | Every prompt line and block length-bounded (`Command:`, `Steps:`, `Resolves:`, metadata) with a hidden-chars marker. | G4.3 / F3 |
+| Spoofing | A request field carries markup or a backslash escape that the GUI dialog renders: Pango `<span size="1">` hides text in zenity, a first-line tag switches kdialog to rich text with links, a literal `\n` draws a forged `Command:` line. | zenity runs with `--no-markup`; kdialog's text is entity-escaped and backslash-doubled inside a fixed `<qt>` wrapper (#95). | G4.8 |
 | DoS | Operator never answers, leaving the gate open. | 60 s timeout, default **deny**. | G5.2 |
 | Elevation | Social-engineer the human into approving. | Covered by G4; residual printable-range look-alikes accepted. | G4.4 (residual) |
 | Spoofing | A same-UID process **types the answer itself**: synthetic keystrokes into the approval terminal (`tmux send-keys`, `screen -X stuff`, kitty/wezterm remote control, Konsole D-Bus, X11 XTEST, `TIOCSTI`). The typical requester (an agent) has a same-UID shell, so A1 reaches this as A2. | The daemon refuses to start in a terminal that accepts such input (`ttyguard`: multiplexer `TERM`/`$TMUX`/`$STY`/`$ZELLIJ`, remote-control emulators, VS Code, Emacs, X11 without Wayland) unless started with `--allow-injectable-tty`, which puts a warning line in every prompt. There is deliberately no `hosts.json` equivalent, since an agent can write that file and restart the daemon through MCP. Unprivileged children run in their own session, with no controlling terminal, so they cannot `TIOCSTI` into the prompt. Legacy `TIOCSTI` is reported at startup. `sudo-proxy-mcp` scrubs the launcher's terminal variables from the window it spawns. | A1 (assumption, now checked) / GHSA-cpmp-67wf-gwmx |
@@ -157,11 +158,15 @@ A  A root command runs that the human did NOT approve
 │   ├─ 3.7 Swap the approved file between the prompt and the spawn
 │   │        [resolved once and pinned by inode → G4.2 / #105 · blocked;
 │   │         residual: contents changed in place, script / escalated exec window]
-│   └─ 3.8 The path shown differs from the path run on an inherited PATH
-│            (a decoy earlier on PATH, a wrapper's own lookup)
-│            [wrapped programs pinned by absolute path; execvp access rule;
-│             (user-writable) marker → G4.2 / #101 · mitigated; residual:
-│             shebang interpreters and programs looked up later]
+│   ├─ 3.8 The path shown differs from the path run on an inherited PATH
+│   │        (a decoy earlier on PATH, a wrapper's own lookup)
+│   │        [wrapped programs pinned by absolute path; execvp access rule;
+│   │         (user-writable) marker → G4.2 / #101 · mitigated; residual:
+│   │         shebang interpreters and programs looked up later]
+│   └─ 3.9 Markup or a `\n` escape in a field restyles the GUI dialog
+│            (Pango span hides text, kdialog rich text, forged line)
+│            [zenity --no-markup; kdialog text escaped in a <qt> wrapper
+│             → G4.8 / #95 · blocked]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
