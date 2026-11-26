@@ -9,7 +9,8 @@
 //!
 //! - **Shell** ([`SHELLS`]): opaque.
 //! - **Wrapper** ([`WRAPPERS`]): its own options are parsed and the walk
-//!   continues with the wrapped program.
+//!   continues with the wrapped program. `flock FILE -c '…'` is opaque: it
+//!   runs a command string through the shell (#92).
 //! - **Inline-code interpreter** ([`INTERPRETERS`]): opaque when an inline-code
 //!   flag is present, or when no script operand is present (the program is read
 //!   from stdin).
@@ -55,7 +56,6 @@ pub const RUNNERS: &[&str] = &[
     "chroot",
     "unshare",
     "nsenter",
-    "flock",
     "watch",
     "script",
     "systemd-run",
@@ -191,6 +191,34 @@ pub const WRAPPERS: &[WrapperSpec] = &[
         long_arg: &["kill-after", "signal"],
         positionals: 1,
         ..spec("timeout", Kind::Getopt)
+    },
+    // util-linux flock `+sexnoFuw:E:hV?` (BusyBox `+sxnu`, a subset), then
+    // the lock file; a lone operand is a file descriptor and runs no
+    // program. `-c`/`--command` is not a getopt option: right after the
+    // lock file it makes flock run `$SHELL -c` (see `parse_wrapper`).
+    // `--nonblock`, the spelling `flock --help` documents, is GNU's
+    // abbreviation of `--nonblocking`.
+    WrapperSpec {
+        short_noarg: "sexnoFuhV",
+        short_arg: "wE",
+        long_noarg: &[
+            "shared",
+            "exclusive",
+            "unlock",
+            "nonblocking",
+            "nonblock",
+            "nb",
+            "close",
+            "no-fork",
+            "verbose",
+            "fcntl",
+            "help",
+            "version",
+        ],
+        long_arg: &["timeout", "wait", "conflict-exit-code"],
+        positionals: 1,
+        no_program: &["h", "V", "help", "version"],
+        ..spec("flock", Kind::Getopt)
     },
     // util-linux ionice `+n:c:p:P:u:tVh`; `-p`/`-P`/`-u` act on existing
     // processes and run no program.
@@ -825,6 +853,11 @@ fn parse_wrapper(
                 }
                 i += 1;
             }
+            // `flock FILE -c 'cmd'` / `--command`: flock runs `$SHELL -c`.
+            if spec.name == "flock" && i < r.end && matches!(argv[i].as_str(), "-c" | "--command") {
+                let trigger = Trigger::Option(argv[i].clone());
+                return Err(OpaqueReason::CommandString { hop, trigger });
+            }
             if let Some(replace) = replace.filter(|p| i < r.end && argv[i].contains(p.as_str())) {
                 return Err(OpaqueReason::XargsReplace { hop, replace });
             }
@@ -1135,6 +1168,23 @@ mod tests {
             ),
             (&["env", "nice", "timeout", "5", "sh"], "sh"),
             (&["nohup", "sh"], "sh"),
+            (&["flock", "/tmp/l", "sh"], "sh"),
+            (&["flock", "-n", "-w", "5", "-E", "3", "/tmp/l", "sh"], "sh"),
+            (&["flock", "-sw5", "/tmp/l", "sh"], "sh"),
+            (
+                &[
+                    "flock",
+                    "--nonblock",
+                    "--timeout=1",
+                    "--wait",
+                    "2",
+                    "/tmp/l",
+                    "sh",
+                ],
+                "sh",
+            ),
+            (&["flock", "--", "/tmp/l", "sh", "-c", "x"], "sh"),
+            (&["env", "flock", "/tmp/l", "nice", "sh"], "sh"),
         ];
         for (argv, inner) in cases {
             let (hops, reason) = run(argv);
@@ -1348,6 +1398,25 @@ mod tests {
             unparsable(&["coreutils", "--coreutils-prog=env", "sh"]),
             "unsupported dispatcher option --coreutils-prog=env"
         );
+        assert_eq!(unparsable(&["flock"]), "missing operand");
+        assert_eq!(unparsable(&["flock", "-w"]), "option -w needs an argument");
+        assert_eq!(
+            unparsable(&["flock", "--non", "/tmp/l", "true"]),
+            "unsupported option --non"
+        );
+        // `-c` is positional: before the lock file getopt rejects it.
+        assert_eq!(
+            unparsable(&["flock", "-c", "id", "/tmp/l"]),
+            "unsupported option -c"
+        );
+        assert_eq!(
+            unparsable(&["flock", "/tmp/l", "--", "sh"]),
+            "-- where the program is expected"
+        );
+        assert_eq!(
+            unparsable(&["flock", "/tmp/l", "-v", "sh"]),
+            "option -v where the program is expected"
+        );
         assert_eq!(unparsable(&["find", ".", "-exec"]), "-exec with no command");
         assert_eq!(
             unparsable(&["find", ".", "-exec", "rm", "x"]),
@@ -1453,9 +1522,19 @@ mod tests {
             &["env", "LANG=C", "true"],
             &["env", "TSAN_OPTIONS=x", "true"],
             &["nohup", "--", "true"],
+            &["flock", "9"],
+            &["flock", "-u", "9"],
+            &["flock", "/tmp/l", "make"],
+            &["flock", "--help"],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }
+        assert_eq!(
+            names(&["flock", "-x", "/tmp/l", "make", "-j4"]),
+            ["flock", "make"]
+        );
+        // A lone operand is a file descriptor: no program runs.
+        assert_eq!(names(&["flock", "9"]), ["flock"]);
         assert_eq!(
             names(&["find", ".", "-name", "*.o", "-exec", "rm", "{}", "+"]),
             ["find", "rm"]
@@ -1588,6 +1667,37 @@ mod tests {
                 "{argv:?}"
             );
         }
+    }
+
+    /// #92: `flock FILE -c '…'` runs `$SHELL -c`; the flock hop carries the
+    /// command string, also behind a wrapper.
+    #[test]
+    fn flock_command_string_is_opaque() {
+        for (argv, hop, flag) in [
+            (&["flock", "/tmp/l", "-c", "id"][..], 0, "-c"),
+            (
+                &["flock", "-s", "/tmp/l", "--command", "id"],
+                0,
+                "--command",
+            ),
+            (&["timeout", "5", "flock", "/tmp/l", "-c", "id"], 1, "-c"),
+        ] {
+            assert_eq!(
+                run(argv).1,
+                Some(OpaqueReason::CommandString {
+                    hop,
+                    trigger: Trigger::Option(flag.into())
+                }),
+                "{argv:?}"
+            );
+        }
+        let (hops, reason) = run(&["flock", "/tmp/l", "-c", "id"]);
+        assert_eq!(
+            reason
+                .unwrap()
+                .describe(&hops, &v(&["flock", "/tmp/l", "-c", "id"])),
+            "runs a command string remotely or through a shell (-c)"
+        );
     }
 
     /// #91: the ssh family is opaque when it carries a command string, also
@@ -1791,6 +1901,7 @@ mod tests {
         "toybox",
         "coreutils",
         "find",
+        "flock",
         "sh",
         "bash",
         "python3",
@@ -1893,6 +2004,8 @@ mod tests {
         &["xargs"],
         &["busybox"],
         &["coreutils"],
+        &["flock", "/tmp/l"],
+        &["flock", "-n", "/tmp/l"],
     ];
 
     /// Spec clause (the issue's failure scenario): putting a well-formed wrapper

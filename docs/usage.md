@@ -65,9 +65,13 @@ each one:
 
 - **shell** (`sh`, `bash`, `dash`, `zsh`, …): opaque, *resolves only the shell*;
 - **wrapper**, unwrapped: `env`, `nice`, `nohup`, `setsid`, `stdbuf`,
-  `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`, the multi-call
+  `timeout`, `ionice`, `chrt`, `taskset`, `time`, `xargs`, `flock` (the word
+  after its options is the lock file; a lone operand is a file descriptor and
+  runs nothing), the multi-call
   dispatchers `busybox`, `toybox` and `coreutils` (their `argv[1]` is the
-  applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`);
+  applet), and `find` (the word after each `-exec`/`-execdir`/`-ok`/`-okdir`).
+  `flock FILE -c 'cmd'` (or `--command`) runs `$SHELL -c`: opaque, *runs a
+  command string remotely or through a shell (-c)* (#92);
 - **inline-code interpreter**: `python`, `perl`, `ruby`, `php` and `lua`,
   each optionally followed by digits and dots only (`python3.12`, `perl5.38.2`;
   not `python3-config` or `perlcritic`), plus `pypy`, `pypy3`, `luajit`,
@@ -126,13 +130,14 @@ each one:
   `--daemon`, `git clone --template`) is a trigger; files the program finds
   by convention are a residual (below);
 - **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
-  `unshare`, `nsenter`, `flock`, `watch`, `script`, `systemd-run`, and the
+  `unshare`, `nsenter`, `watch`, `script`, `systemd-run`, and the
   ssh-adjacent `ssh-agent`, `sshpass`, `autossh`, `mosh`, `sshfs`):
   always opaque, *runs a program the prompt does not unwrap*;
 - anything else is transparent.
 
 The unwrap **fails closed**: the stage is opaque on a wrapper option its table
-does not list (GNU long-option abbreviations such as `--sig=KILL` included;
+does not list (GNU long-option abbreviations such as `--sig=KILL` included,
+except `flock --nonblock`, the spelling its own `--help` documents;
 uutils accepts more spellings than GNU, and those are rejected too), a missing
 option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
 changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`

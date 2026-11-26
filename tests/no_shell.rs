@@ -30,7 +30,8 @@ fn plan_req(id: &str, plan: Plan) -> Request {
 
 /// Every opaque form the policy must catch: the explicit hatch, an `exec` of
 /// a shell by name and by path, a shell without `-c`, a shell nested in a
-/// pipe, a legacy flat-pipeline stage, and a shell behind a wrapper (#87).
+/// pipe, a legacy flat-pipeline stage, a shell behind a wrapper (#87), and
+/// `flock FILE -c` (#92).
 /// These are harmless: `without_no_shell_opaque_stages_are_prompted` runs them.
 fn opaque_requests() -> Vec<Request> {
     let mut reqs = vec![
@@ -95,6 +96,18 @@ fn opaque_requests() -> Vec<Request> {
             "coreutils-env-sh",
             exec(&["coreutils", "env", "sh", "-c", "true"]),
         ));
+    }
+    // #92: flock runs the program after the lock file, or `$SHELL -c` with
+    // `-c`. The lock is taken on the temp directory, which exists, so running
+    // them creates no file.
+    if sudo_proxy::executor::resolve_command("flock", "/").is_some() {
+        let lock = std::env::temp_dir();
+        let lock = lock.to_str().unwrap();
+        reqs.push(plan_req(
+            "flock-sh",
+            exec(&["flock", lock, "sh", "-c", "true"]),
+        ));
+        reqs.push(plan_req("flock-c", exec(&["flock", lock, "-c", "true"])));
     }
     reqs
 }
@@ -213,12 +226,16 @@ fn no_shell_still_runs_structured_requests() {
     assert_eq!(resp.status, Status::Ok, "got {resp:?}");
     assert_eq!(s.prompter.call_count(), 1, "structured request is prompted");
 
-    // A wrapper around a plain program stays transparent (#87).
-    let wrapped = [
+    // A wrapper around a plain program stays transparent (#87, #92).
+    let mut wrapped = vec![
         exec(&["env", "FOO=1", "true"]),
         exec(&["nice", "-n", "5", "true"]),
         exec(&["timeout", "5", "true"]),
     ];
+    if sudo_proxy::executor::resolve_command("flock", "/").is_some() {
+        let lock = std::env::temp_dir();
+        wrapped.push(exec(&["flock", lock.to_str().unwrap(), "true"]));
+    }
     let n = wrapped.len();
     for (i, plan) in wrapped.into_iter().enumerate() {
         let resp = s.send(&plan_req(&format!("wrapped-{i}"), plan));
@@ -246,6 +263,21 @@ fn no_shell_message_names_the_command_string() {
     let msg = resp.message.as_deref().unwrap_or("");
     assert!(
         msg.contains("opaque — runs a command string remotely or through a shell (-e)"),
+        "{msg}"
+    );
+
+    // #92: `flock FILE -c` names flock and its `-c`.
+    if sudo_proxy::executor::resolve_command("flock", "/").is_none() {
+        return;
+    }
+    let lock = std::env::temp_dir();
+    let resp = s.send(&plan_req(
+        "flock-c",
+        exec(&["flock", lock.to_str().unwrap(), "-c", "true"]),
+    ));
+    let msg = resp.message.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("opaque — runs a command string remotely or through a shell (-c)"),
         "{msg}"
     );
 }
