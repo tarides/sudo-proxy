@@ -32,7 +32,7 @@ transparent now are.
   (@)*); input after the script is the script's own.
 - A `find` `{}` with plain start points (no `:` or `=`, not `-…`/`+…`) that
   leads a word adding no `:`, `=` or second `{}` is tolerated in the
-  arguments of `rsync`/`git`/`scp`/`sftp` and in the words of wrappers other
+  arguments of `rsync`/`git`/`scp` and in the words of wrappers other
   than `env`, `xargs` and `find`: `find . -exec git add {} +`,
   `find . -exec rsync -a {} host:dst ;` stay transparent. Program words,
   interpreter words up to the script, and `env`'s options and assignment

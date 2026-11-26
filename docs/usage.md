@@ -176,7 +176,7 @@ word; GNU `env` runs a program named `--`.
 
 A `find` `{}` is a path that starts with one of find's start points, so it
 is tolerated where it can only be an argument: in the arguments of `rsync`,
-`git`, `scp` and `sftp`, and in the operands and option arguments of the
+`git` and `scp` (`sftp` is always opaque), and in the operands and option arguments of the
 wrappers other than `env`, `xargs` and `find` (`find . -exec git add {} +`,
 `find src -exec rsync -a {} host:dst ;`, `find . -exec flock {} make ;`).
 That needs every start point to be plain (no `:` or `=`, not starting with
