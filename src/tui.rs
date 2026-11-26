@@ -3315,6 +3315,29 @@ mod tests {
         assert!(line.contains("/sh (user-writable)"), "{out}");
     }
 
+    /// A program opaque because run-time input reaches it (#92 review) keeps
+    /// its path and the #101 marker: it is the program that runs.
+    #[test]
+    fn program_reached_by_input_is_marked_user_writable() {
+        let req = mk_req(ex(&["xargs", "timeout", "5"]), false);
+        let mut views = plan_display(&req).expect("compiles");
+        let r = views[0].programs[1]
+            .resolved
+            .as_mut()
+            .expect("timeout resolves");
+        r.user_writable = true;
+        let st = style_for(true);
+        let mut buf = Vec::new();
+        write_resolve_block(&mut buf, &views, &st).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        let line = out
+            .lines()
+            .find(|l| l.contains("opaque — "))
+            .unwrap_or_else(|| panic!("{out}"));
+        assert!(line.contains("xargs appends its input"), "{out}");
+        assert!(line.contains("/timeout (user-writable)"), "{out}");
+    }
+
     #[test]
     fn inherit_line_names_the_flag_and_code_loading_names_only() {
         let st = style_for(true);

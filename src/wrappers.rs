@@ -604,6 +604,7 @@ impl OpaqueReason {
                 | OpaqueReason::InlineCode { .. }
                 | OpaqueReason::CommandString { .. }
                 | OpaqueReason::Runner { .. }
+                | OpaqueReason::FromInput { .. }
                 | OpaqueReason::Ambiguous { .. }
         )
     }

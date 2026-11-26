@@ -42,6 +42,9 @@ transparent now are.
   request), and `!command` runs a local shell (`Trigger::SftpCommands`).
 - The other runners stay runners (identity, root, namespace or unit change;
   shell by default; ssh family); reasons in the PR.
+- A program made opaque by run-time input keeps its resolved path and the
+  #101 `(user-writable)` marker on the `Resolves:` line (`FromInput` names
+  the program; test `program_reached_by_input_is_marked_user_writable`).
 - A placeholder in a wrapper's own words reads *X takes arguments from
   run-time input*, on that wrapper's hop. Not refused: an `env` assignment's
   value (`env FILE={} ./process`) and a wrapper an option stops from running
