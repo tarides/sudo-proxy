@@ -37,6 +37,9 @@ transparent now are.
   `find . -exec rsync -a {} host:dst ;` stay transparent. Program words,
   interpreter words up to the script, and `env`'s options and assignment
   names stay strict (a start point named `LD_PRELOAD` is itself a result).
+- `sftp` is always opaque, like `ssh`: a gap from #91. It runs the commands
+  of its `-b` batch file or of stdin (a pipe or `with-stdin-from` in the
+  request), and `!command` runs a local shell (`Trigger::SftpCommands`).
 - The other runners stay runners (identity, root, namespace or unit change;
   shell by default; ssh family); reasons in the PR.
 - A placeholder in a wrapper's own words reads *X takes arguments from

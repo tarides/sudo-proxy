@@ -17,8 +17,8 @@
 //! - **Command-string program** (`ssh`, `scp`, `sftp`, `rsync`, `git`, a
 //!   dashed `git-<command>`; [`crate::command_string`]): opaque when an option
 //!   or word makes it run a command string remotely or through a shell
-//!   (`rsync -e`, `git -c`, …), or when the scan does not parse it; `ssh` and
-//!   `git-<command>` always.
+//!   (`rsync -e`, `git -c`, …), or when the scan does not parse it; `ssh`,
+//!   `sftp` and `git-<command>` always.
 //! - **Runner** ([`RUNNERS`]): always opaque; the prompt does not unwrap it.
 //! - anything else: transparent; the walk stops.
 //!

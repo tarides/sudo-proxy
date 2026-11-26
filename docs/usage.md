@@ -94,7 +94,10 @@ each one:
     `SecurityKeyProvider`: a library loaded into the ssh child), or
     `XAuthLocation`, read as ssh reads it (leading blanks or `=` skipped,
     quotes stripped, any case), `scp -O` (the legacy protocol passes the
-    remote path through the remote shell), and `sftp -s`;
+    remote path through the remote shell), and `sftp -s`; `sftp` with none
+    of these is still flagged, *runs sftp commands from a batch file or
+    stdin (! runs a local shell)*: its commands come from `-b FILE` or from
+    stdin, which a request can supply, and `!command` runs a local shell;
   - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`,
     `--old-args` (the remote path reaches the remote shell unescaped),
     `--daemon` and `--dparam` (a daemon runs the `exec` commands of its
