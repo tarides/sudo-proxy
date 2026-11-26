@@ -33,15 +33,6 @@ pub fn shell_join(argv: &[String]) -> String {
         .join(" ")
 }
 
-/// Join a pipeline of stages into a shell-like display string with ` | ` separators.
-pub fn pipeline_join(pipeline: &[Vec<String>]) -> String {
-    pipeline
-        .iter()
-        .map(|argv| shell_join(argv))
-        .collect::<Vec<_>>()
-        .join(" | ")
-}
-
 /// A one-line, copy-paste-executable shell rendering of a request's command:
 /// the `Steps:` block flattened onto one line. Both are printed from the same
 /// [`Lay`] tree, so they carry exactly the same parentheses and must parse, as

@@ -3,6 +3,30 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-26 — GUI dialogs show request text literally (#95, PR #121)
+
+Step 3 of the 1.3.1 plan. Checked against the upstream sources and live,
+before and after (zenity 4.2.1; kdialog from Debian trixie in rootless podman
+under Wayland).
+
+- zenity runs with `--no-markup`. It used to parse `--text` as Pango markup
+  after `g_strcompress`: `<span size="1">` hid text, a literal `\n` drew a
+  forged `Command:` line, a lone `&` or `<` blanked the dialog.
+- kdialog (not in the issue) has no plain-text option: it always expands
+  `\n`, and guesses rich text, links enabled, from the first line. Its text
+  is entity-escaped, `\` doubled, inside `<qt><p style="white-space:pre-wrap">`.
+  An over-wide line is shortened with `…` (`KSqueezedTextLabel`); the markup
+  survives that (checked live).
+- Review found the dialog's `Command:` line blank for every plan request (it
+  joined the empty `pipeline`). It is now the TUI's `command_summary`,
+  bounded like it, with `sudo` on escalated steps. `pipeline_join` had no
+  other caller and is gone. zenity's timeout comes from `PROMPT_TIMEOUT`.
+- Assurance case: G4 stays the TUI's; G4.8/Sn4.8 claims only literal text
+  for the dialogs and lists what they lack (`Steps:`, opaque marker, `->
+  target`, `Env:`, bounds on the other lines, kdialog timeout) for #98.1.
+  Threat model: a B3 row, attack-tree branch 3.9, B3 named for both.
+- `GuiPrompter` is still not used by the `sudo-proxy` binary.
+
 ## 2026-11-26 — flock is unwrapped as a fixed-shape wrapper (#92, PR #120)
 
 Step 2 of the 1.3.1 plan. **Behaviour change:** `flock LOCK PROG …` is no

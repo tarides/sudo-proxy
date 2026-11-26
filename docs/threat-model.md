@@ -33,7 +33,7 @@ execution:
 |----|----------|-------------------|
 | **B1** | model → `sudo-proxy-mcp` (MCP stdio) | A1 |
 | **B2** | MCP server / direct client → Unix socket → daemon | A2 |
-| **B3** | daemon → `/dev/tty` → human (display + keypress) | A1 (content), A2 |
+| **B3** | daemon → `/dev/tty` or GUI dialog → human (display + keypress) | A1 (content), A2 |
 | **B4** | daemon → `sudo` / `pkexec` / exec → root | A1 |
 | **B5** | local daemon → SSH tunnel → remote daemon | A3 |
 | **B6** | daemon ↔ `hosts.json` / policy persistence | A2 |
@@ -67,7 +67,7 @@ invariant at a given boundary are omitted.
 | DoS | Replay of a captured request; connection flooding. | UUID dedup; in-flight cap. | G2.1, G6.4 |
 | Elevation | Bypass the MCP layer's `validate_host`. | Daemon-side controls do not depend on it. | G6.2 |
 
-### B3 — daemon → TTY → human (A1 content, A2)
+### B3 — daemon → TTY or GUI dialog → human (A1 content, A2)
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|

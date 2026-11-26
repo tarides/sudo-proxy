@@ -6,7 +6,7 @@ use std::time::Duration;
 use crate::executor::PreparedRequest;
 use crate::helper::{find_trusted, HELPER_PATH};
 use crate::protocol::escape_dangerous;
-use crate::tui::{self, pipeline_join, PromptResult, Prompter};
+use crate::tui::{self, PromptResult, Prompter};
 
 const PROMPT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -76,7 +76,12 @@ fn format_prompt_text(req: &PreparedRequest) -> String {
     if !req.reason.is_empty() {
         lines.push(format!("Reason: {}", req.reason));
     }
-    lines.push(format!("Command: {}", pipeline_join(&req.pipeline)));
+    // The TUI's `Command:` text: a plan request has no `pipeline`, and an
+    // escalated step shows as `sudo …`.
+    lines.push(format!(
+        "Command: {}",
+        tui::truncate_for_display(&tui::command_summary(req.request()))
+    ));
     // Each stage's resolution is the pinned one the executor spawns (issues
     // #62, #105), so the dialog names the files that will run.
     let mut seen = std::collections::HashSet::new();
@@ -123,7 +128,7 @@ fn zenity_args(text: &str) -> Vec<String> {
     vec![
         "--question".into(),
         "--title=Command Request".into(),
-        "--timeout=60".into(),
+        format!("--timeout={}", PROMPT_TIMEOUT.as_secs()),
         "--no-markup".into(),
         format!("--text={text}"),
     ]
@@ -154,8 +159,9 @@ const KDIALOG_CLOSE: &str = "</p></qt>";
 
 /// The text kdialog shows exactly as `text`. kdialog has no plain-text option:
 /// it expands `\n` and `\\` in its argument (`Utils::parseString`), and its
-/// label guesses rich text from the first line, which holds request fields,
-/// with links enabled (`KMessageBox::AllowLink`). So the text is always rich
+/// label guesses rich text from the first line, with links enabled
+/// (`KMessageBox::AllowLink`); that line holds `session` and `host` unless
+/// the `[AI-AGENT REQUEST]` header precedes it. So the text is always rich
 /// text: entity-escaped, inside a `<qt>` element Qt recognises, with
 /// `white-space:pre-wrap` keeping newlines and runs of spaces; and every `\`
 /// is doubled for `parseString` to undo.
@@ -360,6 +366,36 @@ mod tests {
         ] {
             assert!(text.contains(field), "{field:?} missing from {text:?}");
         }
+    }
+
+    /// A plan request has an empty `pipeline`: the `Command:` line is the
+    /// TUI's, escalated steps included, never blank.
+    #[test]
+    fn format_prompt_text_shows_plan_commands() {
+        use crate::protocol::{Plan, Request, ValidatedRequest};
+        let exec = |argv: &[&str]| Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        };
+        let req = ValidatedRequest::validate(Request::new_plan(
+            String::new(),
+            "t".into(),
+            Plan::Run {
+                steps: vec![exec(&["id", "-un"]), exec(&["id", "-u"])],
+            },
+            std::collections::HashMap::new(),
+            String::new(),
+            true,
+            false,
+        ))
+        .expect("valid");
+        let prepared =
+            crate::executor::prepare(&req, &std::collections::HashMap::new()).expect("compiles");
+        let text = format_prompt_text(&prepared);
+        assert!(
+            text.lines()
+                .any(|l| l == "Command: sudo id -un && sudo id -u"),
+            "{text:?}"
+        );
     }
 
     /// Manual check against the real zenity (issue #95): the dialog must show

@@ -184,6 +184,7 @@ The dialogs show the request as plain text (#95). zenity gets `--no-markup`;
 without it, zenity parses the text as Pango markup after expanding backslash
 escapes, so a `<span size="1">` in a field could hide text and a literal `\n`
 could draw a forged `Command:` line. kdialog has no plain-text option: it
-always expands `\n`, and guesses rich text (with links enabled) from a first
-line that holds `session` and `host`. Its text is therefore entity-escaped,
+always expands `\n`, and guesses rich text (with links enabled) from the first
+line, which holds `session` and `host` unless the `[AI-AGENT REQUEST]` header
+precedes it. Its text is therefore entity-escaped,
 with every `\` doubled, inside a `<qt>` element with `white-space:pre-wrap`.
