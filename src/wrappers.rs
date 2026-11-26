@@ -13,10 +13,11 @@
 //! - **Inline-code interpreter** ([`INTERPRETERS`]): opaque when an inline-code
 //!   flag is present, or when no script operand is present (the program is read
 //!   from stdin).
-//! - **Command-string program** (`ssh`, `scp`, `sftp`, `rsync`, `git`;
-//!   [`crate::command_string`]): opaque when an option or word makes it run a
-//!   command string remotely or through a shell (`rsync -e`, `git -c`, …);
-//!   `ssh` always.
+//! - **Command-string program** (`ssh`, `scp`, `sftp`, `rsync`, `git`, a
+//!   dashed `git-<command>`; [`crate::command_string`]): opaque when an option
+//!   or word makes it run a command string remotely or through a shell
+//!   (`rsync -e`, `git -c`, …), or when the scan does not parse it; `ssh` and
+//!   `git-<command>` always.
 //! - **Runner** ([`RUNNERS`]): always opaque; the prompt does not unwrap it.
 //! - anything else: transparent; the walk stops.
 //!
@@ -58,6 +59,11 @@ pub const RUNNERS: &[&str] = &[
     "watch",
     "script",
     "systemd-run",
+    "ssh-agent",
+    "sshpass",
+    "autossh",
+    "mosh",
+    "sshfs",
 ];
 
 /// Multi-call dispatchers: they pick the applet from `argv[0]` (or, when called
@@ -421,11 +427,23 @@ pub fn classify(name: &str) -> Class {
 
 /// Combine the class of the name as written with the class of the canonical
 /// basename of its resolved binary (`None` when unresolved or a multi-call
-/// dispatcher). `Err(())` means two different wrappers: ambiguous.
+/// dispatcher). `Err(())` means ambiguous: two different wrappers, or a
+/// wrapper on one side and a program that is opaque only with some arguments
+/// (an interpreter, a command-string program) on the other, since each side
+/// reads the arguments differently.
 fn combine(written: Class, canonical: Option<Class>) -> Result<Class, ()> {
     let Some(canonical) = canonical else {
         return Ok(written);
     };
+    let conditional = |c: Class| matches!(c, Class::Interpreter(_) | Class::CommandString(_));
+    match (written, canonical) {
+        // A dashed git program is a builtin run under its own name: always
+        // opaque, whatever its binary resolves to (`git`, on most layouts).
+        (Class::CommandString(Prog::GitDashed), _) => return Ok(written),
+        (w, Class::Wrapper(_)) if conditional(w) => return Err(()),
+        (Class::Wrapper(_), c) if conditional(c) => return Err(()),
+        _ => {}
+    }
     if canonical.is_opaque() {
         return Ok(canonical);
     }
@@ -914,6 +932,9 @@ pub const CODE_LOADING: &[&str] = &[
     "GIT_EXEC_PATH",
     "RSYNC_RSH",
     "RSYNC_CONNECT_PROG",
+    "RSYNC_OLD_ARGS",
+    "GIT_TEMPLATE_DIR",
+    "GIT_EXTERNAL_DIFF",
 ];
 
 /// Whether `name` is a code-loading variable ([`CODE_LOADING`],
@@ -1545,6 +1566,11 @@ mod tests {
             &["sudo", "true"][..],
             &["watch", "ls"],
             &["env", "sudo", "true"],
+            &["ssh-agent", "bash", "-c", "id"],
+            &["sshpass", "-p", "x", "ssh", "h"],
+            &["autossh", "h"],
+            &["mosh", "h"],
+            &["sshfs", "-o", "ssh_command=x", "h:", "m"],
         ] {
             assert!(
                 matches!(run(argv).1, Some(OpaqueReason::Runner { .. })),
@@ -1568,8 +1594,15 @@ mod tests {
             (&["env", "rsync", "-e", "x", "a", "b"], 1),
             (&["timeout", "5", "git", "-c", "a=b", "fetch"], 1),
             (&["nice", "ssh", "h", "id"], 1),
-            (&["find", ".", "-exec", "rsync", "-e", "x", "{}", "d", ";"], 1),
+            (
+                &["find", ".", "-exec", "rsync", "-e", "x", "{}", "d", ";"],
+                1,
+            ),
             (&["xargs", "git", "clone", "ext::x"], 1),
+            (&["scp", "-o", " ProxyCommand=x", "a", "h:b"], 0),
+            (&["git", "grep", "-Ox", "p"], 0),
+            (&["/usr/lib/git-core/git-rebase", "-x", "id", "main"], 0),
+            (&["env", "git-upload-pack", "."], 1),
         ] {
             assert!(
                 matches!(run(argv).1, Some(OpaqueReason::CommandString { hop: h, .. }) if h == hop),
@@ -1592,6 +1625,9 @@ mod tests {
             &["env", "GIT_SSH=x", "git", "fetch"],
             &["env", "GIT_PROXY_COMMAND=x", "git", "fetch"],
             &["env", "RSYNC_CONNECT_PROG=x", "rsync", "h::m", "d"],
+            &["env", "RSYNC_OLD_ARGS=1", "rsync", "a", "h:b"],
+            &["env", "GIT_TEMPLATE_DIR=/t", "git", "clone", "o", "d"],
+            &["env", "GIT_EXTERNAL_DIFF=x", "git", "diff"],
         ] {
             assert!(
                 matches!(run(argv).1, Some(OpaqueReason::EnvRejected { .. })),
@@ -1641,6 +1677,31 @@ mod tests {
             Some(OpaqueReason::CommandString { hop: 0, .. })
         ));
         assert_eq!(with(&["innocuous", "a", "b"], &[(0, "rsync")]).1, None);
+        // A conditionally-opaque name whose binary is a wrapper, or the
+        // reverse, is ambiguous: each reads the arguments differently.
+        for (argv, canon) in [
+            (&["git", "sh", "-c", "id"][..], "env"),
+            (&["python3", "bash", "x.sh"], "env"),
+            (&["env", "a", "h:b"], "rsync"),
+            (&["timeout", "5", "x.py"], "python3"),
+        ] {
+            assert_eq!(
+                with(argv, &[(0, canon)]).1,
+                Some(OpaqueReason::Ambiguous {
+                    hop: 0,
+                    canonical: canon.into()
+                }),
+                "{argv:?} -> {canon}"
+            );
+        }
+        // A dashed git program stays opaque although it resolves to `git`.
+        assert!(matches!(
+            with(&["git-rebase", "status", "-x", "id"], &[(0, "git")]).1,
+            Some(OpaqueReason::CommandString {
+                hop: 0,
+                trigger: Trigger::Unparsed(_)
+            })
+        ));
     }
 
     /// The cases `prop_wrapping_preserves_opacity` excludes by construction:

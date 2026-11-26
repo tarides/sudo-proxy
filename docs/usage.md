@@ -82,23 +82,52 @@ each one:
   through a shell (`<trigger>`)*, when:
   - `ssh`/`slogin`: always, *runs a command string remotely (`<word>`)*, or
     *runs a remote login shell* when no command is given (it reads commands
-    from stdin);
+    from stdin); *may run a command string remotely (`-N`)* with `-N`, `-O`,
+    `-G` or `-V`;
   - `scp`/`sftp`: `-S`, `-D`, `-F` (a config file can set `ProxyCommand`),
     `-o` with a key ending in `Command` (`ProxyCommand`, `LocalCommand`,
-    `KnownHostsCommand`, …), and `sftp -s`;
-  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`, also
-    inside a switch cluster (`-avze`) or abbreviated (`--rsync-p=`);
-  - `git`: `-c`, `--config-env`, `--exec-path` or any global option not
-    listed (many config keys run a command); an `ext::` remote;
-    `--upload-pack`, `--receive-pack`, `--exec`; `clone -u`/`-c`/`--config`,
-    `ls-remote -u`, `rebase -x`, `difftool -x`/`--extcmd`,
-    `submodule foreach`, `bisect run`, `filter-branch`.
+    `KnownHostsCommand`, …) or `Provider` (`PKCS11Provider`,
+    `SecurityKeyProvider`: a library loaded into the ssh child), or
+    `XAuthLocation`, read as ssh reads it (leading blanks or `=` skipped,
+    quotes stripped, any case), `scp -O` (the legacy protocol passes the
+    remote path through the remote shell), and `sftp -s`;
+  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`,
+    `--old-args` (the remote path reaches the remote shell unescaped),
+    `--daemon` and `--dparam` (a daemon runs the `exec` commands of its
+    config), also inside a switch cluster (`-avze`); any `--`-prefix of at
+    least three letters of those names (`--rsync-p=`) is flagged as a
+    precaution, although rsync itself accepts no abbreviation;
+  - `git`: `-c`, `--config-env`, `--exec-path` (many config keys run a
+    command); a remote run by a helper (`ext::`, any other `<name>::`, or a
+    `<scheme>://` other than `ssh`, `git`, `file`, `http(s)`, `ftp(s)`:
+    git runs `git-remote-<name>` from PATH); `--upload-pack`,
+    `--receive-pack`, `--exec`; `clone -u`/`-c`/`--config`/`--template`,
+    `init --template` (the template's hooks run), `ls-remote -u`,
+    `rebase -x`, `-s`/`--strategy` of `rebase`, `merge` and `pull` (git runs
+    `git-merge-<strategy>` from PATH), `grep -O`/`--open-files-in-pager`.
+    Long options match abbreviated (`--upl=`), as git accepts them. Only
+    these subcommands are scanned: `add`, `blame`, `branch`, `cat-file`,
+    `checkout`, `clone`, `commit`, `describe`, `diff`, `fetch`, `grep`,
+    `init`, `log`, `ls-files`, `ls-remote`, `ls-tree`, `merge`, `mv`,
+    `pull`, `push`, `rebase`, `reflog`, `remote`, `reset`, `restore`,
+    `rev-list`, `rev-parse`, `rm`, `shortlog`, `show`, `show-ref`, `stash`,
+    `status`, `switch`, `tag`, `version`, `worktree`. Any other subcommand
+    (`submodule foreach`, `bisect run`, `filter-branch`, `difftool`,
+    `mergetool`, `remote-ext`, `send-email`, `daemon`, `instaweb`, an alias,
+    …), and any global option not listed, is opaque, *not parsed; may run a
+    command string (`<word>`)*;
+  - a dashed git program (`/usr/lib/git-core/git-rebase`,
+    `git-upload-pack`): always, *not parsed; may run a command string*.
 
   A plain transfer (`rsync -a src dst`, `scp src host:dst`, `git fetch`,
   `git push -u origin main`) stays transparent. The scan is coarse and fails
-  closed: a word that only looks like a trigger also flags;
+  closed: a word that only looks like a trigger also flags. A file *named on
+  the command line* that carries commands (`scp -F`, `rsync --config` under
+  `--daemon`, `git clone --template`) is a trigger; files the program finds
+  by convention are a residual (below);
 - **runner** (`sudo`, `doas`, `su`, `runuser`, `pkexec`, `setpriv`, `chroot`,
-  `unshare`, `nsenter`, `flock`, `watch`, `script`, `systemd-run`):
+  `unshare`, `nsenter`, `flock`, `watch`, `script`, `systemd-run`, and the
+  ssh-adjacent `ssh-agent`, `sshpass`, `autossh`, `mosh`, `sshfs`):
   always opaque, *runs a program the prompt does not unwrap*;
 - anything else is transparent.
 
@@ -109,12 +138,16 @@ option argument or operand, `env -S`, `env -a`/`--argv0`, an `env` that
 changes the lookup of its program (`PATH=…`, `-u PATH`, `-i`, `-`), an `env`
 assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
 `BASH_ENV`, `ENV`, `IFS`, and the transport commands `GIT_SSH_COMMAND`,
-`GIT_SSH`, `GIT_PROXY_COMMAND`, `RSYNC_RSH`, `RSYNC_CONNECT_PROG`), a `find -exec` program word containing `{}`, an
+`GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
+`RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `find -exec`
+program word containing `{}`, an
 action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
 command (a test such as `-printf` may have absorbed the one before it), an
 `xargs -I R`/`-i`/`--replace` whose replacement string appears in the program
 word, a dispatcher called with an option (`busybox --list`), a name whose
-resolved binary is a different wrapper, and a chain deeper than 8. A `--`
+resolved binary is a different wrapper, a wrapper name whose binary is an
+interpreter or a command-string program (or the reverse), and a chain deeper
+than 8. A `--`
 ends a wrapper's options only before its operands and assignments; a `--` or
 any other option word where the program is expected (`timeout 5 -- sh`,
 `timeout 5 -v sh`, `env X=1 -- true`) fails closed. What runs there differs
@@ -135,11 +168,14 @@ The `no_shell` rejection gives the same reason as the prompt, e.g.
 
 Not detected (residuals): `awk`/`sed` `e`/`system()`, `make`, `opam exec`,
 `dune exec`, `nix-shell --run`, `docker run` and other open-ended command
-runners; interpreters running a script file; commands set in files the
-program reads (git hooks, aliases and `core.pager`/`core.sshCommand` in a
-repository's or the user's git config, `ProxyCommand` in `~/.ssh/config`);
-env names that some program interprets (`PYTHONSTARTUP`, `PERL5OPT`,
-`GIT_PAGER`, `GIT_EDITOR`, `GIT_ASKPASS`, …).
+runners; interpreters running a script file; commands set in files a
+program finds by convention (git hooks, `core.pager`/`core.sshCommand`/
+`diff.external` in a repository's or the user's git config, `ProxyCommand`
+in `~/.ssh/config`, popt aliases in `~/.popt` or `/etc/popt` that rsync
+reads); programs a scanned git subcommand looks up on PATH (a pager under
+`git -p`, `man` under `--help`, `gpg`, `ssh`); env names that some program
+interprets (`PYTHONSTARTUP`, `PERL5OPT`, `GIT_PAGER`, `GIT_EDITOR`,
+`GIT_ASKPASS`, `SSH_ASKPASS`, …).
 
 ## Command-line
 

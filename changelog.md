@@ -12,31 +12,52 @@ refused under `no_shell`.
   as `Class::CommandString`, so it also applies behind wrappers and to
   renamed binaries. The scans are coarse and fail closed:
   - `ssh`/`slogin`: always opaque, *runs a command string remotely
-    (<word>)* or *runs a remote login shell*;
-  - `scp`/`sftp`: `-S`, `-D`, `-F`, `-o …Command`, `sftp -s`;
-  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`, also
-    clustered and abbreviated;
-  - `git`: `-c`, `--config-env`, `--exec-path` and unknown global options,
-    `ext::`, `--upload-pack`/`--receive-pack`/`--exec`, `clone -u/-c`,
-    `ls-remote -u`, `rebase -x`, `difftool -x`, `submodule foreach`,
-    `bisect run`, `filter-branch`.
+    (<word>)*, *runs a remote login shell*, or *may run a command string
+    remotely (-N)*;
+  - `scp`/`sftp`: `-S`, `-D`, `-F`, `scp -O`, `sftp -s`, and `-o` with a key
+    ending in `Command` or `Provider`, or `XAuthLocation`, tokenized as ssh
+    does (leading blanks or `=`, quotes);
+  - `rsync`: `-e`/`--rsh`, `--rsync-path`, `-M`/`--remote-option`,
+    `--old-args`, `--daemon`, `--dparam`, also clustered (and any prefix, as
+    a precaution: rsync accepts no abbreviation);
+  - `git`: an allowlist of subcommands, each scanned; any other subcommand,
+    an alias and a dashed `git-<command>` are opaque. Within it: `-c`,
+    `--config-env`, `--exec-path` and unknown global options, remote
+    helpers (`ext::`, `<name>::`, unknown `<scheme>://`),
+    `--upload-pack`/`--receive-pack`/`--exec`, `clone -u/-c/--config`,
+    `clone`/`init --template`, `ls-remote -u`, `rebase -x`,
+    `rebase`/`merge`/`pull -s`, `grep -O`; long options match abbreviated.
+  - Options the scan does not parse read *not parsed; may run a command
+    string (<word>)*, instead of claiming a command string.
 
-  Plain transfers stay structured. `ssh` left `RUNNERS`.
-- `GIT_SSH`, `GIT_PROXY_COMMAND`, `RSYNC_RSH` and `RSYNC_CONNECT_PROG` joined
+  Plain transfers stay structured. `ssh` left `RUNNERS`; `ssh-agent`,
+  `sshpass`, `autossh`, `mosh` and `sshfs` joined it.
+- `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
+  `RSYNC_RSH`, `RSYNC_CONNECT_PROG` and `RSYNC_OLD_ARGS` joined
   `CODE_LOADING`.
+- A wrapper name whose binary is an interpreter or a command-string program,
+  or the reverse, is ambiguous (it was classified by the written name, so
+  `git` resolving to `env` ran `sh -c` as structured).
+- Review fixes (Fable review of PR #117): the `-o` tokenizer bypass, `scp
+  -O`, `-o …Provider`, rsync `--old-args`/`--daemon`, git abbreviations,
+  `grep -O`, `--template`, `remote-ext`, `GIT_EXTERNAL_DIFF`, dashed git
+  programs, and the misleading reason text.
 - Tests:
   - unit tables and `scan_is_total`;
   - the ssh family added to the opacity properties;
-  - 11 rejected forms in `tests/no_shell.rs`;
+  - 23 rejected forms in `tests/no_shell.rs`;
   - `rsync -e` in `tests/pty_no_shell.rs`;
   - the new `remote` UI golden.
 - Docs: `usage.md`, `threat-model.md`, G4.7/Sn4.7 (still partial),
   `testing.md`.
 - Residuals, documented:
-  - commands set in files the program reads (git hooks and config,
-    `~/.ssh/config`);
-  - `GIT_PAGER`/`GIT_EDITOR`/`GIT_ASKPASS`, left out because adding them
-    would refuse common inherited names at startup.
+  - commands set in files the program finds by convention (git hooks and
+    config, `~/.ssh/config`, popt aliases); a file named on the command line
+    is a trigger instead;
+  - programs a scanned git subcommand looks up on PATH (pager, `man`,
+    `gpg`, `ssh`);
+  - `GIT_PAGER`/`GIT_EDITOR`/`GIT_ASKPASS`/`SSH_ASKPASS`, left out because
+    adding them would refuse common inherited names at startup.
 - Verified:
   - clippy (`-D warnings`), both release builds, and the full suite (34
     binaries);

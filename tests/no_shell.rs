@@ -100,6 +100,19 @@ fn opaque_rejected_only() -> Vec<Request> {
         plan_req("git-rebase-exec", exec(&["git", "rebase", "--exec", "x", "main"])),
         plan_req("git-submodule-foreach", exec(&["git", "submodule", "foreach", "x"])),
         plan_req("env-rsync-rsh", exec(&["env", "RSYNC_RSH=x", "rsync", "a", "h:b"])),
+        // Review of PR #117.
+        plan_req("scp-o-blank", exec(&["scp", "-o", " ProxyCommand=x", "a", "h:b"])),
+        plan_req("scp-legacy", exec(&["scp", "-O", "a", "h:b"])),
+        plan_req("scp-pkcs11", exec(&["scp", "-o", "PKCS11Provider=/x.so", "a", "h:b"])),
+        plan_req("rsync-old-args", exec(&["rsync", "--old-args", "a", "h:b"])),
+        plan_req("rsync-daemon", exec(&["rsync", "--daemon", "--config=x"])),
+        plan_req("git-abbrev", exec(&["git", "fetch", "--upload=x", "o"])),
+        plan_req("git-grep-O", exec(&["git", "grep", "-Ox", "p"])),
+        plan_req("git-template", exec(&["git", "clone", "--template=t", "o", "d"])),
+        plan_req("git-unlisted", exec(&["git", "remote-ext", "x", "id"])),
+        plan_req("git-dashed", exec(&["git-rebase", "-x", "id", "main"])),
+        plan_req("env-git-external-diff", exec(&["env", "GIT_EXTERNAL_DIFF=x", "git", "diff"])),
+        plan_req("ssh-agent", exec(&["ssh-agent", "true"])),
     ]
 }
 
