@@ -32,12 +32,18 @@ transparent now are.
   (@)*); input after the script is the script's own.
 - The other runners stay runners (identity, root, namespace or unit change;
   shell by default; ssh family); reasons in the PR.
+- A placeholder in a wrapper's own words reads *X takes arguments from
+  run-time input*, on that wrapper's hop. Not refused: an `env` assignment's
+  value (`env FILE={} ./process`) and a wrapper an option stops from running
+  a program (`xargs ionice -c3 -p`, `xargs taskset -cp …`).
 - Tests: unit tables, `input_reaching_a_wrapper_fails_closed`,
+  `input_reaching_a_scanned_program_fails_closed`,
   `flock_command_string_is_opaque`, flock in the property tests (the bare
   `xargs` prefix became `xargs -I@`: a bare one now changes opacity, by
   design); `tests/no_shell.rs`, `tests/pinning.rs` (env, timeout, flock),
   `tests/pty_no_shell.rs` (`flock -c`), the `wrappers` UI golden (a flock
-  step); `common::flock_lock`.
+  step); `common::flock_lock` (locks cargo's per-target scratch directory,
+  not the shared `/tmp`).
 - Verified: fmt, clippy, both release builds, full suite (34 binaries); live
   run under `--no-shell`: `flock LOCK echo` prompted with `echo (run by
   flock)` and ran, `flock LOCK -c id` refused before the prompt.

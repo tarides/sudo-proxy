@@ -146,12 +146,14 @@ assignment or `-u` of a name the `setenv` policy hard-rejects (`LD_*`,
 `GIT_SSH`, `GIT_PROXY_COMMAND`, `GIT_EXTERNAL_DIFF`, `GIT_TEMPLATE_DIR`,
 `RSYNC_RSH`, `RSYNC_CONNECT_PROG`, `RSYNC_OLD_ARGS`), a `find -exec`
 program word containing `{}`, a `{}` (under `find -exec`) or an `xargs -I`
-replacement string (under `xargs -I`) in a wrapper's own words or in a
+replacement string (under `xargs -I`) in a wrapper's own words (an `env`
+assignment's value excepted: `env FILE={} ./process` is fine) or in a
 program word at any depth (`find . -exec timeout 5 {} ;`,
 `xargs -I@ flock @ /tmp/l sh`), a wrapper under an `xargs` without `-I`
 that has no program of its own, so that xargs's input supplies it, its
 options or a `find` action (`xargs timeout 5`, `xargs flock /tmp/l`,
-`xargs find .`), an `xargs` appending its input to `rsync`, `git`, `scp`
+`xargs find .`; an option that runs no program, as in
+`xargs ionice -c3 -p`, is fine), an `xargs` appending its input to `rsync`, `git`, `scp`
 or `sftp` (`xargs git add`: they parse options after their operands), such a
 placeholder in their arguments or in an interpreter's words up to its script
 (`xargs -I@ python3 @`; after the script it is the script's own argument), an

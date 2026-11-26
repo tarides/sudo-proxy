@@ -802,19 +802,15 @@ pub fn unwrap(
                     },
                 }
             }
-            Class::Wrapper(spec) => {
-                let mut replace = None;
-                parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches, &mut replace).and_then(
-                    |children| {
-                        check_input_words(spec, argv, &r, hop, &children)?;
-                        Ok((spec, children, replace))
-                    },
-                )
-            }
+            Class::Wrapper(spec) => parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches)
+                .and_then(|parsed| {
+                    check_input_words(spec, argv, &r, hop, &parsed)?;
+                    Ok((spec, parsed))
+                }),
         };
         match next {
             Err(reason) => return (hops, Some(reason)),
-            Ok((spec, children, replace)) => {
+            Ok((spec, parsed)) => {
                 let applet = spec.kind == Kind::MultiCall;
                 let mut subst = r.subst.clone();
                 let mut appended = r.appended;
@@ -825,7 +821,7 @@ pub fn unwrap(
                         find: true,
                     });
                 } else if spec.name == "xargs" {
-                    match replace {
+                    match parsed.xargs_replace {
                         Some(text) => subst.push(Subst {
                             hop,
                             text,
@@ -834,7 +830,9 @@ pub fn unwrap(
                         None => appended = true,
                     }
                 }
-                for (start, end, chdir) in children {
+                // A `find` under an appending xargs is refused above, so every
+                // child of an appended region ends where the input is added.
+                for (start, end, chdir) in parsed.children {
                     queue.push_back(Region {
                         start,
                         end,
@@ -842,9 +840,7 @@ pub fn unwrap(
                         chdir,
                         depth: r.depth + 1,
                         applet,
-                        // A `find -exec` command ends at its `;` or `+`,
-                        // before anything xargs appends.
-                        appended: appended && end == r.end,
+                        appended,
                         subst: subst.clone(),
                     });
                 }
@@ -883,25 +879,38 @@ fn input_in(
 /// Fail closed when run-time input can change how a wrapper's words parse:
 /// a placeholder an enclosing `find -exec` or `xargs -I` fills in, in any of
 /// the wrapper's own words (`xargs -I{} flock {} /tmp/l sh` with the input
-/// `-s` runs `sh`), or an `xargs` appending its input where the wrapper
-/// expects its program, an option or an action (`xargs flock /tmp/l` with
-/// the input `-c CMD`, `xargs find .`).
+/// `-s` runs `sh`) except an `env` assignment's value, or an `xargs`
+/// appending its input where the wrapper expects its program, an option or
+/// an action (`xargs flock /tmp/l` with the input `-c CMD`, `xargs find .`).
+/// A wrapper an option stops from running a program (`xargs ionice -c3 -p`:
+/// every word after `-p` is a PID) takes no program from the input.
 fn check_input_words(
     spec: &WrapperSpec,
     argv: &[String],
     r: &Region,
     hop: usize,
-    children: &Children,
+    parsed: &Parsed,
 ) -> Result<(), OpaqueReason> {
-    let in_child = |k: usize| children.iter().any(|&(s, e, _)| (s..e).contains(&k));
+    let in_child = |k: usize| parsed.children.iter().any(|&(s, e, _)| (s..e).contains(&k));
+    // An assignment's name is fixed by the words before `=`; its value
+    // cannot change how `env` parses the rest.
+    let parsed_part = |k: usize| -> &str {
+        let w = argv[k].as_str();
+        match w.split_once('=') {
+            Some((name, _)) if parsed.assignments.contains(&k) => name,
+            _ => w,
+        }
+    };
     if let Some(s) = (r.start + 1..r.end)
         .filter(|&k| !in_child(k))
-        .find_map(|k| Subst::in_word(&r.subst, &argv[k]))
+        .find_map(|k| Subst::in_word(&r.subst, parsed_part(k)))
     {
-        return Err(s.reason());
+        return Err(OpaqueReason::FromInput {
+            hop,
+            placeholder: Some(s.text.clone()),
+        });
     }
-    let program_at_end = children.iter().any(|&(_, e, _)| e == r.end);
-    if r.appended && (spec.kind == Kind::FindExec || !program_at_end) {
+    if r.appended && parsed.runs && (spec.kind == Kind::FindExec || parsed.children.is_empty()) {
         return Err(OpaqueReason::FromInput {
             hop,
             placeholder: None,
@@ -980,16 +989,44 @@ fn script_operand(spec: &InterpSpec, args: &[String]) -> Option<usize> {
 
 type Children = Vec<(usize, usize, Option<String>)>;
 
-/// Parse a wrapper's own words into the regions it runs. `xargs_replace`
-/// receives the `xargs -I` replacement string, if any.
+/// A wrapper's words, parsed.
+struct Parsed {
+    /// The regions it runs (one program; one per `find` action).
+    children: Children,
+    /// False when an option means no program runs (`--help`, `ionice -p`).
+    runs: bool,
+    /// The `xargs -I` replacement string, if any.
+    xargs_replace: Option<String>,
+    /// The indices of `env`'s `NAME=VALUE` assignments.
+    assignments: std::ops::Range<usize>,
+}
+
+impl Parsed {
+    fn runs(children: Children) -> Parsed {
+        Parsed {
+            children,
+            runs: true,
+            xargs_replace: None,
+            assignments: 0..0,
+        }
+    }
+
+    fn no_program() -> Parsed {
+        Parsed {
+            runs: false,
+            ..Parsed::runs(Vec::new())
+        }
+    }
+}
+
+/// Parse a wrapper's own words into the regions it runs.
 fn parse_wrapper(
     spec: &'static WrapperSpec,
     argv: &[String],
     r: &Region,
     hop: usize,
     touches: &mut Vec<String>,
-    xargs_replace: &mut Option<String>,
-) -> Result<Children, OpaqueReason> {
+) -> Result<Parsed, OpaqueReason> {
     let bad = |why: String| OpaqueReason::Unparsable { hop, why };
     let one = |at: usize, chdir: Option<String>| -> Children {
         if at < r.end {
@@ -1001,10 +1038,10 @@ fn parse_wrapper(
     match spec.kind {
         Kind::MultiCall => match argv.get(r.start + 1).filter(|_| r.start + 1 < r.end) {
             Some(a) if a.starts_with('-') => Err(bad(format!("unsupported dispatcher option {a}"))),
-            Some(_) => Ok(one(r.start + 1, r.chdir.clone())),
-            None => Ok(Vec::new()),
+            Some(_) => Ok(Parsed::runs(one(r.start + 1, r.chdir.clone()))),
+            None => Ok(Parsed::runs(Vec::new())),
         },
-        Kind::FindExec => find_exec(argv, r, hop),
+        Kind::FindExec => find_exec(argv, r, hop).map(Parsed::runs),
         Kind::Getopt | Kind::Nice => {
             // `xargs -I R` / `-i[R]` / `--replace[=R]` substitutes each input
             // item for `R`, in the program word too (`xargs -I{} {}`).
@@ -1016,7 +1053,7 @@ fn parse_wrapper(
                 Ok(())
             })?;
             let Some(mut i) = parsed else {
-                return Ok(Vec::new());
+                return Ok(Parsed::no_program());
             };
             for _ in 0..spec.positionals {
                 let Some(p) = argv.get(i).filter(|_| i < r.end) else {
@@ -1035,8 +1072,10 @@ fn parse_wrapper(
             }
             // A program word containing `R` is refused by `unwrap`, as is a
             // placeholder in any later wrapper word.
-            *xargs_replace = replace;
-            Ok(one(i, r.chdir.clone()))
+            Ok(Parsed {
+                xargs_replace: replace,
+                ..Parsed::runs(one(i, r.chdir.clone()))
+            })
         }
         Kind::Env => {
             let mut chdir = r.chdir.clone();
@@ -1072,7 +1111,7 @@ fn parse_wrapper(
                 _ => Ok(()),
             })?;
             let Some(mut i) = parsed else {
-                return Ok(Vec::new());
+                return Ok(Parsed::no_program());
             };
             // A lone `-` after the options is `-i`.
             if i < r.end && argv[i] == "-" {
@@ -1080,6 +1119,7 @@ fn parse_wrapper(
             }
             // After the options every word containing `=` is an assignment;
             // the first one without is the program, even `--`.
+            let first = i;
             while i < r.end {
                 let Some((var, _)) = argv[i].split_once('=') else {
                     break;
@@ -1088,7 +1128,10 @@ fn parse_wrapper(
                 i += 1;
             }
             *touches = touched.into_inner();
-            Ok(one(i, chdir))
+            Ok(Parsed {
+                assignments: first..i,
+                ..Parsed::runs(one(i, chdir))
+            })
         }
     }
 }
@@ -1262,9 +1305,6 @@ fn find_exec(argv: &[String], r: &Region, hop: usize) -> Result<Children, Opaque
         let prog = i + 1;
         if prog >= r.end || argv[prog] == ";" {
             return Err(bad(format!("{action} with no command")));
-        }
-        if argv[prog].contains("{}") {
-            return Err(OpaqueReason::FindPlaceholder { hop });
         }
         let plus_ok = matches!(action, "-exec" | "-execdir");
         let term = (prog + 1..r.end)
@@ -1629,7 +1669,12 @@ mod tests {
             run(&["find", "/srv", "-perm", "-u+x", "-exec", "{}", ";"]).1,
             ph
         );
-        assert_eq!(run(&["find", ".", "-exec", "./{}", "+"]).1, ph);
+        assert_eq!(run(&["find", ".", "-exec", "./{}", ";"]).1, ph);
+        // `+` ends an -exec only right after a `{}` word.
+        assert_eq!(
+            unparsable(&["find", ".", "-exec", "./{}", "+"]),
+            "-exec without a terminating ; or +"
+        );
 
         let nine = ["nice"; 9];
         assert_eq!(run(&nine).1, Some(OpaqueReason::TooDeep));
@@ -1877,13 +1922,30 @@ mod tests {
             })
         };
         let fp = Some(OpaqueReason::FindPlaceholder { hop: 0 });
+        // A placeholder in a wrapper's own words: the input fills an option
+        // or operand of that wrapper, not its program.
+        let word = |hop, p: &str| {
+            Some(OpaqueReason::FromInput {
+                hop,
+                placeholder: Some(p.into()),
+            })
+        };
         for (argv, want) in [
             (
                 &["xargs", "-I{}", "flock", "/tmp/l", "{}", "id"][..],
                 xr("{}"),
             ),
             (&["xargs", "-I{}", "timeout", "5", "{}"], xr("{}")),
-            (&["xargs", "-I@", "flock", "@", "/tmp/l", "sh"], xr("@")),
+            (
+                &["xargs", "-I@", "flock", "@", "/tmp/l", "sh"],
+                word(1, "@"),
+            ),
+            (&["xargs", "-I@", "env", "-C", "@", "make"], word(1, "@")),
+            (&["xargs", "-I@", "env", "@=1", "make"], word(1, "@")),
+            (
+                &["find", ".", "-exec", "timeout", "{}", "rm", ";"],
+                word(1, "{}"),
+            ),
             (&["xargs", "-I@", "env", "nice", "x@"], xr("@")),
             (
                 &["find", ".", "-exec", "flock", "/tmp/l", "{}", ";"],
@@ -1906,6 +1968,14 @@ mod tests {
             &["xargs", "-I{}", "timeout", "5", "rm", "{}"],
             &["find", ".", "-exec", "flock", "/tmp/l", "rm", "{}", ";"],
             &["find", ".", "-exec", "xargs", "rm", ";"],
+            // An option that runs no program: the input is PIDs.
+            &["xargs", "ionice", "-c3", "-p"],
+            &["xargs", "taskset", "-cp", "0-3"],
+            &["xargs", "chrt", "-p", "0"],
+            &["xargs", "timeout", "--help"],
+            // An assignment's value cannot change how env parses.
+            &["find", ".", "-exec", "env", "FILE={}", "./process", ";"],
+            &["xargs", "-I@", "env", "TARGET=@", "make"],
         ] {
             assert_eq!(run(argv).1, None, "{argv:?}");
         }

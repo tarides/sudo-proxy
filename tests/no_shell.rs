@@ -99,13 +99,14 @@ fn opaque_requests() -> Vec<Request> {
             exec(&["coreutils", "env", "sh", "-c", "true"]),
         ));
     }
-    // #92: flock runs the program after the lock file, or `$SHELL -c` with
-    // `-c`.
-    // #92 review: xargs may append `--upload-pack=…` to a git invocation.
-    // With empty stdin xargs runs `git --version` once.
+    // #92 review: xargs appending its input to any git invocation is
+    // refused (`xargs git fetch` on the input `--upload-pack=…` runs a
+    // command). With empty stdin this one runs `git --version` once.
     if sudo_proxy::executor::resolve_command("git", "/").is_some() {
         reqs.push(plan_req("xargs-git", exec(&["xargs", "git", "--version"])));
     }
+    // #92: flock runs the program after the lock file, or `$SHELL -c` with
+    // `-c`.
     if let Some(lock) = common::flock_lock() {
         reqs.push(plan_req(
             "flock-sh",
