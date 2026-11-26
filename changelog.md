@@ -3,6 +3,21 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-26 — The tree is in rustfmt's form, checked in CI (PR #119)
+
+- `cargo fmt` over the tree (42 files had drifted). Formatting only;
+  commit `c73e273`.
+- CI's `lint` job runs `cargo fmt --check` before clippy. The job keeps its
+  name, `clippy`, so required checks are unchanged.
+- `.git-blame-ignore-revs` lists `c73e273`. GitHub's blame view reads it;
+  local blame needs `git config blame.ignoreRevsFile
+  .git-blame-ignore-revs` once. Merge PRs that add to it with a merge
+  commit: a squash or rebase changes the hash.
+- A scan of the history for other formatting-only commits found none worth
+  listing.
+- Verified: `cargo fmt --check`, clippy, both release builds, full suite
+  (34 binaries), before and after the rebase onto #117.
+
 ## 2026-11-26 — The ssh family is opaque when it runs a command string (#91, PR #117)
 
 First step of the 1.3.1 plan. **Behaviour change:** these forms are now
@@ -62,7 +77,12 @@ refused under `no_shell`.
   - clippy (`-D warnings`), both release builds, and the full suite (34
     binaries);
   - a live run: the `rsync -e` prompt shows the reason, `git --version`
-    prompts as structured, and `--no-shell` rejects before any prompt.
+    prompts as structured, and `--no-shell` rejects before any prompt;
+  - a second live run after the review fixes: the new reason texts for
+    `ssh -N`, `git --frobnicate`, `git submodule update` and `scp -o
+    ' ProxyCommand=x'` at the prompt; `git status` structured; under
+    `--no-shell`, rejection with the same text and no prompt.
+- Merged 2026-11-26 (merge commit `f7612a6`); #89's plan ticks step 1.
 - Notes:
   - The flaky `burst_connections_above_cap_get_busy_response` failed in 2 of
     5 full-suite runs (a third had one failing binary, not identified) and
