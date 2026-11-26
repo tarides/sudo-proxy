@@ -151,7 +151,10 @@ program word at any depth (`find . -exec timeout 5 {} ;`,
 `xargs -I@ flock @ /tmp/l sh`), a wrapper under an `xargs` without `-I`
 that has no program of its own, so that xargs's input supplies it, its
 options or a `find` action (`xargs timeout 5`, `xargs flock /tmp/l`,
-`xargs find .`), an
+`xargs find .`), an `xargs` appending its input to `rsync`, `git`, `scp`
+or `sftp` (`xargs git add`: they parse options after their operands), such a
+placeholder in their arguments or in an interpreter's words up to its script
+(`xargs -I@ python3 @`; after the script it is the script's own argument), an
 action word (`-exec`, `-execdir`, `-ok`, `-okdir`) inside a `find -exec`
 command (a test such as `-printf` may have absorbed the one before it), an
 `xargs -I R`/`-i`/`--replace` whose replacement string appears in the program

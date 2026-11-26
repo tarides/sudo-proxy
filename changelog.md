@@ -25,7 +25,11 @@ transparent now are.
   appends its input. A placeholder in a wrapper's own words or in a program
   word at any depth, and a wrapper under an appending `xargs` with no program
   of its own (or a `find` there), are opaque (`OpaqueReason::FromInput`:
-  *xargs appends its input to X, which may make it run another program*).
+  *xargs appends its input to X, which may change what it runs*). The same
+  holds for `rsync`, `git`, `scp` and `sftp` (they parse options after their
+  operands: `xargs git add` is opaque) and for an interpreter's words up to
+  its script (`xargs -I@ python3 @`; *X takes arguments from run-time input
+  (@)*); input after the script is the script's own.
 - The other runners stay runners (identity, root, namespace or unit change;
   shell by default; ssh family); reasons in the PR.
 - Tests: unit tables, `input_reaching_a_wrapper_fails_closed`,

@@ -30,7 +30,8 @@
 //! replacement string in the program word, run-time input reaching a nested
 //! wrapper's words (a `{}` or `xargs -I` placeholder in them or in a deeper
 //! program word, an `xargs` appending its input where a wrapper expects its
-//! program), a `--` or any other option word
+//! program), the same input reaching a command-string program's arguments
+//! or an interpreter's words up to its script, a `--` or any other option word
 //! where a program is expected, a multi-call dispatcher option, an ambiguous
 //! name and a chain deeper than [`MAX_DEPTH`] all make the leaf opaque.
 //!
@@ -553,10 +554,14 @@ pub enum OpaqueReason {
         hop: usize,
         replace: String,
     },
-    /// An `xargs` appends its input where this wrapper expects its program,
-    /// an option or a `find` action.
+    /// Run-time input reaches the hop's words where it can change what runs:
+    /// an `xargs` appends it (`placeholder` is `None`) after a wrapper with no
+    /// program of its own or a command-string program, or a `find -exec` /
+    /// `xargs -I` placeholder fills in an argument of an interpreter (up to
+    /// its script) or of a command-string program.
     FromInput {
         hop: usize,
+        placeholder: Option<String>,
     },
     Ambiguous {
         hop: usize,
@@ -579,7 +584,7 @@ impl OpaqueReason {
             | OpaqueReason::EnvRejected { hop, .. }
             | OpaqueReason::FindPlaceholder { hop }
             | OpaqueReason::XargsReplace { hop, .. }
-            | OpaqueReason::FromInput { hop }
+            | OpaqueReason::FromInput { hop, .. }
             | OpaqueReason::Ambiguous { hop, .. } => *hop,
         }
     }
@@ -632,9 +637,13 @@ impl OpaqueReason {
             OpaqueReason::XargsReplace { replace, .. } => {
                 format!("{name} takes the program from its input ({replace})")
             }
-            OpaqueReason::FromInput { .. } => {
-                format!("xargs appends its input to {name}, which may make it run another program")
-            }
+            OpaqueReason::FromInput {
+                placeholder: None, ..
+            } => format!("xargs appends its input to {name}, which may change what it runs"),
+            OpaqueReason::FromInput {
+                placeholder: Some(p),
+                ..
+            } => format!("{name} takes arguments from run-time input ({p})"),
             OpaqueReason::Ambiguous { canonical, .. } => {
                 format!("ambiguous wrapper: {name} resolves to {canonical}")
             }
@@ -767,14 +776,32 @@ pub fn unwrap(
             Class::Plain => continue,
             Class::Shell => Err(OpaqueReason::Shell { hop }),
             Class::Runner => Err(OpaqueReason::Runner { hop }),
-            Class::Interpreter(spec) => match inline_code(spec, &argv[r.start + 1..r.end]) {
-                Some(flag) => Err(OpaqueReason::InlineCode { hop, flag }),
-                None => continue,
-            },
-            Class::CommandString(prog) => match scan(prog, &argv[r.start + 1..r.end]) {
-                Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
-                None => continue,
-            },
+            Class::Interpreter(spec) => {
+                let args = &argv[r.start + 1..r.end];
+                match inline_code(spec, args) {
+                    Some(flag) => Err(OpaqueReason::InlineCode { hop, flag }),
+                    // Options end at the script operand: input after it is
+                    // the script's own arguments.
+                    None => match script_operand(spec, args)
+                        .and_then(|k| input_in(&r, &args[..=k], false, hop))
+                    {
+                        Some(reason) => Err(reason),
+                        None => continue,
+                    },
+                }
+            }
+            Class::CommandString(prog) => {
+                let args = &argv[r.start + 1..r.end];
+                match scan(prog, args) {
+                    Some(trigger) => Err(OpaqueReason::CommandString { hop, trigger }),
+                    // These programs parse options after their operands, so
+                    // input anywhere in their arguments may add a trigger.
+                    None => match input_in(&r, args, true, hop) {
+                        Some(reason) => Err(reason),
+                        None => continue,
+                    },
+                }
+            }
             Class::Wrapper(spec) => {
                 let mut replace = None;
                 parse_wrapper(spec, argv, &r, hop, &mut hops[hop].touches, &mut replace).and_then(
@@ -827,6 +854,32 @@ pub fn unwrap(
     (hops, None)
 }
 
+/// The reason run-time input reaching `words` (an interpreter's or a
+/// command-string program's arguments) makes the hop opaque: a placeholder
+/// in one of them, or, when `appended_counts`, an appending `xargs` above.
+/// `find`'s `{}` counts too: it starts with a start point, which may itself
+/// be special to the program (`find ext::x -exec git fetch {} ;`).
+fn input_in(
+    r: &Region,
+    words: &[String],
+    appended_counts: bool,
+    hop: usize,
+) -> Option<OpaqueReason> {
+    if appended_counts && r.appended {
+        return Some(OpaqueReason::FromInput {
+            hop,
+            placeholder: None,
+        });
+    }
+    words
+        .iter()
+        .find_map(|w| Subst::in_word(&r.subst, w))
+        .map(|s| OpaqueReason::FromInput {
+            hop,
+            placeholder: Some(s.text.clone()),
+        })
+}
+
 /// Fail closed when run-time input can change how a wrapper's words parse:
 /// a placeholder an enclosing `find -exec` or `xargs -I` fills in, in any of
 /// the wrapper's own words (`xargs -I{} flock {} /tmp/l sh` with the input
@@ -849,7 +902,10 @@ fn check_input_words(
     }
     let program_at_end = children.iter().any(|&(_, e, _)| e == r.end);
     if r.appended && (spec.kind == Kind::FindExec || !program_at_end) {
-        return Err(OpaqueReason::FromInput { hop });
+        return Err(OpaqueReason::FromInput {
+            hop,
+            placeholder: None,
+        });
     }
     Ok(())
 }
@@ -891,20 +947,24 @@ fn inline_code(spec: &InterpSpec, args: &[String]) -> Option<String> {
             return Some(shown);
         }
     }
-    // Is there a script operand? Skip the word after an option that takes a
-    // separate argument; after `--` the next word is the operand.
+    match script_operand(spec, args) {
+        Some(_) => None,
+        None => Some("stdin".into()),
+    }
+}
+
+/// The index in `args` of an interpreter's script operand, if any. Skip the
+/// word after an option that takes a separate argument; after `--` the next
+/// word is the operand.
+fn script_operand(spec: &InterpSpec, args: &[String]) -> Option<usize> {
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
         if a == "--" {
-            return if i + 1 < args.len() {
-                None
-            } else {
-                Some("stdin".into())
-            };
+            return (i + 1 < args.len()).then_some(i + 1);
         }
         if !a.starts_with('-') {
-            return None;
+            return Some(i);
         }
         let takes_next = spec.sep_arg_long.contains(&a.as_str())
             || (!a.starts_with("--")
@@ -915,7 +975,7 @@ fn inline_code(spec: &InterpSpec, args: &[String]) -> Option<String> {
                     .is_some_and(|c| spec.sep_arg_short.contains(c)));
         i += if takes_next { 2 } else { 1 };
     }
-    Some("stdin".into())
+    None
 }
 
 type Children = Vec<(usize, usize, Option<String>)>;
@@ -1803,7 +1863,10 @@ mod tests {
         ] {
             assert_eq!(
                 run(argv).1,
-                Some(OpaqueReason::FromInput { hop }),
+                Some(OpaqueReason::FromInput {
+                    hop,
+                    placeholder: None
+                }),
                 "{argv:?}"
             );
         }
@@ -1850,7 +1913,63 @@ mod tests {
         let (hops, reason) = run(&argv);
         assert_eq!(
             reason.unwrap().describe(&hops, &v(&argv)),
-            "xargs appends its input to flock, which may make it run another program"
+            "xargs appends its input to flock, which may change what it runs"
+        );
+    }
+
+    /// Run-time input reaching an interpreter before its script, or a
+    /// command-string program anywhere in its arguments, fails closed: rsync,
+    /// git, scp and sftp parse options after their operands.
+    #[test]
+    fn input_reaching_a_scanned_program_fails_closed() {
+        let appended = |hop| {
+            Some(OpaqueReason::FromInput {
+                hop,
+                placeholder: None,
+            })
+        };
+        let ph = |hop, p: &str| {
+            Some(OpaqueReason::FromInput {
+                hop,
+                placeholder: Some(p.into()),
+            })
+        };
+        for (argv, want) in [
+            (&["xargs", "rsync", "a"][..], appended(1)),
+            (&["xargs", "git", "fetch"], appended(1)),
+            (&["xargs", "-0", "git", "add"], appended(1)),
+            (&["xargs", "timeout", "5", "scp", "a"], appended(2)),
+            (&["xargs", "-I@", "rsync", "@", "h:b"], ph(1, "@")),
+            (&["xargs", "-I@", "git", "fetch", "@"], ph(1, "@")),
+            (
+                &["find", "ext::x", "-exec", "git", "fetch", "{}", ";"],
+                ph(1, "{}"),
+            ),
+            (
+                &["find", ".", "-exec", "sftp", "-b", "{}", "h", ";"],
+                ph(1, "{}"),
+            ),
+            (&["xargs", "-I@", "python3", "@"], ph(1, "@")),
+            (&["xargs", "-I@", "python3", "-W", "@", "x.py"], ph(1, "@")),
+            (&["find", ".", "-exec", "perl", "{}", ";"], ph(1, "{}")),
+        ] {
+            assert_eq!(run(argv).1, want, "{argv:?}");
+        }
+        // After the script operand, input is the script's own arguments.
+        for argv in [
+            &["xargs", "python3", "x.py"][..],
+            &["xargs", "-I@", "python3", "x.py", "@"],
+            &["find", ".", "-exec", "python3", "x.py", "{}", ";"],
+            &["xargs", "-I@", "cp", "@", "/dst"],
+            &["git", "fetch"],
+        ] {
+            assert_eq!(run(argv).1, None, "{argv:?}");
+        }
+        let argv = ["xargs", "-I@", "rsync", "@", "h:b"];
+        let (hops, reason) = run(&argv);
+        assert_eq!(
+            reason.unwrap().describe(&hops, &v(&argv)),
+            "rsync takes arguments from run-time input (@)"
         );
     }
 
