@@ -6,20 +6,14 @@ the assurance ladder defined in
 [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md); each names its
 rung.
 
-## After `v1.3.0-rc.1`: feedback, NixOS check, daemons
+## After 1.3.0: daemons, NixOS check
 
-The rc is out (see changelog). What is left before 1.3.0 is mostly waiting and
-manual checks:
+1.3.0 is out (see changelog). Left over:
 
-1. **#101 reporter:** ask them to test it (`cargo install sudo-proxy
-   --version 1.3.0-rc.1`); a draft comment was prepared. #101 is already
-   closed.
+1. **Daemons:** the daemons on the registered hosts still run older versions
+   until they are upgraded and restarted.
 2. **NixOS:** run `--pkexec` on a real NixOS host; #107 was only reproduced
-   in a container.
-3. **Daemons:** the daemons on the registered hosts still run older versions
-   until they are restarted.
-4. **1.3.0 itself**, once the feedback is in: same steps as the rc, plus
-   `.claude-plugin/plugin.json`, and the MCP Registry is published.
+   in a container. Did not block 1.3.0; a bug found here goes into 1.3.1.
 
 Known gaps left from the #101 review (low; pick up if they matter): the
 `PATH` check ignores ACLs on directories; a symlink reached inside a

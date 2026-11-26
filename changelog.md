@@ -3,6 +3,16 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-26 — Prepared v1.3.0
+
+- The #101 reporter tested rc.1 on NixOS and found no problems. The NixOS
+  `--pkexec` check stays in the backlog and does not block the release.
+- The version was bumped from `1.3.0-rc.1` to `1.3.0` in `Cargo.toml`,
+  `Cargo.lock`, `server.json` and the mcpb manifest, and from 1.2.3 to 1.3.0 in
+  `.claude-plugin/plugin.json`.
+- CI's commands ran locally first: clippy, both release builds, tests (no
+  flake this time), `cargo audit`, `cargo deny`, `cargo publish --dry-run`.
+
 ## 2026-11-25 — Tagged and published v1.3.0-rc.1 (#114)
 
 - The `Unreleased` entries were gathered under `v1.3.0-rc.1`, and the version
@@ -16,6 +26,21 @@ for the assurance-ladder context behind the security-formalisation entries.
   Registry was skipped (it still lists 1.2.3).
 - Merged local branches deleted (`release/1.2.3`, `merge/release-1.2.3`,
   `fix/helper-sticky-dirs`).
+
+## v1.3.0 — 2026-11-26
+
+Same code as `v1.3.0-rc.1`, below, which lists the changes. Install it with
+`cargo install sudo-proxy`.
+
+- The #101 reporter tested rc.1 on NixOS from a direnv/Nix dev shell: the
+  narrow `--inherit-env='REPO_ROOT,TF_VAR_*,…'` form covered their tools
+  (`just`, `kubectl`, `tofu plan` with sops, `git fetch` with
+  `forward_agent`), through `sudo-proxy-mcp` on a remote client, and the dev
+  shell's `PATH` passed the startup check.
+- `--pkexec` on a real NixOS host is still untested (#107 was reproduced in a
+  container).
+- `.claude-plugin/plugin.json` moves to 1.3.0, and the MCP Registry is
+  published again (it skipped the rc).
 
 ## v1.3.0-rc.1 — 2026-11-25 (pre-release)
 
