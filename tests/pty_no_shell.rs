@@ -13,10 +13,15 @@ use common::pty::{PtyDaemon, PtyOpts};
 
 fn check(mut d: PtyDaemon) {
     let mut opaque = common::make_req("ns-opaque", vec![]);
-    opaque.plan = Some(Plan::Exec { argv: vec!["sh".into(), "-c".into(), "true".into()] });
+    opaque.plan = Some(Plan::Exec {
+        argv: vec!["sh".into(), "-c".into(), "true".into()],
+    });
     let r = common::send_request(&d.socket, &opaque);
     assert_eq!(r.status, Status::Error, "{r:?}");
-    assert!(r.message.as_deref().unwrap_or("").contains("no_shell"), "{r:?}");
+    assert!(
+        r.message.as_deref().unwrap_or("").contains("no_shell"),
+        "{r:?}"
+    );
     // A shell behind a wrapper is rejected the same way (#87), and so is a
     // command string run remotely or through a shell (#91).
     for (id, argv) in [
@@ -25,13 +30,21 @@ fn check(mut d: PtyDaemon) {
         ("ns-rsync", &["rsync", "-e", "sh -c true", "a", "b"]),
     ] {
         let mut req = common::make_req(id, vec![]);
-        req.plan = Some(Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() });
+        req.plan = Some(Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        });
         let r = common::send_request(&d.socket, &req);
         assert_eq!(r.status, Status::Error, "{id}: {r:?}");
-        assert!(r.message.as_deref().unwrap_or("").contains("no_shell"), "{id}: {r:?}");
+        assert!(
+            r.message.as_deref().unwrap_or("").contains("no_shell"),
+            "{id}: {r:?}"
+        );
     }
 
-    let h = d.request_async(&common::make_req("ns-structured", vec![vec!["echo", "structured-ok"]]));
+    let h = d.request_async(&common::make_req(
+        "ns-structured",
+        vec![vec!["echo", "structured-ok"]],
+    ));
     let prompt = d.answer(b'y');
     assert!(prompt.contains("ID:      ns-structured"), "{prompt}");
     let r = h.join().unwrap();
@@ -45,13 +58,19 @@ fn check(mut d: PtyDaemon) {
 
 #[test]
 fn no_shell_flag_rejects_before_prompt() {
-    check(PtyDaemon::spawn(PtyOpts { args: vec!["--no-shell".into()], ..Default::default() }));
+    check(PtyDaemon::spawn(PtyOpts {
+        args: vec!["--no-shell".into()],
+        ..Default::default()
+    }));
 }
 
 #[test]
 fn no_shell_policy_rejects_before_prompt() {
     let json = r#"{"policy":{"no_shell":true}}"#;
-    check(PtyDaemon::spawn(PtyOpts { hosts_json: Some((json.into(), 0o600)), ..Default::default() }));
+    check(PtyDaemon::spawn(PtyOpts {
+        hosts_json: Some((json.into(), 0o600)),
+        ..Default::default()
+    }));
 }
 
 /// A `hosts.json` another user could write is not trusted, and for `no_shell`
@@ -60,8 +79,14 @@ fn no_shell_policy_rejects_before_prompt() {
 #[test]
 fn untrusted_policy_turns_no_shell_on() {
     let json = r#"{"policy":{"no_shell":false}}"#;
-    let d = PtyDaemon::spawn(PtyOpts { hosts_json: Some((json.into(), 0o666)), ..Default::default() });
+    let d = PtyDaemon::spawn(PtyOpts {
+        hosts_json: Some((json.into(), 0o666)),
+        ..Default::default()
+    });
     let log = std::fs::read_to_string(d.dir().join("daemon.log")).unwrap_or_default();
-    assert!(log.contains("ignoring hosts.json policy (not unattended-eligible, no_shell on)"), "{log}");
+    assert!(
+        log.contains("ignoring hosts.json policy (not unattended-eligible, no_shell on)"),
+        "{log}"
+    );
     check(d);
 }

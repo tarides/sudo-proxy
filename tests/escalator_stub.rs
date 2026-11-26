@@ -58,7 +58,10 @@ fn every_sudo_spawn_uses_the_resolved_escalator_not_path() {
     .unwrap();
     let plant_dir = d.path().join("plant");
     std::fs::create_dir(&plant_dir).unwrap();
-    script(&plant_dir.join("sudo"), &format!("echo planted >> '{}'\nexit 97", plant_log.display()));
+    script(
+        &plant_dir.join("sudo"),
+        &format!("echo planted >> '{}'\nexit 97", plant_log.display()),
+    );
 
     let old = std::env::var("PATH").unwrap_or_default();
     std::env::set_var("PATH", format!("{}:{old}", plant_dir.display()));
@@ -76,13 +79,19 @@ fn every_sudo_spawn_uses_the_resolved_escalator_not_path() {
     let req = privileged(vec![vec!["echo", "one"]]);
     let resp = exec_sudo(&prepare(&req, &env).unwrap(), &lock);
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
-    assert_eq!(common::b64_decode(resp.stdout.as_deref().unwrap_or("")), b"one\n");
+    assert_eq!(
+        common::b64_decode(resp.stdout.as_deref().unwrap_or("")),
+        b"one\n"
+    );
 
     // Multi-stage (exec_pipeline, one sudo per stage).
     let req = privileged(vec![vec!["echo", "two"], vec!["cat"]]);
     let resp = exec_sudo(&prepare(&req, &env).unwrap(), &lock);
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
-    assert_eq!(common::b64_decode(resp.stdout.as_deref().unwrap_or("")), b"two\n");
+    assert_eq!(
+        common::b64_decode(resp.stdout.as_deref().unwrap_or("")),
+        b"two\n"
+    );
 
     // The sudo process got a cleared environment: TERM, LANG and LC_* only
     // (#101). The request's own K=V words are arguments, not environment.
@@ -103,5 +112,9 @@ fn every_sudo_spawn_uses_the_resolved_escalator_not_path() {
 
     assert!(!plant_log.exists(), "planted sudo on PATH ran");
     let calls = std::fs::read_to_string(&stub_log).unwrap();
-    assert_eq!(calls.lines().count(), 3, "expected one stand-in call per stage: {calls}");
+    assert_eq!(
+        calls.lines().count(),
+        3,
+        "expected one stand-in call per stage: {calls}"
+    );
 }

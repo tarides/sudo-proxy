@@ -17,7 +17,10 @@ fn empty_pipeline_rejected() {
     let resp = s.send(&req);
     assert_eq!(resp.status, Status::Error);
     assert!(
-        resp.message.as_deref().unwrap().contains("must not be empty"),
+        resp.message
+            .as_deref()
+            .unwrap()
+            .contains("must not be empty"),
         "got: {:?}",
         resp.message
     );
@@ -228,10 +231,7 @@ fn invalid_json_returns_error_with_empty_id() {
     let parsed: serde_json::Value = serde_json::from_str(text.trim()).unwrap();
     assert_eq!(parsed["status"], "error");
     assert_eq!(parsed["id"], "");
-    assert!(parsed["message"]
-        .as_str()
-        .unwrap()
-        .contains("invalid JSON"));
+    assert!(parsed["message"].as_str().unwrap().contains("invalid JSON"));
 }
 
 #[test]
@@ -364,20 +364,28 @@ fn plan_and_pipeline_both_set_rejected() {
     let s = server();
     let mut req = plan_req(
         "v-both",
-        Plan::Exec { argv: vec!["true".into()] },
+        Plan::Exec {
+            argv: vec!["true".into()],
+        },
         false,
     );
     req.pipeline = vec![vec!["true".into()]];
     let resp = s.send(&req);
     assert_eq!(resp.status, Status::Error);
-    assert!(resp.message.as_deref().unwrap().contains("both pipeline and plan"));
+    assert!(resp
+        .message
+        .as_deref()
+        .unwrap()
+        .contains("both pipeline and plan"));
 }
 
 /// An over-nested plan is rejected by the depth bound before any prompt.
 #[test]
 fn plan_overdeep_rejected() {
     let s = server();
-    let mut p = Plan::Exec { argv: vec!["true".into()] };
+    let mut p = Plan::Exec {
+        argv: vec!["true".into()],
+    };
     for _ in 0..40 {
         p = Plan::RunAs {
             who: RunAs::Root,
@@ -400,15 +408,23 @@ fn plan_structural_error_rejected_without_prompt() {
         target: sudo_proxy::protocol::RedirTarget::DevNull,
         body: Box::new(Plan::Run {
             steps: vec![
-                Plan::Exec { argv: vec!["true".into()] },
-                Plan::Exec { argv: vec!["true".into()] },
+                Plan::Exec {
+                    argv: vec!["true".into()],
+                },
+                Plan::Exec {
+                    argv: vec!["true".into()],
+                },
             ],
         }),
     };
     let resp = s.send(&plan_req("v-struct", plan, false));
     assert_eq!(resp.status, Status::Error);
     assert!(resp.message.as_deref().unwrap().contains("invalid plan"));
-    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+    assert_eq!(
+        s.prompter.call_count(),
+        0,
+        "must not prompt for an invalid plan"
+    );
 }
 
 /// #89 (1.3.0): a key the plan grammar does not define, here three levels deep,
@@ -422,7 +438,9 @@ fn plan_unknown_key_rejected_without_prompt() {
         Plan::Run {
             steps: vec![Plan::Chdir {
                 dir: "/".into(),
-                body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+                body: Box::new(Plan::Exec {
+                    argv: vec!["true".into()],
+                }),
             }],
         },
         false,
@@ -436,7 +454,11 @@ fn plan_unknown_key_rejected_without_prompt() {
     assert_eq!(resp["status"], "error");
     let msg = resp["message"].as_str().unwrap();
     assert!(msg.contains("unknown field `stdin_from`"), "{msg}");
-    assert_eq!(s.prompter.call_count(), 0, "must not prompt for a plan with an unknown key");
+    assert_eq!(
+        s.prompter.call_count(),
+        0,
+        "must not prompt for a plan with an unknown key"
+    );
 }
 
 /// Issue #90: the one `compile_plan` error that quotes request data (a setenv
@@ -449,13 +471,22 @@ fn plan_disallowed_setenv_rejected_without_prompt() {
     let plan = Plan::Setenv {
         key: "A".repeat(10_000),
         value: "x".into(),
-        body: Box::new(Plan::Exec { argv: vec!["true".into()] }),
+        body: Box::new(Plan::Exec {
+            argv: vec!["true".into()],
+        }),
     };
     let resp = s.send(&plan_req("v-setenv-key", plan, false));
     assert_eq!(resp.status, Status::Error);
     let msg = resp.message.as_deref().unwrap();
-    assert!(msg.contains("invalid plan: environment variable not allowed"), "{msg:.80}");
-    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+    assert!(
+        msg.contains("invalid plan: environment variable not allowed"),
+        "{msg:.80}"
+    );
+    assert_eq!(
+        s.prompter.call_count(),
+        0,
+        "must not prompt for an invalid plan"
+    );
 }
 
 /// A redirect wrapping an `alt` is structurally invalid (stdio modifiers target
@@ -468,15 +499,23 @@ fn plan_redirect_of_alt_rejected_without_prompt() {
         target: sudo_proxy::protocol::RedirTarget::DevNull,
         body: Box::new(Plan::Alt {
             steps: vec![
-                Plan::Exec { argv: vec!["false".into()] },
-                Plan::Exec { argv: vec!["true".into()] },
+                Plan::Exec {
+                    argv: vec!["false".into()],
+                },
+                Plan::Exec {
+                    argv: vec!["true".into()],
+                },
             ],
         }),
     };
     let resp = s.send(&plan_req("v-alt-struct", plan, false));
     assert_eq!(resp.status, Status::Error);
     assert!(resp.message.as_deref().unwrap().contains("invalid plan"));
-    assert_eq!(s.prompter.call_count(), 0, "must not prompt for an invalid plan");
+    assert_eq!(
+        s.prompter.call_count(),
+        0,
+        "must not prompt for an invalid plan"
+    );
 }
 
 /// A valid unprivileged plan runs end-to-end and returns Ok.

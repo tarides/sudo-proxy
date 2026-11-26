@@ -421,10 +421,7 @@ fn bind_listener(socket_path: &Path) -> io::Result<UnixListener> {
             if UnixStream::connect(socket_path).is_ok() {
                 return Err(io::Error::new(
                     ErrorKind::AddrInUse,
-                    format!(
-                        "sudo-proxy is already running on {}",
-                        socket_path.display()
-                    ),
+                    format!("sudo-proxy is already running on {}", socket_path.display()),
                 ));
             }
             fs::remove_file(socket_path)?;
@@ -501,13 +498,14 @@ pub fn run(
 ) -> std::io::Result<()> {
     // Taken before the socket exists, so no request this instance can
     // receive is dated earlier than a legitimate sender could have stamped it.
-    let started_epoch = now_epoch()
-        .ok_or_else(|| io::Error::other("system clock is before the Unix epoch"))?;
+    let started_epoch =
+        now_epoch().ok_or_else(|| io::Error::other("system clock is before the Unix epoch"))?;
     // Open the audit sinks before binding: an operator who expects an audit
     // trail must not get a running daemon that silently records nothing.
-    let audit = Arc::new(AuditLog::open(&config.audit).map_err(|e| {
-        io::Error::new(e.kind(), format!("cannot open audit log: {e}"))
-    })?);
+    let audit = Arc::new(
+        AuditLog::open(&config.audit)
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot open audit log: {e}")))?,
+    );
     // `--inherit-path` / `--inherit-env` (#101): a startup record, with the
     // names-and-PATH fingerprint only (the values one stays on the terminal).
     // No variable name is recorded: the patterns stay on the terminal.
@@ -559,12 +557,7 @@ pub fn run(
                 thread::sleep(Duration::from_millis(50));
                 continue;
             }
-            Err(e)
-                if matches!(
-                    e.raw_os_error(),
-                    Some(libc::EMFILE) | Some(libc::ENFILE)
-                ) =>
-            {
+            Err(e) if matches!(e.raw_os_error(), Some(libc::EMFILE) | Some(libc::ENFILE)) => {
                 eprintln!("accept: file-descriptor pressure ({e}); backing off");
                 thread::sleep(Duration::from_millis(50));
                 continue;
@@ -883,8 +876,15 @@ fn handle_connection(
     match req.action {
         crate::protocol::Action::Ping => {
             if verbose {
-                let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
-                eprintln!("[{}] ping from {} (client {client_ver})", req.id, req.session);
+                let client_ver = if req.version.is_empty() {
+                    "unknown"
+                } else {
+                    req.version.as_str()
+                };
+                eprintln!(
+                    "[{}] ping from {} (client {client_ver})",
+                    req.id, req.session
+                );
             }
             let mut resp = Response::ok(&req.id, vec![], b"");
             resp.message = Some("pong".to_string());
@@ -908,10 +908,7 @@ fn handle_connection(
             // adding a security boundary. The TTY notice keeps the human
             // informed; try_lock so a pending prompt can't delay shutdown.
             if let Ok(_g) = tty_lock.try_lock() {
-                let _ = tui::display_notice(&format!(
-                    "sudo-proxy stopped by {}",
-                    req.session
-                ));
+                let _ = tui::display_notice(&format!("sudo-proxy stopped by {}", req.session));
             }
             // Reply before flipping the flag so the client reliably reads
             // the Ok response before the process exits.
@@ -952,7 +949,12 @@ fn handle_connection(
     // reads the same opacity, and the same reason text, the prompt renders, so
     // what the prompt would flag is exactly what is refused.
     if let Some(msg) = no_shell_violation(no_shell, views) {
-        reject(&mut stream, &ev, Reject::NoShell, Response::error(&req.id, &msg));
+        reject(
+            &mut stream,
+            &ev,
+            Reject::NoShell,
+            Response::error(&req.id, &msg),
+        );
         return;
     }
 
@@ -966,7 +968,11 @@ fn handle_connection(
             "unprivileged"
         };
         let cmd_display = crate::tui::command_summary(&req);
-        let client_ver = if req.version.is_empty() { "unknown" } else { req.version.as_str() };
+        let client_ver = if req.version.is_empty() {
+            "unknown"
+        } else {
+            req.version.as_str()
+        };
         eprintln!(
             "[{}] [{}] [client {}]{} {}",
             req.id,
@@ -1001,7 +1007,13 @@ fn handle_connection(
             // by ForegroundGuard for the swap.
             let prompt_result = {
                 let _g = lock_recover(&tty_lock);
-                fresh_prompt(&mut prepared, &env, no_shell, &*prompter, unattended_eligible)
+                fresh_prompt(
+                    &mut prepared,
+                    &env,
+                    no_shell,
+                    &*prompter,
+                    unattended_eligible,
+                )
             };
             let prompt_result = match prompt_result {
                 Ok(r) => r,
@@ -1017,8 +1029,9 @@ fn handle_connection(
                 // The TUI never emits ApprovedAlways for privileged
                 // requests; treat defensively as denial if it ever
                 // appears here so no policy can pre-grant root.
-                Ok(tui::PromptResult::ApprovedAlways)
-                | Ok(tui::PromptResult::Denied) => (Response::denied(&req.id), Outcome::Denied),
+                Ok(tui::PromptResult::ApprovedAlways) | Ok(tui::PromptResult::Denied) => {
+                    (Response::denied(&req.id), Outcome::Denied)
+                }
                 Ok(tui::PromptResult::Timeout) => (Response::timeout(&req.id), Outcome::Timeout),
                 Err(e) => {
                     log_prompt_io_error(verbose, &req.id, &e);
@@ -1051,7 +1064,13 @@ fn handle_connection(
         // `a` degrades to approve-once and grants nothing.
         let prompt_result = {
             let _g = lock_recover(&tty_lock);
-            fresh_prompt(&mut prepared, &env, no_shell, &*prompter, unattended_eligible)
+            fresh_prompt(
+                &mut prepared,
+                &env,
+                no_shell,
+                &*prompter,
+                unattended_eligible,
+            )
         };
         let prompt_result = match prompt_result {
             Ok(r) => r,
@@ -1118,7 +1137,10 @@ fn audit_programs(views: &[LeafView]) -> Vec<String> {
             let path = clip_middle(&r.path.display().to_string(), AUDIT_PATH_CHARS);
             let mut s = match r.canonical() {
                 Some(c) if c != r.path => {
-                    format!("{path} -> {}", clip_middle(&c.display().to_string(), AUDIT_PATH_CHARS))
+                    format!(
+                        "{path} -> {}",
+                        clip_middle(&c.display().to_string(), AUDIT_PATH_CHARS)
+                    )
                 }
                 _ => path,
             };
@@ -1157,7 +1179,9 @@ fn no_shell_violation(no_shell: bool, views: &[LeafView]) -> Option<String> {
     if !no_shell {
         return None;
     }
-    let (v, o) = views.iter().find_map(|v| v.opaque_reason.as_ref().map(|o| (v, o)))?;
+    let (v, o) = views
+        .iter()
+        .find_map(|v| v.opaque_reason.as_ref().map(|o| (v, o)))?;
     let prog = v.programs.get(o.at);
     let name = prog.map(|p| p.name.as_str()).unwrap_or("");
     let via = prog
@@ -1246,9 +1270,7 @@ fn read_request_line(stream: &mut UnixStream, deadline: Instant) -> io::Result<V
             // Per-syscall timeout: loop back so the deadline check at the
             // top of the loop converts a true deadline expiry into the
             // canonical "handshake deadline exceeded" error.
-            Err(e)
-                if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut =>
-            {
+            Err(e) if e.kind() == ErrorKind::WouldBlock || e.kind() == ErrorKind::TimedOut => {
                 continue;
             }
             Err(e) => return Err(e),
@@ -1279,7 +1301,10 @@ mod tests {
     fn audit_program_paths_are_clipped_in_the_middle() {
         let long = format!("/tmp/{}/bin/devtool", "d".repeat(300));
         let out = clip_middle(&long, AUDIT_PATH_CHARS);
-        assert!(out.starts_with("/tmp/ddd") && out.ends_with("/bin/devtool"), "{out}");
+        assert!(
+            out.starts_with("/tmp/ddd") && out.ends_with("/bin/devtool"),
+            "{out}"
+        );
         assert!(out.contains("more chars hidden"), "{out}");
         // The worst case: paths of PATH_MAX (4095 bytes, so a 4-digit hidden
         // count) on both sides of `->`, plus the marker.
@@ -1344,7 +1369,9 @@ mod tests {
         let s = "a\x1b[2J\u{9b}31m\u{7f}\u{202e}b\rc\n\td";
         let e = escape_for_terminal(s);
         assert_eq!(e, "a\\u{1b}[2J\\u{9b}31m\\u{7f}\\u{202e}b\\u{d}c\n\td");
-        assert!(!e.chars().any(|c| crate::protocol::has_dangerous_chars(&c.to_string()) && c != '\n'));
+        assert!(!e
+            .chars()
+            .any(|c| crate::protocol::has_dangerous_chars(&c.to_string()) && c != '\n'));
     }
 
     /// Issue #63: a stop dated before the daemon started is rejected; one
@@ -1477,10 +1504,19 @@ mod tests {
         // Local: canonical name, whole 127/8, IPv6 loopback, user@ and trailing
         // dot forms, case-insensitivity, own hostname (full + bare first label).
         for local in [
-            "localhost", "LOCALHOST", "LocalHost", "localhost.",
-            "127.0.0.1", "127.0.0.5", "127.1.2.3", "user@127.0.0.1",
-            "::1", "user@::1",
-            "box.local", "BOX.LOCAL", "box",
+            "localhost",
+            "LOCALHOST",
+            "LocalHost",
+            "localhost.",
+            "127.0.0.1",
+            "127.0.0.5",
+            "127.1.2.3",
+            "user@127.0.0.1",
+            "::1",
+            "user@::1",
+            "box.local",
+            "BOX.LOCAL",
+            "box",
         ] {
             assert!(
                 is_local_host(local, own),
@@ -1491,9 +1527,15 @@ mod tests {
         // remotes stay remote. An unrelated FQDN sharing our first label is
         // remote (only a bare label or the full FQDN counts as self).
         for remote in [
-            "127.0.0.1.evil.com", "notlocalhost", "localhost.evil.com",
-            "example.com", "10.0.0.4", "128.0.0.1", "::2",
-            "box.example.com", "buildbox",
+            "127.0.0.1.evil.com",
+            "notlocalhost",
+            "localhost.evil.com",
+            "example.com",
+            "10.0.0.4",
+            "128.0.0.1",
+            "::2",
+            "box.example.com",
+            "buildbox",
         ] {
             assert!(
                 !is_local_host(remote, own),
@@ -1512,9 +1554,9 @@ mod tests {
         // `sh -c` string, allow the caller to break out of the intended
         // command. The strict allowlist must reject every one.
         for bad in [
-            "a;b", "a|b", "a&b", "a$b", "a`b", "a(b", "a)b", "a<b", "a>b",
-            "a*b", "a?b", "a{b", "a}b", "a[b", "a]b", "a'b", "a\"b", "a\\b",
-            "a=b", "a,b", "a~b", "a!b", "a#b", "a%b", "a^b", "a+b", "a/b",
+            "a;b", "a|b", "a&b", "a$b", "a`b", "a(b", "a)b", "a<b", "a>b", "a*b", "a?b", "a{b",
+            "a}b", "a[b", "a]b", "a'b", "a\"b", "a\\b", "a=b", "a,b", "a~b", "a!b", "a#b", "a%b",
+            "a^b", "a+b", "a/b",
         ] {
             assert!(
                 validate_host(bad).is_err(),
@@ -1527,9 +1569,15 @@ mod tests {
     fn parse_age_rejects_malformed_strings() {
         assert!(parse_age("").is_none());
         assert!(parse_age("not-a-timestamp").is_none());
-        assert!(parse_age("2026-04-30").is_none(), "missing T-separated time");
+        assert!(
+            parse_age("2026-04-30").is_none(),
+            "missing T-separated time"
+        );
         assert!(parse_age("2026-04-30T12:00").is_none(), "incomplete time");
-        assert!(parse_age("2026-13-01T00:00:00Z").is_none(), "month out of range");
+        assert!(
+            parse_age("2026-13-01T00:00:00Z").is_none(),
+            "month out of range"
+        );
     }
 
     /// Issue #11 regression: out-of-range components used to underflow
@@ -1551,7 +1599,10 @@ mod tests {
         // Any well-formed past timestamp returns Some(_). We can't know the
         // exact age without freezing wall-clock time; just assert it parses.
         assert!(parse_age("2024-01-01T00:00:00Z").is_some());
-        assert!(parse_age("2024-01-01T00:00:00").is_some(), "trailing Z optional");
+        assert!(
+            parse_age("2024-01-01T00:00:00").is_some(),
+            "trailing Z optional"
+        );
     }
 
     #[test]
@@ -1560,7 +1611,10 @@ mod tests {
         // and pass freshness forever. It now parses to a negative age, and
         // the freshness window rejects it.
         let age = parse_age("3000-01-01T00:00:00Z").expect("valid ts");
-        assert!(age < 0, "future timestamp must have a negative age, got {age}");
+        assert!(
+            age < 0,
+            "future timestamp must have a negative age, got {age}"
+        );
         let err = check_age(age).unwrap_err();
         assert!(err.contains("in the future"), "{err}");
     }
@@ -1593,7 +1647,9 @@ mod tests {
         if check_age(age0).is_err() {
             return true; // never accepted: vacuous
         }
-        let Some(age_then) = age0.checked_add(d as i64) else { return true };
+        let Some(age_then) = age0.checked_add(d as i64) else {
+            return true;
+        };
         if check_age(age_then).is_err() {
             return true; // replay rejected by freshness: fine
         }
@@ -1626,7 +1682,10 @@ mod tests {
         // Worst case the window allows: accepted at the skew bound, replayed
         // at the age bound.
         let worst = (MAX_FUTURE_SKEW + MAX_REQUEST_AGE).as_secs();
-        assert!(fresh_replay_is_still_remembered(-(MAX_FUTURE_SKEW.as_secs() as i64), worst));
+        assert!(fresh_replay_is_still_remembered(
+            -(MAX_FUTURE_SKEW.as_secs() as i64),
+            worst
+        ));
     }
 
     // === Property: parse_age is total and panic-free ====================
@@ -1758,15 +1817,25 @@ mod tests {
         if ValidatedRequest::validate(req.clone()).is_err() {
             return true;
         }
-        let argv_clean = req.pipeline.iter().flatten().all(|a| !has_dangerous_chars(a));
+        let argv_clean = req
+            .pipeline
+            .iter()
+            .flatten()
+            .all(|a| !has_dangerous_chars(a));
         let env_clean = req
             .env
             .iter()
             .all(|(k, v)| !has_dangerous_chars(k) && !has_dangerous_chars(v));
-        let fields_clean =
-            [&req.reason, &req.session, &req.host, &req.version, &req.id, &req.requester]
-            .iter()
-            .all(|f| !has_dangerous_chars(f));
+        let fields_clean = [
+            &req.reason,
+            &req.session,
+            &req.host,
+            &req.version,
+            &req.id,
+            &req.requester,
+        ]
+        .iter()
+        .all(|f| !has_dangerous_chars(f));
         argv_clean && env_clean && fields_clean
     }
 

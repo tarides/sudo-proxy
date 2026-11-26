@@ -137,9 +137,7 @@ impl HostsConfig {
             .output()
             .map_err(|e| format!("ssh id -u: {e}"))?;
         if !output.status.success() {
-            return Err(format!(
-                "failed to get remote UID via ssh {host} id -u"
-            ));
+            return Err(format!("failed to get remote UID via ssh {host} id -u"));
         }
         let uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !is_valid_uid(&uid) {
@@ -207,7 +205,10 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
         return Err(format!("{shown}: not a regular file"));
     }
     if meta.uid() != uid {
-        return Err(format!("{shown}: owned by uid {}, expected {uid}", meta.uid()));
+        return Err(format!(
+            "{shown}: owned by uid {}, expected {uid}",
+            meta.uid()
+        ));
     }
     if meta.mode() & 0o022 != 0 {
         return Err(format!(
@@ -217,8 +218,7 @@ pub fn load_policy_from(path: &Path, uid: u32, stop_at: Option<&Path>) -> Result
     }
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let parent = std::fs::canonicalize(parent)
-        .map_err(|e| format!("{}: {e}", parent.display()))?;
+    let parent = std::fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
     check_dir_chain(&parent, uid, stop_at, None)?;
 
     let mut s = String::new();
@@ -261,8 +261,8 @@ pub fn check_dir_chain(
             ));
         }
         let root_sticky = m.uid() == 0 && m.mode() & 0o1000 != 0;
-        let private_group = private_gid.is_some_and(|g| m.uid() == uid && m.gid() == g)
-            && m.mode() & 0o002 == 0;
+        let private_group =
+            private_gid.is_some_and(|g| m.uid() == uid && m.gid() == g) && m.mode() & 0o002 == 0;
         if m.mode() & 0o022 != 0 && !root_sticky && !private_group {
             return Err(format!(
                 "{}: directory mode {:04o} is group/world-writable",
@@ -377,10 +377,9 @@ mod tests {
         // (`confirm_unprivileged:false`) must NOT survive the upgrade as an
         // active unattended grant. Serde ignores the unknown key and
         // `unattended_eligible` falls back to its fail-closed default.
-        let cfg: HostsConfig = serde_json::from_str(
-            r#"{"hosts":{},"policy":{"confirm_unprivileged":false}}"#,
-        )
-        .unwrap();
+        let cfg: HostsConfig =
+            serde_json::from_str(r#"{"hosts":{},"policy":{"confirm_unprivileged":false}}"#)
+                .unwrap();
         assert!(
             !cfg.policy.unattended_eligible,
             "a stale confirm_unprivileged key must not enable eligibility"
@@ -399,10 +398,8 @@ mod tests {
 
     #[test]
     fn policy_save_load_round_trip_on_disk() {
-        let dir = std::env::temp_dir().join(format!(
-            "sudo-proxy-policy-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("sudo-proxy-policy-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("hosts.json");
 
@@ -474,8 +471,11 @@ mod tests {
     #[test]
     fn strict_rejects_group_writable_parent_dir() {
         let (root, path) = eligible_config(0o600);
-        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o770))
-            .unwrap();
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o770),
+        )
+        .unwrap();
         let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
         assert!(e.contains("directory mode"), "{e}");
     }
@@ -485,8 +485,11 @@ mod tests {
         // The sticky exemption is for root-owned dirs only: a 1777 dir owned
         // by a user (here, ourselves) is still rejected.
         let (root, path) = eligible_config(0o600);
-        std::fs::set_permissions(path.parent().unwrap(), std::fs::Permissions::from_mode(0o1777))
-            .unwrap();
+        std::fs::set_permissions(
+            path.parent().unwrap(),
+            std::fs::Permissions::from_mode(0o1777),
+        )
+        .unwrap();
         let e = load_policy_from(&path, my_uid(), Some(root.path())).unwrap_err();
         assert!(e.contains("directory mode 1777"), "{e}");
     }
@@ -503,8 +506,8 @@ mod tests {
     #[test]
     fn strict_missing_file_is_not_eligible() {
         let root = tempfile::tempdir().unwrap();
-        let p = load_policy_from(&root.path().join("hosts.json"), my_uid(), Some(root.path()))
-            .unwrap();
+        let p =
+            load_policy_from(&root.path().join("hosts.json"), my_uid(), Some(root.path())).unwrap();
         assert!(!p.unattended_eligible);
     }
 }

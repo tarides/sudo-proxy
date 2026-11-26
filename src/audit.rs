@@ -348,8 +348,11 @@ fn safe(s: &str) -> String {
 
 fn human_line(time: &str, ev: &Event, outcome: Outcome) -> String {
     // Startup records have no request id.
-    let mut line =
-        if ev.id.is_empty() { time.to_string() } else { format!("{time} [{}]", safe(&ev.id)) };
+    let mut line = if ev.id.is_empty() {
+        time.to_string()
+    } else {
+        format!("{time} [{}]", safe(&ev.id))
+    };
     if let Some(uid) = ev.peer_uid {
         line.push_str(&format!(" uid={uid}"));
     }
@@ -459,7 +462,10 @@ mod tests {
             ..Default::default()
         });
         let raw = fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains('\u{202e}') && !raw.contains('\u{9b}'), "{raw}");
+        assert!(
+            !raw.contains('\u{202e}') && !raw.contains('\u{9b}'),
+            "{raw}"
+        );
         let v: serde_json::Value = serde_json::from_str(raw.trim()).unwrap();
         assert_eq!(v["session"], "evil\\u{202e}session\\u{1b}[31m");
     }

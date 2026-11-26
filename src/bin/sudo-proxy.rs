@@ -148,7 +148,10 @@ fn main() {
         if opts.no_shell.is_none() {
             effects.push("no_shell on");
         }
-        eprintln!("sudo-proxy: ignoring hosts.json policy ({}): {why}", effects.join(", "));
+        eprintln!(
+            "sudo-proxy: ignoring hosts.json policy ({}): {why}",
+            effects.join(", ")
+        );
     }
     let policy = policy.and_then(Result::ok);
     let mut unattended_eligible = opts
@@ -322,7 +325,10 @@ fn inherit_config(
         process::exit(1);
     };
     let (mode, patterns) = match inherit_env {
-        Some(v) => (InheritMode::Env, parse_patterns(v).unwrap_or_else(|e| fail(e))),
+        Some(v) => (
+            InheritMode::Env,
+            parse_patterns(v).unwrap_or_else(|e| fail(e)),
+        ),
         None if inherit_path => (InheritMode::Path, Vec::new()),
         None => return None,
     };
@@ -372,11 +378,15 @@ fn parse_args(args: &[String]) -> Opts {
     let mut inherit_env: Option<String> = None;
     let mut set_inherit_env = |v: Option<&str>| match (v, &inherit_env) {
         (_, Some(_)) => {
-            eprintln!("error: --inherit-env given twice; list every pattern in one comma-separated value");
+            eprintln!(
+                "error: --inherit-env given twice; list every pattern in one comma-separated value"
+            );
             std::process::exit(1);
         }
         (None, _) => {
-            eprintln!("error: --inherit-env requires a value (NAME, PREFIX* or *, comma-separated)");
+            eprintln!(
+                "error: --inherit-env requires a value (NAME, PREFIX* or *, comma-separated)"
+            );
             std::process::exit(1);
         }
         (Some(v), None) => inherit_env = Some(v.to_string()),
@@ -429,7 +439,9 @@ fn parse_args(args: &[String]) -> Opts {
             }
             "--inherit-path" => inherit_path = true,
             "--inherit-env" => set_inherit_env(iter.next().map(String::as_str)),
-            s if s.starts_with("--inherit-env=") => set_inherit_env(s.strip_prefix("--inherit-env=")),
+            s if s.starts_with("--inherit-env=") => {
+                set_inherit_env(s.strip_prefix("--inherit-env="))
+            }
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-proxy"),
             "--help" | "-h" => {
                 eprintln!("Usage: sudo-proxy [--socket PATH] [--host HOST] [--pkexec] [-v] [--log-json] [--unattended-eligible] [--no-shell] [--forward-agent] [--audit-log PATH | --no-audit-log] [--no-syslog] [--allow-injectable-tty] [--sudo-path PATH] [--inherit-path | --inherit-env PATTERN,…]");
@@ -458,7 +470,9 @@ fn parse_args(args: &[String]) -> Opts {
                 eprintln!("                              commands that opt in via forward_agent can use the local agent");
                 eprintln!("  --audit-log PATH            Audit log file (JSON lines, mode 0600, append-only)");
                 eprintln!("                              (default: $XDG_STATE_HOME/sudo-proxy/audit.jsonl,");
-                eprintln!("                              else ~/.local/state/sudo-proxy/audit.jsonl)");
+                eprintln!(
+                    "                              else ~/.local/state/sudo-proxy/audit.jsonl)"
+                );
                 eprintln!("  --no-audit-log              Do not write the audit file (stderr audit lines remain)");
                 eprintln!("  --no-syslog                 Do not send audit records to syslog (LOG_AUTHPRIV)");
                 eprintln!("  --allow-injectable-tty      Start even if other processes running as you can type into this");
@@ -590,9 +604,12 @@ fn run_remote(
 
     let mut ssh_args: Vec<&str> = vec![
         "-t",
-        "-o", "ServerAliveInterval=15",
-        "-o", "ServerAliveCountMax=3",
-        "-o", "ExitOnForwardFailure=yes",
+        "-o",
+        "ServerAliveInterval=15",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ExitOnForwardFailure=yes",
         // Silence the "channel N: open failed: connect failed: open
         // failed" lines that ssh prints to the terminal each time the
         // MCP readiness probe connects to the local end of -L before
@@ -600,8 +617,10 @@ fn run_remote(
         // failures log at INFO; LogLevel=ERROR drops them while keeping
         // auth failures, host-key mismatches, and other real errors
         // visible.
-        "-o", "LogLevel=ERROR",
-        "-L", &tunnel,
+        "-o",
+        "LogLevel=ERROR",
+        "-L",
+        &tunnel,
     ];
     if forward_agent {
         ssh_args.push("-A");
@@ -623,9 +642,7 @@ fn run_remote(
     }
 
     // exec replaces this process with SSH — no child to manage
-    let err = std::process::Command::new("ssh")
-        .args(&ssh_args)
-        .exec();
+    let err = std::process::Command::new("ssh").args(&ssh_args).exec();
 
     // exec() only returns on error
     eprintln!("error: failed to exec ssh: {err}");

@@ -8,9 +8,7 @@ pub enum Mode {
 
 impl Mode {
     pub fn detect() -> Self {
-        let has_display = env::var("DISPLAY")
-            .map(|v| !v.is_empty())
-            .unwrap_or(false);
+        let has_display = env::var("DISPLAY").map(|v| !v.is_empty()).unwrap_or(false);
         let has_wayland = env::var("WAYLAND_DISPLAY")
             .map(|v| !v.is_empty())
             .unwrap_or(false);

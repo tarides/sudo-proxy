@@ -85,7 +85,10 @@ fn shim_dir() -> PathBuf {
 impl PtyDaemon {
     pub fn spawn(opts: PtyOpts) -> Self {
         let shims = shim_dir();
-        let mode = std::fs::metadata(shims.join("sudo")).expect("tests/shims/sudo").permissions().mode();
+        let mode = std::fs::metadata(shims.join("sudo"))
+            .expect("tests/shims/sudo")
+            .permissions()
+            .mode();
         assert!(mode & 0o111 != 0, "tests/shims/sudo must be executable");
 
         // Under /tmp so the socket path fits in sun_path.
@@ -96,7 +99,11 @@ impl PtyDaemon {
         }
         if let Some((json, mode)) = &opts.hosts_json {
             std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-            std::fs::set_permissions(dir.path().join("config"), std::fs::Permissions::from_mode(0o700)).unwrap();
+            std::fs::set_permissions(
+                dir.path().join("config"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
             let cfg = dir.path().join("config/sudo-proxy");
             std::fs::create_dir(&cfg).expect("mkdir");
             std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -124,8 +131,11 @@ impl PtyDaemon {
             .arg(&sudo_shim)
             .args(&opts.args);
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into());
-        let mut daemon_path: Vec<String> =
-            opts.extra_path.iter().map(|p| p.display().to_string()).collect();
+        let mut daemon_path: Vec<String> = opts
+            .extra_path
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
         daemon_path.push(path);
         cmd.env_clear()
             .env("PATH", daemon_path.join(":"))
@@ -168,7 +178,17 @@ impl PtyDaemon {
             thread::spawn(move || read_loop(master, &capture, &stop))
         };
 
-        let mut d = Self { socket, child, master, _slave: slave, capture, cursor: 0, stop, reader: Some(reader), dir };
+        let mut d = Self {
+            socket,
+            child,
+            master,
+            _slave: slave,
+            capture,
+            cursor: 0,
+            stop,
+            reader: Some(reader),
+            dir,
+        };
         let deadline = Instant::now() + STEP;
         while UnixStream::connect(&d.socket).is_err() {
             if Instant::now() >= deadline {
@@ -294,7 +314,9 @@ impl PtyDaemon {
                 // Strip the last terminator rather than filtering empties, so
                 // a genuine "" argument is kept.
                 let rec = rec.strip_suffix(&[0]).unwrap_or(rec);
-                rec.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect()
+                rec.split(|&b| b == 0)
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect()
             })
             .collect()
     }
@@ -341,16 +363,43 @@ fn open_pty() -> (File, File) {
     // SAFETY: posix_openpt just returned this fd; nothing else owns it.
     let master = unsafe { File::from_raw_fd(master) };
     let m = master.as_raw_fd();
-    assert_eq!(unsafe { libc::grantpt(m) }, 0, "grantpt: {}", io::Error::last_os_error());
-    assert_eq!(unsafe { libc::unlockpt(m) }, 0, "unlockpt: {}", io::Error::last_os_error());
+    assert_eq!(
+        unsafe { libc::grantpt(m) },
+        0,
+        "grantpt: {}",
+        io::Error::last_os_error()
+    );
+    assert_eq!(
+        unsafe { libc::unlockpt(m) },
+        0,
+        "unlockpt: {}",
+        io::Error::last_os_error()
+    );
     let mut name = [0 as libc::c_char; 128];
-    assert_eq!(unsafe { libc::ptsname_r(m, name.as_mut_ptr(), name.len()) }, 0, "ptsname_r");
-    let slave = unsafe { libc::open(name.as_ptr(), libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC) };
+    assert_eq!(
+        unsafe { libc::ptsname_r(m, name.as_mut_ptr(), name.len()) },
+        0,
+        "ptsname_r"
+    );
+    let slave = unsafe {
+        libc::open(
+            name.as_ptr(),
+            libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC,
+        )
+    };
     assert!(slave >= 0, "open slave: {}", io::Error::last_os_error());
     // SAFETY: open just returned this fd; nothing else owns it.
     let slave = unsafe { File::from_raw_fd(slave) };
-    let ws = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 0, ws_ypixel: 0 };
-    assert_eq!(unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ, &ws) }, 0);
+    let ws = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    assert_eq!(
+        unsafe { libc::ioctl(slave.as_raw_fd(), libc::TIOCSWINSZ, &ws) },
+        0
+    );
     (master, slave)
 }
 
@@ -360,7 +409,11 @@ fn open_pty() -> (File, File) {
 fn read_loop(mut master: File, capture: &Capture, stop: &AtomicBool) {
     let mut buf = [0u8; 4096];
     while !stop.load(Ordering::Relaxed) {
-        let mut pfd = libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: master.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         let n = unsafe { libc::poll(&mut pfd, 1, 50) };
         if n <= 0 {
             continue;
@@ -387,5 +440,8 @@ fn normalize(bytes: &[u8]) -> String {
 
 /// Render control bytes visibly for failure dumps.
 pub fn visible(bytes: &[u8]) -> String {
-    normalize(bytes).replace('\x1b', "\\e").replace('\x07', "\\a").replace('\r', "\\r")
+    normalize(bytes)
+        .replace('\x1b', "\\e")
+        .replace('\x07', "\\a")
+        .replace('\r', "\\r")
 }

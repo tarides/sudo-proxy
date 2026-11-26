@@ -263,7 +263,10 @@ impl Inherited {
         let esc = crate::protocol::escape_dangerous;
         let mut out = String::new();
         let flag = self.mode.flag();
-        let _ = writeln!(out, "sudo-proxy: {flag}: requests with no escalated step run with:");
+        let _ = writeln!(
+            out,
+            "sudo-proxy: {flag}: requests with no escalated step run with:"
+        );
         if self.mode == InheritMode::Env {
             let pats: Vec<String> = self.patterns.iter().map(ToString::to_string).collect();
             let _ = writeln!(out, "  patterns: {}", pats.join(","));
@@ -280,7 +283,11 @@ impl Inherited {
             if existing.is_some_and(dir_controlled_by_me) {
                 tags.push("user-writable");
             }
-            let tags = if tags.is_empty() { String::new() } else { format!(" ({})", tags.join(", ")) };
+            let tags = if tags.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", tags.join(", "))
+            };
             let _ = writeln!(out, "    {}{tags}", esc(&e.dir));
         }
         if self.mode == InheritMode::Env {
@@ -290,7 +297,13 @@ impl Inherited {
                 let names: Vec<String> = self
                     .vars
                     .keys()
-                    .map(|k| if self.code_loading.contains(k) { format!("{k} (code-loading)") } else { k.clone() })
+                    .map(|k| {
+                        if self.code_loading.contains(k) {
+                            format!("{k} (code-loading)")
+                        } else {
+                            k.clone()
+                        }
+                    })
                     .collect();
                 let _ = writeln!(out, "  variables: {}", names.join(" "));
             }
@@ -307,7 +320,11 @@ impl Inherited {
             );
         } else {
             // No variables: both fingerprints would be the same hash.
-            let _ = writeln!(out, "  fingerprint: PATH {} (compare with the last start)", self.names_fingerprint());
+            let _ = writeln!(
+                out,
+                "  fingerprint: PATH {} (compare with the last start)",
+                self.names_fingerprint()
+            );
         }
         out
     }
@@ -321,7 +338,11 @@ fn feed(h: &mut Sha256, s: &str) {
 
 /// The first 12 hex digits of the digest.
 fn short(h: Sha256) -> String {
-    h.finalize().iter().take(6).map(|b| format!("{b:02x}")).collect()
+    h.finalize()
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Whether the daemon's effective uid may write `dir` (ACLs count).
@@ -362,19 +383,26 @@ pub fn check_path(path: &str, uid: u32) -> Result<Vec<PathEntry>, String> {
     path.split(':')
         .map(|dir| {
             if dir.is_empty() {
-                return Err("PATH has an empty entry (`::`, or a leading or trailing `:`), \
+                return Err(
+                    "PATH has an empty entry (`::`, or a leading or trailing `:`), \
                             which means the current directory"
-                    .to_string());
+                        .to_string(),
+                );
             }
             let shown = crate::protocol::escape_dangerous(dir);
             if crate::protocol::has_dangerous_chars(dir) {
-                return Err(format!("PATH entry {shown} contains a character the prompt rejects"));
+                return Err(format!(
+                    "PATH entry {shown} contains a character the prompt rejects"
+                ));
             }
             if !dir.starts_with('/') {
                 return Err(format!("PATH entry {shown} is relative"));
             }
             check_entry(Path::new(dir), uid, private_gid)
-                .map(|missing| PathEntry { dir: dir.to_string(), missing })
+                .map(|missing| PathEntry {
+                    dir: dir.to_string(),
+                    missing,
+                })
                 .map_err(|e| format!("PATH entry {shown}: {e}"))
         })
         .collect()
@@ -426,7 +454,8 @@ fn check_entry(dir: &Path, uid: u32, private_gid: Option<u32>) -> Result<bool, S
             meta.mode() & 0o7777
         ));
     }
-    let real = std::fs::canonicalize(existing).map_err(|e| format!("{}: {e}", existing.display()))?;
+    let real =
+        std::fs::canonicalize(existing).map_err(|e| format!("{}: {e}", existing.display()))?;
     crate::hosts::check_dir_chain(&real, uid, None, private_gid)?;
     Ok(missing)
 }
@@ -488,7 +517,10 @@ mod tests {
     }
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
-        pairs.iter().map(|(k, v)| (OsString::from(k), OsString::from(v))).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(k), OsString::from(v)))
+            .collect()
     }
 
     #[test]
@@ -501,7 +533,19 @@ mod tests {
                 Pattern::All
             ]
         );
-        for bad in ["", "A,,B", ",A", "A,", "*A", "A*B", "A**", "1A", "A-B", "A B", "SSH_AUTH_SOCK"] {
+        for bad in [
+            "",
+            "A,,B",
+            ",A",
+            "A,",
+            "*A",
+            "A*B",
+            "A**",
+            "1A",
+            "A-B",
+            "A B",
+            "SSH_AUTH_SOCK",
+        ] {
             assert!(parse_patterns(bad).is_err(), "{bad:?} must be refused");
         }
         // A prefix that happens to cover SSH_AUTH_SOCK is fine: wildcards skip it.
@@ -512,7 +556,15 @@ mod tests {
     fn wildcards_skip_excluded_names_and_exact_names_reach_them() {
         let all = Pattern::All;
         let ld = Pattern::Prefix("LD_".into());
-        for name in ["LD_PRELOAD", "PYTHONPATH", "DISPLAY", "TMUX", "SSH_AUTH_SOCK", "DYLD_X", "BASH_ENV"] {
+        for name in [
+            "LD_PRELOAD",
+            "PYTHONPATH",
+            "DISPLAY",
+            "TMUX",
+            "SSH_AUTH_SOCK",
+            "DYLD_X",
+            "BASH_ENV",
+        ] {
             assert!(!all.matches(name), "{name}");
         }
         assert!(!ld.matches("LD_PRELOAD"));
@@ -546,10 +598,19 @@ mod tests {
         let names: Vec<&str> = i.vars.keys().map(String::as_str).collect();
         assert_eq!(names, ["PYTHONPATH", "REPO_ROOT", "TF_VAR_x"]);
         assert_eq!(i.code_loading, ["PYTHONPATH"]);
-        assert!(i.skipped.iter().any(|s| s.starts_with("BASH_FUNC_f%%")), "{:?}", i.skipped);
-        assert!(i.skipped.iter().any(|s| s.starts_with("TF_VAR_bin")), "{:?}", i.skipped);
+        assert!(
+            i.skipped.iter().any(|s| s.starts_with("BASH_FUNC_f%%")),
+            "{:?}",
+            i.skipped
+        );
+        assert!(
+            i.skipped.iter().any(|s| s.starts_with("TF_VAR_bin")),
+            "{:?}",
+            i.skipped
+        );
 
-        let star = Inherited::from_env(InheritMode::Env, vec![Pattern::All], e.clone(), uid()).unwrap();
+        let star =
+            Inherited::from_env(InheritMode::Env, vec![Pattern::All], e.clone(), uid()).unwrap();
         assert!(star.vars.contains_key("OTHER"));
         for n in ["PYTHONPATH", "LD_PRELOAD", "SSH_AUTH_SOCK", "PATH"] {
             assert!(!star.vars.contains_key(n), "{n}");
@@ -566,7 +627,13 @@ mod tests {
         let path = d.path().display().to_string();
         let build = |v: &str| {
             let e = env(&[("PATH", &path), ("A", v), ("SECRET", "s")]);
-            Inherited::from_env(InheritMode::Env, parse_patterns("A,SECRET").unwrap(), e, uid()).unwrap()
+            Inherited::from_env(
+                InheritMode::Env,
+                parse_patterns("A,SECRET").unwrap(),
+                e,
+                uid(),
+            )
+            .unwrap()
         };
         let (one, two) = (build("1"), build("2"));
         assert_eq!(one.names_fingerprint(), two.names_fingerprint());
@@ -574,8 +641,14 @@ mod tests {
         assert_eq!(one.names_fingerprint().len(), 12);
         let r = one.report();
         assert!(r.contains("variables: A SECRET"), "{r}");
-        assert!(!r.contains("=1") && !r.contains("=s"), "values never shown: {r}");
-        assert!(r.contains(&one.names_fingerprint()) && r.contains(&one.values_fingerprint()), "{r}");
+        assert!(
+            !r.contains("=1") && !r.contains("=s"),
+            "values never shown: {r}"
+        );
+        assert!(
+            r.contains(&one.names_fingerprint()) && r.contains(&one.values_fingerprint()),
+            "{r}"
+        );
     }
 
     /// The report marks a missing entry user-writable when the user could
@@ -589,11 +662,18 @@ mod tests {
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let venv = format!("{}/.venv/bin", d.path().display());
         let path = format!("{venv}:/usr/bin");
-        let p = Inherited::from_env(InheritMode::Path, vec![], env(&[("PATH", &path)]), uid()).unwrap();
+        let p =
+            Inherited::from_env(InheritMode::Path, vec![], env(&[("PATH", &path)]), uid()).unwrap();
         let r = p.report();
-        assert!(r.contains(&format!("{venv} (missing, user-writable)")), "{r}");
+        assert!(
+            r.contains(&format!("{venv} (missing, user-writable)")),
+            "{r}"
+        );
         assert!(r.contains("    /usr/bin\n"), "{r}");
-        assert!(r.contains(&format!("fingerprint: PATH {} (", p.names_fingerprint())), "{r}");
+        assert!(
+            r.contains(&format!("fingerprint: PATH {} (", p.names_fingerprint())),
+            "{r}"
+        );
         assert!(!r.contains("names+values"), "{r}");
     }
 
@@ -618,16 +698,36 @@ mod tests {
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let okp = ok.display().to_string();
 
-        assert_eq!(check_path(&okp, me).unwrap(), vec![PathEntry { dir: okp.clone(), missing: false }]);
+        assert_eq!(
+            check_path(&okp, me).unwrap(),
+            vec![PathEntry {
+                dir: okp.clone(),
+                missing: false
+            }]
+        );
         assert!(check_path("/usr/bin", me).is_ok());
-        for bad in ["", ":/usr/bin", "/usr/bin:", "/usr/bin::/bin", ".", "bin", "/usr/bin:."] {
+        for bad in [
+            "",
+            ":/usr/bin",
+            "/usr/bin:",
+            "/usr/bin::/bin",
+            ".",
+            "bin",
+            "/usr/bin:.",
+        ] {
             assert!(check_path(bad, me).is_err(), "{bad:?} must be refused");
         }
         assert!(check_path("/usr/\u{1b}[2Jbin", me).is_err());
 
         // Missing entry: its nearest existing directory is checked.
         let venv = format!("{okp}/.venv/bin");
-        assert_eq!(check_path(&venv, me).unwrap(), vec![PathEntry { dir: venv.clone(), missing: true }]);
+        assert_eq!(
+            check_path(&venv, me).unwrap(),
+            vec![PathEntry {
+                dir: venv.clone(),
+                missing: true
+            }]
+        );
 
         // World-writable (not sticky) is refused, with or without a private group.
         let ww = d.path().join("ww");

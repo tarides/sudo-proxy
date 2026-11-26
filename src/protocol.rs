@@ -138,10 +138,7 @@ pub enum Plan {
         body: Box<Plan>,
     },
     /// Feed a file as stdin to the inner plan (Dune `with-stdin-from`, = `<`).
-    WithStdinFrom {
-        path: String,
-        body: Box<Plan>,
-    },
+    WithStdinFrom { path: String, body: Box<Plan> },
     /// Add an env var to the inner plan's scope (Dune `setenv`). Still subject
     /// to the executor's env allowlist at run time.
     Setenv {
@@ -150,24 +147,15 @@ pub enum Plan {
         body: Box<Plan>,
     },
     /// Change cwd for the inner plan (Dune `chdir`).
-    Chdir {
-        dir: String,
-        body: Box<Plan>,
-    },
+    Chdir { dir: String, body: Box<Plan> },
     /// Run the inner plan under a specific privilege context — `[ROOT]` or
     /// `[as <user>]`. The axis Dune lacks; see `RunAs`. On the wire `who` is
     /// flattened: `{"op":"run-as","as":"root","do":{…}}` /
     /// `{"op":"run-as","as":"user","name":"…","do":{…}}` (matching the MCP docs),
     /// not a nested `"who":{…}` object (see `wire::PlanWire`).
-    RunAs {
-        who: RunAs,
-        body: Box<Plan>,
-    },
+    RunAs { who: RunAs, body: Box<Plan> },
     /// Treat these exit codes as success (Dune `with-accepted-exit-codes`).
-    WithAcceptedExitCodes {
-        codes: Vec<i32>,
-        body: Box<Plan>,
-    },
+    WithAcceptedExitCodes { codes: Vec<i32>, body: Box<Plan> },
     /// EXPLICIT opaque escape hatch (Dune `system`/`bash`). Rendered at the
     /// prompt as "opaque — resolves only the shell"; the strict `no_shell`
     /// policy (`policy.no_shell` in hosts.json, or `--no-shell`) rejects it
@@ -282,15 +270,37 @@ mod wire {
                 Plan::Seq { steps } => PlanWire::Seq { steps },
                 Plan::Alt { steps } => PlanWire::Alt { steps },
                 Plan::Pipe { stages } => PlanWire::Pipe { stages },
-                Plan::Redirect { stream, target, body } => PlanWire::Redirect { stream, target, body },
+                Plan::Redirect {
+                    stream,
+                    target,
+                    body,
+                } => PlanWire::Redirect {
+                    stream,
+                    target,
+                    body,
+                },
                 Plan::WithStdinFrom { path, body } => PlanWire::WithStdinFrom { path, body },
                 Plan::Setenv { key, value, body } => PlanWire::Setenv { key, value, body },
                 Plan::Chdir { dir, body } => PlanWire::Chdir { dir, body },
-                Plan::RunAs { who: RunAs::Root, body } => PlanWire::RunAs { kind: RunAsKind::Root, name: None, body },
-                Plan::RunAs { who: RunAs::User { name }, body } => {
-                    PlanWire::RunAs { kind: RunAsKind::User, name: Some(name), body }
+                Plan::RunAs {
+                    who: RunAs::Root,
+                    body,
+                } => PlanWire::RunAs {
+                    kind: RunAsKind::Root,
+                    name: None,
+                    body,
+                },
+                Plan::RunAs {
+                    who: RunAs::User { name },
+                    body,
+                } => PlanWire::RunAs {
+                    kind: RunAsKind::User,
+                    name: Some(name),
+                    body,
+                },
+                Plan::WithAcceptedExitCodes { codes, body } => {
+                    PlanWire::WithAcceptedExitCodes { codes, body }
                 }
-                Plan::WithAcceptedExitCodes { codes, body } => PlanWire::WithAcceptedExitCodes { codes, body },
                 Plan::Shell { shell, script } => PlanWire::Shell { shell, script },
             }
         }
@@ -305,20 +315,32 @@ mod wire {
                 PlanWire::Seq { steps } => Plan::Seq { steps },
                 PlanWire::Alt { steps } => Plan::Alt { steps },
                 PlanWire::Pipe { stages } => Plan::Pipe { stages },
-                PlanWire::Redirect { stream, target, body } => Plan::Redirect { stream, target, body },
+                PlanWire::Redirect {
+                    stream,
+                    target,
+                    body,
+                } => Plan::Redirect {
+                    stream,
+                    target,
+                    body,
+                },
                 PlanWire::WithStdinFrom { path, body } => Plan::WithStdinFrom { path, body },
                 PlanWire::Setenv { key, value, body } => Plan::Setenv { key, value, body },
                 PlanWire::Chdir { dir, body } => Plan::Chdir { dir, body },
                 PlanWire::RunAs { kind, name, body } => {
                     let who = match (kind, name) {
                         (RunAsKind::Root, None) => RunAs::Root,
-                        (RunAsKind::Root, Some(_)) => return Err("run-as root takes no name".into()),
+                        (RunAsKind::Root, Some(_)) => {
+                            return Err("run-as root takes no name".into())
+                        }
                         (RunAsKind::User, Some(name)) => RunAs::User { name },
                         (RunAsKind::User, None) => return Err("run-as user needs a name".into()),
                     };
                     Plan::RunAs { who, body }
                 }
-                PlanWire::WithAcceptedExitCodes { codes, body } => Plan::WithAcceptedExitCodes { codes, body },
+                PlanWire::WithAcceptedExitCodes { codes, body } => {
+                    Plan::WithAcceptedExitCodes { codes, body }
+                }
                 PlanWire::Shell { shell, script } => Plan::Shell { shell, script },
             })
         }
@@ -461,14 +483,18 @@ impl Plan {
                     Stream::Both => (true, true),
                 };
                 if (o && out) || (e && err) {
-                    return Err("a stream is redirected twice; keep only one redirect per stream"
-                        .to_string());
+                    return Err(
+                        "a stream is redirected twice; keep only one redirect per stream"
+                            .to_string(),
+                    );
                 }
                 body.validate_stdio(out || o, err || e, inp)
             }
             Plan::WithStdinFrom { body, .. } => {
                 if inp {
-                    return Err("stdin is redirected twice; keep only one with-stdin-from".to_string());
+                    return Err(
+                        "stdin is redirected twice; keep only one with-stdin-from".to_string()
+                    );
                 }
                 body.validate_stdio(out, err, true)
             }
@@ -483,9 +509,9 @@ impl Plan {
                 }
                 Ok(())
             }
-            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
-                steps.iter().try_for_each(|s| s.validate_stdio(out, err, inp))
-            }
+            Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => steps
+                .iter()
+                .try_for_each(|s| s.validate_stdio(out, err, inp)),
             Plan::Setenv { body, .. }
             | Plan::Chdir { body, .. }
             | Plan::RunAs { body, .. }
@@ -558,8 +584,13 @@ impl Plan {
     pub fn contains_root(&self) -> bool {
         match self {
             Plan::Exec { .. } | Plan::Shell { .. } => false,
-            Plan::RunAs { who: RunAs::Root, .. } => true,
-            Plan::RunAs { who: RunAs::User { .. }, body } => body.contains_root(),
+            Plan::RunAs {
+                who: RunAs::Root, ..
+            } => true,
+            Plan::RunAs {
+                who: RunAs::User { .. },
+                body,
+            } => body.contains_root(),
             Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
                 steps.iter().any(Plan::contains_root)
             }
@@ -965,7 +996,9 @@ impl ValidatedRequest {
             ("requester", &req.requester),
         ] {
             if has_dangerous_chars(value) {
-                return Err(format!("{field} contains forbidden control/bidi characters"));
+                return Err(format!(
+                    "{field} contains forbidden control/bidi characters"
+                ));
             }
         }
         Ok(ValidatedRequest(req))
@@ -1123,7 +1156,10 @@ mod tests {
     #[test]
     fn exec_request_omits_action_on_wire() {
         let json = serde_json::to_string(&exec_request()).unwrap();
-        assert!(!json.contains("action"), "exec must not serialize `action`: {json}");
+        assert!(
+            !json.contains("action"),
+            "exec must not serialize `action`: {json}"
+        );
     }
 
     /// A control request must serialize an explicit empty pipeline (so old
@@ -1133,8 +1169,14 @@ mod tests {
     fn control_request_serializes_empty_pipeline_and_action() {
         let req = Request::control(String::new(), "test".into(), Action::Stop);
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""pipeline":[]"#), "missing empty pipeline: {json}");
-        assert!(json.contains(r#""action":"stop""#), "missing action: {json}");
+        assert!(
+            json.contains(r#""pipeline":[]"#),
+            "missing empty pipeline: {json}"
+        );
+        assert!(
+            json.contains(r#""action":"stop""#),
+            "missing action: {json}"
+        );
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(back.action, Action::Stop);
     }
@@ -1143,7 +1185,10 @@ mod tests {
     fn validate_allows_empty_pipeline_for_control_only() {
         for action in [Action::Stop, Action::Ping] {
             let req = Request::control(String::new(), "test".into(), action);
-            assert!(ValidatedRequest::validate(req).is_ok(), "{action:?} must validate");
+            assert!(
+                ValidatedRequest::validate(req).is_ok(),
+                "{action:?} must validate"
+            );
         }
         let mut req = Request::control(String::new(), "test".into(), Action::Exec);
         req.pipeline = vec![];
@@ -1172,7 +1217,10 @@ mod tests {
         let req: Request = serde_json::from_str(json).unwrap();
         assert_eq!(req.requester, "");
         let out = serde_json::to_string(&exec_request()).unwrap();
-        assert!(!out.contains("requester"), "empty requester must be omitted: {out}");
+        assert!(
+            !out.contains("requester"),
+            "empty requester must be omitted: {out}"
+        );
     }
 
     #[test]
@@ -1208,7 +1256,9 @@ mod tests {
     // === Structured plan schema ===========================================
 
     fn exec(argv: &[&str]) -> Plan {
-        Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+        Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     /// A single-stage pipeline desugars to a bare `Run`; a multi-stage pipeline
@@ -1220,7 +1270,12 @@ mod tests {
         assert_eq!(single, exec(&["ls", "-l"]));
 
         let multi = desugar_pipeline(&[vec!["ls".into()], vec!["wc".into(), "-l".into()]]);
-        assert_eq!(multi, Plan::Pipe { stages: vec![exec(&["ls"]), exec(&["wc", "-l"])] });
+        assert_eq!(
+            multi,
+            Plan::Pipe {
+                stages: vec![exec(&["ls"]), exec(&["wc", "-l"])]
+            }
+        );
 
         assert_eq!(desugar_pipeline(&[]), Plan::Run { steps: vec![] });
     }
@@ -1233,14 +1288,19 @@ mod tests {
         let req = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::Run { steps: vec![exec(&["true"]), exec(&["false"])] },
+            Plan::Run {
+                steps: vec![exec(&["true"]), exec(&["false"])],
+            },
             HashMap::new(),
             String::new(),
             true,
             false,
         );
         let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains(r#""op":"run""#), "tagged form missing: {json}");
+        assert!(
+            json.contains(r#""op":"run""#),
+            "tagged form missing: {json}"
+        );
         let back: Request = serde_json::from_str(&json).unwrap();
         assert_eq!(back.exec_plan(), req.exec_plan());
 
@@ -1248,21 +1308,29 @@ mod tests {
         let alt = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::Alt { steps: vec![exec(&["false"]), exec(&["true"])] },
+            Plan::Alt {
+                steps: vec![exec(&["false"]), exec(&["true"])],
+            },
             HashMap::new(),
             String::new(),
             true,
             false,
         );
         let alt_json = serde_json::to_string(&alt).unwrap();
-        assert!(alt_json.contains(r#""op":"alt""#), "tagged form missing: {alt_json}");
+        assert!(
+            alt_json.contains(r#""op":"alt""#),
+            "tagged form missing: {alt_json}"
+        );
         let alt_back: Request = serde_json::from_str(&alt_json).unwrap();
         assert_eq!(alt_back.exec_plan(), alt.exec_plan());
 
         // A pipeline request must not serialize a `plan` key.
         let flat = exec_request();
         let flat_json = serde_json::to_string(&flat).unwrap();
-        assert!(!flat_json.contains("plan"), "flat request leaked plan key: {flat_json}");
+        assert!(
+            !flat_json.contains("plan"),
+            "flat request leaked plan key: {flat_json}"
+        );
     }
 
     /// `run-as` uses the flattened wire form documented by the MCP tool —
@@ -1274,7 +1342,10 @@ mod tests {
         let root = Request::new_plan(
             String::new(),
             "s".into(),
-            Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["id", "-un"])) },
+            Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(exec(&["id", "-un"])),
+            },
             HashMap::new(),
             String::new(),
             true,
@@ -1282,8 +1353,14 @@ mod tests {
         );
         let json = serde_json::to_string(&root).unwrap();
         assert!(json.contains(r#""op":"run-as""#), "op tag missing: {json}");
-        assert!(json.contains(r#""as":"root""#), "flattened `as` missing: {json}");
-        assert!(!json.contains(r#""who""#), "`who` should be flattened away: {json}");
+        assert!(
+            json.contains(r#""as":"root""#),
+            "flattened `as` missing: {json}"
+        );
+        assert!(
+            !json.contains(r#""who""#),
+            "`who` should be flattened away: {json}"
+        );
         assert_eq!(
             serde_json::from_str::<Request>(&json).unwrap().exec_plan(),
             root.exec_plan()
@@ -1291,14 +1368,23 @@ mod tests {
 
         // The exact JSON shapes the MCP `plan` doc advertises must parse.
         let doc_root = r#"{"op":"run-as","as":"root","do":{"op":"exec","argv":["id"]}}"#;
-        let doc_user = r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#;
+        let doc_user =
+            r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#;
         let p_root: Plan = serde_json::from_str(doc_root).unwrap();
         let p_user: Plan = serde_json::from_str(doc_user).unwrap();
-        assert_eq!(p_root, Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["id"])) });
+        assert_eq!(
+            p_root,
+            Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(exec(&["id"]))
+            }
+        );
         assert_eq!(
             p_user,
             Plan::RunAs {
-                who: RunAs::User { name: "alice".into() },
+                who: RunAs::User {
+                    name: "alice".into()
+                },
                 body: Box::new(exec(&["id"])),
             }
         );
@@ -1314,24 +1400,41 @@ mod tests {
     fn wire_form_literals() {
         let b = || Box::new(exec(&["id"]));
         let cases: Vec<(Plan, &str)> = vec![
-            (exec(&["echo", "a b"]), r#"{"op":"exec","argv":["echo","a b"]}"#),
             (
-                Plan::Run { steps: vec![exec(&["true"]), exec(&["false"])] },
+                exec(&["echo", "a b"]),
+                r#"{"op":"exec","argv":["echo","a b"]}"#,
+            ),
+            (
+                Plan::Run {
+                    steps: vec![exec(&["true"]), exec(&["false"])],
+                },
                 r#"{"op":"run","steps":[{"op":"exec","argv":["true"]},{"op":"exec","argv":["false"]}]}"#,
             ),
-            (Plan::Seq { steps: vec![exec(&["true"])] }, r#"{"op":"seq","steps":[{"op":"exec","argv":["true"]}]}"#),
             (
-                Plan::Alt { steps: vec![exec(&["false"]), exec(&["true"])] },
+                Plan::Seq {
+                    steps: vec![exec(&["true"])],
+                },
+                r#"{"op":"seq","steps":[{"op":"exec","argv":["true"]}]}"#,
+            ),
+            (
+                Plan::Alt {
+                    steps: vec![exec(&["false"]), exec(&["true"])],
+                },
                 r#"{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["true"]}]}"#,
             ),
             (
-                Plan::Pipe { stages: vec![exec(&["ls"]), exec(&["wc", "-l"])] },
+                Plan::Pipe {
+                    stages: vec![exec(&["ls"]), exec(&["wc", "-l"])],
+                },
                 r#"{"op":"pipe","stages":[{"op":"exec","argv":["ls"]},{"op":"exec","argv":["wc","-l"]}]}"#,
             ),
             (
                 Plan::Redirect {
                     stream: Stream::Stdout,
-                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Truncate },
+                    target: RedirTarget::File {
+                        path: "/tmp/o".into(),
+                        mode: WriteMode::Truncate,
+                    },
                     body: b(),
                 },
                 r#"{"op":"redirect","stream":"stdout","target":{"to":"file","path":"/tmp/o","mode":"truncate"},"do":{"op":"exec","argv":["id"]}}"#,
@@ -1339,45 +1442,79 @@ mod tests {
             (
                 Plan::Redirect {
                     stream: Stream::Both,
-                    target: RedirTarget::File { path: "/tmp/o".into(), mode: WriteMode::Append },
+                    target: RedirTarget::File {
+                        path: "/tmp/o".into(),
+                        mode: WriteMode::Append,
+                    },
                     body: b(),
                 },
                 r#"{"op":"redirect","stream":"both","target":{"to":"file","path":"/tmp/o","mode":"append"},"do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::Redirect { stream: Stream::Stderr, target: RedirTarget::DevNull, body: b() },
+                Plan::Redirect {
+                    stream: Stream::Stderr,
+                    target: RedirTarget::DevNull,
+                    body: b(),
+                },
                 r#"{"op":"redirect","stream":"stderr","target":{"to":"dev-null"},"do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::WithStdinFrom { path: "/etc/hosts".into(), body: b() },
+                Plan::WithStdinFrom {
+                    path: "/etc/hosts".into(),
+                    body: b(),
+                },
                 r#"{"op":"with-stdin-from","path":"/etc/hosts","do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::Setenv { key: "LANG".into(), value: "C".into(), body: b() },
+                Plan::Setenv {
+                    key: "LANG".into(),
+                    value: "C".into(),
+                    body: b(),
+                },
                 r#"{"op":"setenv","key":"LANG","value":"C","do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::Chdir { dir: "/srv".into(), body: b() },
+                Plan::Chdir {
+                    dir: "/srv".into(),
+                    body: b(),
+                },
                 r#"{"op":"chdir","dir":"/srv","do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::RunAs { who: RunAs::Root, body: b() },
+                Plan::RunAs {
+                    who: RunAs::Root,
+                    body: b(),
+                },
                 r#"{"op":"run-as","as":"root","do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::RunAs { who: RunAs::User { name: "alice".into() }, body: b() },
+                Plan::RunAs {
+                    who: RunAs::User {
+                        name: "alice".into(),
+                    },
+                    body: b(),
+                },
                 r#"{"op":"run-as","as":"user","name":"alice","do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::WithAcceptedExitCodes { codes: vec![0, 1], body: b() },
+                Plan::WithAcceptedExitCodes {
+                    codes: vec![0, 1],
+                    body: b(),
+                },
                 r#"{"op":"with-accepted-exit-codes","codes":[0,1],"do":{"op":"exec","argv":["id"]}}"#,
             ),
             (
-                Plan::Shell { shell: ShellProc::Bash, script: "echo hi".into() },
+                Plan::Shell {
+                    shell: ShellProc::Bash,
+                    script: "echo hi".into(),
+                },
                 r#"{"op":"shell","shell":"bash","script":"echo hi"}"#,
             ),
             (
-                Plan::Shell { shell: ShellProc::Sh, script: "true".into() },
+                Plan::Shell {
+                    shell: ShellProc::Sh,
+                    script: "true".into(),
+                },
                 r#"{"op":"shell","shell":"sh","script":"true"}"#,
             ),
         ];
@@ -1394,12 +1531,20 @@ mod tests {
         const WORD: &[u8] = b"abc /-_.=x";
         let word = |rng: &mut crate::prop::Rng| rng.string(WORD, 6);
         if depth == 0 {
-            return Plan::Exec { argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect() };
+            return Plan::Exec {
+                argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect(),
+            };
         }
         let sub = |rng: &mut crate::prop::Rng| Box::new(random_wire_plan(rng, depth - 1));
-        let subs = |rng: &mut crate::prop::Rng| (0..rng.below(3)).map(|_| random_wire_plan(rng, depth - 1)).collect();
+        let subs = |rng: &mut crate::prop::Rng| {
+            (0..rng.below(3))
+                .map(|_| random_wire_plan(rng, depth - 1))
+                .collect()
+        };
         match rng.below(13) {
-            0 => Plan::Exec { argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect() },
+            0 => Plan::Exec {
+                argv: (0..1 + rng.below(3)).map(|_| word(rng)).collect(),
+            },
             1 => Plan::Run { steps: subs(rng) },
             2 => Plan::Seq { steps: subs(rng) },
             3 => Plan::Alt { steps: subs(rng) },
@@ -1416,16 +1561,35 @@ mod tests {
                 },
                 body: sub(rng),
             },
-            6 => Plan::WithStdinFrom { path: word(rng), body: sub(rng) },
-            7 => Plan::Setenv { key: word(rng), value: word(rng), body: sub(rng) },
-            8 => Plan::Chdir { dir: word(rng), body: sub(rng) },
-            9 => Plan::RunAs { who: RunAs::Root, body: sub(rng) },
-            10 => Plan::RunAs { who: RunAs::User { name: word(rng) }, body: sub(rng) },
+            6 => Plan::WithStdinFrom {
+                path: word(rng),
+                body: sub(rng),
+            },
+            7 => Plan::Setenv {
+                key: word(rng),
+                value: word(rng),
+                body: sub(rng),
+            },
+            8 => Plan::Chdir {
+                dir: word(rng),
+                body: sub(rng),
+            },
+            9 => Plan::RunAs {
+                who: RunAs::Root,
+                body: sub(rng),
+            },
+            10 => Plan::RunAs {
+                who: RunAs::User { name: word(rng) },
+                body: sub(rng),
+            },
             11 => Plan::WithAcceptedExitCodes {
                 codes: (0..rng.below(3)).map(|_| rng.below(256) as i32).collect(),
                 body: sub(rng),
             },
-            _ => Plan::Shell { shell: [ShellProc::Sh, ShellProc::Bash][rng.below(2)], script: word(rng) },
+            _ => Plan::Shell {
+                shell: [ShellProc::Sh, ShellProc::Bash][rng.below(2)],
+                script: word(rng),
+            },
         }
     }
 
@@ -1483,7 +1647,9 @@ mod tests {
             (format!(r#"{{"op":"run-as","as":"user","do":{id}}}"#), "run-as user needs a name"),
         ];
         for (json, want) in &cases {
-            let err = serde_json::from_str::<Plan>(json).expect_err(json).to_string();
+            let err = serde_json::from_str::<Plan>(json)
+                .expect_err(json)
+                .to_string();
             assert!(err.contains(want), "{json}\n  wanted {want:?}\n  got {err}");
         }
     }
@@ -1493,12 +1659,25 @@ mod tests {
     /// request with an unknown key inside `plan` is rejected.
     #[test]
     fn request_stays_lenient_but_its_plan_is_strict() {
-        let req = Request::new_plan(String::new(), "s".into(), exec(&["id"]), HashMap::new(), String::new(), false, false);
+        let req = Request::new_plan(
+            String::new(),
+            "s".into(),
+            exec(&["id"]),
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
+        );
         let mut v = serde_json::to_value(&req).unwrap();
         v["from_a_newer_client"] = serde_json::json!(true);
-        assert!(serde_json::from_value::<Request>(v.clone()).is_ok(), "top-level unknown key must be accepted");
+        assert!(
+            serde_json::from_value::<Request>(v.clone()).is_ok(),
+            "top-level unknown key must be accepted"
+        );
         v["plan"]["x"] = serde_json::json!(1);
-        let err = serde_json::from_value::<Request>(v).expect_err("plan unknown key").to_string();
+        let err = serde_json::from_value::<Request>(v)
+            .expect_err("plan unknown key")
+            .to_string();
         assert!(err.contains("unknown field `x`"), "{err}");
     }
 
@@ -1518,12 +1697,17 @@ mod tests {
             false, // unprivileged flag...
             false,
         );
-        assert!(req.effective_privileged(), "root RunAs must force privileged");
+        assert!(
+            req.effective_privileged(),
+            "root RunAs must force privileged"
+        );
         assert!(req.runs_as_root());
 
         // A named-user RunAs still forces the privileged gate, but is not root.
         req.plan = Some(Plan::RunAs {
-            who: RunAs::User { name: "alice".into() },
+            who: RunAs::User {
+                name: "alice".into(),
+            },
             body: Box::new(exec(&["dune", "build"])),
         });
         assert!(req.effective_privileged());
@@ -1567,10 +1751,19 @@ mod tests {
         // Nest RunAs past MAX_PLAN_DEPTH.
         let mut p = exec(&["true"]);
         for _ in 0..(MAX_PLAN_DEPTH + 2) {
-            p = Plan::RunAs { who: RunAs::Root, body: Box::new(p) };
+            p = Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(p),
+            };
         }
         let req = Request::new_plan(
-            String::new(), "s".into(), p, HashMap::new(), String::new(), true, false,
+            String::new(),
+            "s".into(),
+            p,
+            HashMap::new(),
+            String::new(),
+            true,
+            false,
         );
         let err = ValidatedRequest::validate(req).unwrap_err();
         assert!(err.contains("nesting exceeds"), "got: {err}");
@@ -1579,40 +1772,69 @@ mod tests {
     #[test]
     fn validate_rejects_empty_run_and_short_pipe() {
         let empty_run = Request::new_plan(
-            String::new(), "s".into(), Plan::Exec { argv: vec![] },
-            HashMap::new(), String::new(), false, false,
+            String::new(),
+            "s".into(),
+            Plan::Exec { argv: vec![] },
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
         );
         assert!(ValidatedRequest::validate(empty_run).is_err());
 
         let short_pipe = Request::new_plan(
-            String::new(), "s".into(),
-            Plan::Pipe { stages: vec![exec(&["ls"])] },
-            HashMap::new(), String::new(), false, false,
+            String::new(),
+            "s".into(),
+            Plan::Pipe {
+                stages: vec![exec(&["ls"])],
+            },
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
         );
         assert!(ValidatedRequest::validate(short_pipe).is_err());
 
         let empty_alt = Request::new_plan(
-            String::new(), "s".into(),
+            String::new(),
+            "s".into(),
             Plan::Alt { steps: vec![] },
-            HashMap::new(), String::new(), false, false,
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
         );
         assert!(ValidatedRequest::validate(empty_alt).is_err());
     }
 
     fn plan_req(plan: Plan) -> Request {
-        Request::new_plan(String::new(), "s".into(), plan, HashMap::new(), String::new(), false, false)
+        Request::new_plan(
+            String::new(),
+            "s".into(),
+            plan,
+            HashMap::new(),
+            String::new(),
+            false,
+            false,
+        )
     }
 
     fn redirect(stream: Stream, path: &str, body: Plan) -> Plan {
         Plan::Redirect {
             stream,
-            target: RedirTarget::File { path: path.into(), mode: WriteMode::Truncate },
+            target: RedirTarget::File {
+                path: path.into(),
+                mode: WriteMode::Truncate,
+            },
             body: Box::new(body),
         }
     }
 
     fn stdin_from(path: &str, body: Plan) -> Plan {
-        Plan::WithStdinFrom { path: path.into(), body: Box::new(body) }
+        Plan::WithStdinFrom {
+            path: path.into(),
+            body: Box::new(body),
+        }
     }
 
     /// The shell lets the last redirection of a stream win, the executor the
@@ -1630,10 +1852,17 @@ mod tests {
         for (outer, inner) in twice {
             let p = redirect(outer, "/tmp/f", redirect(inner, "/tmp/g", exec(&["echo"])));
             let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
-            assert!(err.contains("redirected twice"), "{outer:?}/{inner:?}: {err}");
+            assert!(
+                err.contains("redirected twice"),
+                "{outer:?}/{inner:?}: {err}"
+            );
         }
         // Different streams are fine.
-        let p = redirect(Stream::Stdout, "/tmp/f", redirect(Stream::Stderr, "/tmp/g", exec(&["echo"])));
+        let p = redirect(
+            Stream::Stdout,
+            "/tmp/f",
+            redirect(Stream::Stderr, "/tmp/g", exec(&["echo"])),
+        );
         assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
         // So is the same stream on sibling steps.
         let p = Plan::Run {
@@ -1645,22 +1874,34 @@ mod tests {
         assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
         // Stdin twice.
         let p = stdin_from("/dev/null", stdin_from("/dev/zero", exec(&["cat"])));
-        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("stdin is redirected twice"));
+        assert!(ValidatedRequest::validate(plan_req(p))
+            .unwrap_err()
+            .contains("stdin is redirected twice"));
     }
 
     #[test]
     fn validate_rejects_stdin_on_a_later_pipe_stage() {
-        let p = Plan::Pipe { stages: vec![exec(&["echo", "x"]), stdin_from("/etc/hostname", exec(&["cat"]))] };
+        let p = Plan::Pipe {
+            stages: vec![
+                exec(&["echo", "x"]),
+                stdin_from("/etc/hostname", exec(&["cat"])),
+            ],
+        };
         let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
         assert!(err.contains("first pipe stage"), "{err}");
-        let p = Plan::Pipe { stages: vec![stdin_from("/etc/hostname", exec(&["cat"])), exec(&["wc"])] };
+        let p = Plan::Pipe {
+            stages: vec![stdin_from("/etc/hostname", exec(&["cat"])), exec(&["wc"])],
+        };
         assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
     }
 
     #[test]
     fn validate_requires_absolute_plan_paths() {
         let cases = [
-            Plan::Chdir { dir: "bin".into(), body: Box::new(exec(&["pwd"])) },
+            Plan::Chdir {
+                dir: "bin".into(),
+                body: Box::new(exec(&["pwd"])),
+            },
             redirect(Stream::Stdout, "out.txt", exec(&["echo"])),
             stdin_from("in.txt", exec(&["cat"])),
         ];
@@ -1668,7 +1909,10 @@ mod tests {
             let err = ValidatedRequest::validate(plan_req(p)).unwrap_err();
             assert!(err.contains("must be an absolute path"), "{err}");
         }
-        let p = Plan::Chdir { dir: "/usr".into(), body: Box::new(exec(&["pwd"])) };
+        let p = Plan::Chdir {
+            dir: "/usr".into(),
+            body: Box::new(exec(&["pwd"])),
+        };
         assert!(ValidatedRequest::validate(plan_req(p)).is_ok());
     }
 
@@ -1677,7 +1921,15 @@ mod tests {
         for good in ["LANG", "LC_ALL", "_x", "a1"] {
             assert!(is_valid_env_name(good), "{good}");
         }
-        for bad in ["", "1A", "LC_X;echo INJECTED;:", "A-B", "A B", "A=B", "LC_$(id)"] {
+        for bad in [
+            "",
+            "1A",
+            "LC_X;echo INJECTED;:",
+            "A-B",
+            "A B",
+            "A=B",
+            "LC_$(id)",
+        ] {
             assert!(!is_valid_env_name(bad), "{bad}");
         }
         let p = Plan::Setenv {
@@ -1685,26 +1937,53 @@ mod tests {
             value: "v".into(),
             body: Box::new(exec(&["echo", "ok"])),
         };
-        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("not a valid variable name"));
+        assert!(ValidatedRequest::validate(plan_req(p))
+            .unwrap_err()
+            .contains("not a valid variable name"));
         let mut req = exec_request();
         req.env.insert("LC_X;echo INJECTED;:".into(), "v".into());
-        assert!(ValidatedRequest::validate(req).unwrap_err().contains("not a valid variable name"));
+        assert!(ValidatedRequest::validate(req)
+            .unwrap_err()
+            .contains("not a valid variable name"));
     }
 
     /// `root` by name is root; `#uid` (which sudo reads as a uid, so `#0` is
     /// root) is refused.
     #[test]
     fn run_as_root_by_name_is_root_and_uid_form_is_refused() {
-        let p = Plan::RunAs { who: RunAs::User { name: "root".into() }, body: Box::new(exec(&["id"])) };
+        let p = Plan::RunAs {
+            who: RunAs::User {
+                name: "root".into(),
+            },
+            body: Box::new(exec(&["id"])),
+        };
         let v = ValidatedRequest::validate(plan_req(p)).unwrap();
         assert!(v.runs_as_root());
-        assert!(matches!(v.plan, Some(Plan::RunAs { who: RunAs::Root, .. })));
+        assert!(matches!(
+            v.plan,
+            Some(Plan::RunAs {
+                who: RunAs::Root,
+                ..
+            })
+        ));
 
-        let p = Plan::RunAs { who: RunAs::User { name: "#0".into() }, body: Box::new(exec(&["id"])) };
-        assert!(ValidatedRequest::validate(plan_req(p)).unwrap_err().contains("#uid"));
+        let p = Plan::RunAs {
+            who: RunAs::User { name: "#0".into() },
+            body: Box::new(exec(&["id"])),
+        };
+        assert!(ValidatedRequest::validate(plan_req(p))
+            .unwrap_err()
+            .contains("#uid"));
 
-        let p = Plan::RunAs { who: RunAs::User { name: "nobody".into() }, body: Box::new(exec(&["id"])) };
-        assert!(!ValidatedRequest::validate(plan_req(p)).unwrap().runs_as_root());
+        let p = Plan::RunAs {
+            who: RunAs::User {
+                name: "nobody".into(),
+            },
+            body: Box::new(exec(&["id"])),
+        };
+        assert!(!ValidatedRequest::validate(plan_req(p))
+            .unwrap()
+            .runs_as_root());
     }
 
     /// Default_Ignorable_Code_Point, copied verbatim (one entry per line, not

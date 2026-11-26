@@ -67,7 +67,10 @@ fn saved_hosts_file_is_owner_only() {
         & 0o777;
     unsafe { libc::umask(prev) };
 
-    assert_eq!(file_mode, 0o600, "hosts.json must be 0600, got {file_mode:o}");
+    assert_eq!(
+        file_mode, 0o600,
+        "hosts.json must be 0600, got {file_mode:o}"
+    );
     assert_eq!(dir_mode, 0o700, "config dir must be 0700, got {dir_mode:o}");
 }
 
@@ -162,7 +165,10 @@ mod instructions_format {
     fn empty_config_shows_mcp_version_and_no_known_hosts() {
         let out = build_instructions(&HostsConfig::default(), true);
         assert!(
-            out.contains(&format!("This sudo-proxy-mcp is version {}.", protocol::VERSION)),
+            out.contains(&format!(
+                "This sudo-proxy-mcp is version {}.",
+                protocol::VERSION
+            )),
             "missing self-version line in: {out}"
         );
         assert!(
@@ -180,7 +186,12 @@ mod instructions_format {
         let mut cfg = HostsConfig::default();
         cfg.hosts.insert(
             "host-a.example".into(),
-            host("0.6.0", "Ubuntu 24.04", "2026-05-04T16:16:20Z", "example CI server"),
+            host(
+                "0.6.0",
+                "Ubuntu 24.04",
+                "2026-05-04T16:16:20Z",
+                "example CI server",
+            ),
         );
         let out = build_instructions(&cfg, true);
         let expected =
@@ -239,12 +250,18 @@ fn world_writable_hosts_json_policy_is_ignored() {
     assert!(load_policy_from(&path, uid, Some(root.path())).is_err());
 
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    assert!(load_policy_from(&path, uid, Some(root.path())).unwrap().unattended_eligible);
+    assert!(
+        load_policy_from(&path, uid, Some(root.path()))
+            .unwrap()
+            .unattended_eligible
+    );
 
     // Walking all the way to `/` (config not under $HOME) passes through
     // /tmp (root-owned, 1777, sticky): that ancestor must be accepted.
     assert!(
-        load_policy_from(&path, uid, None).unwrap().unattended_eligible,
+        load_policy_from(&path, uid, None)
+            .unwrap()
+            .unattended_eligible,
         "a root-owned sticky ancestor must not cause a rejection"
     );
 }
@@ -253,11 +270,10 @@ fn world_writable_hosts_json_policy_is_ignored() {
 /// working) and round-trips when set.
 #[test]
 fn policy_no_shell_defaults_off_and_roundtrips() {
-    let cfg: HostsConfig = serde_json::from_str(r#"{"policy":{"unattended_eligible":true}}"#)
-        .expect("parse");
-    assert!(!cfg.policy.no_shell);
     let cfg: HostsConfig =
-        serde_json::from_str(r#"{"policy":{"no_shell":true}}"#).expect("parse");
+        serde_json::from_str(r#"{"policy":{"unattended_eligible":true}}"#).expect("parse");
+    assert!(!cfg.policy.no_shell);
+    let cfg: HostsConfig = serde_json::from_str(r#"{"policy":{"no_shell":true}}"#).expect("parse");
     assert!(cfg.policy.no_shell);
     let back: HostsConfig =
         serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).expect("reparse");

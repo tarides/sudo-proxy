@@ -21,7 +21,9 @@ use common::*;
 fn plan_req(id: &str, dir: &Path, argv: &[&str]) -> Request {
     let plan = Plan::Chdir {
         dir: dir.to_str().unwrap().to_string(),
-        body: Box::new(Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }),
+        body: Box::new(Plan::Exec {
+            argv: argv.iter().map(|s| s.to_string()).collect(),
+        }),
     };
     let mut req = Request::new_plan(
         String::new(),
@@ -49,7 +51,10 @@ fn script(path: &Path, body: &str) {
 
 /// A server whose prompt runs `during` and then approves.
 fn server_with(no_shell: bool, during: impl Fn() + Send + Sync + 'static) -> TestServer {
-    let s = start_test_server(TestServerOpts { no_shell, ..Default::default() });
+    let s = start_test_server(TestServerOpts {
+        no_shell,
+        ..Default::default()
+    });
     s.prompter.set_response(move |_| {
         during();
         (Duration::ZERO, PromptResult::Approved)
@@ -60,7 +65,10 @@ fn server_with(no_shell: bool, during: impl Fn() + Send + Sync + 'static) -> Tes
 fn assert_refused(resp: &Response, what: &str) {
     assert_eq!(resp.status, Status::Error, "{what}: {resp:?}");
     let msg = resp.message.as_deref().unwrap_or("");
-    assert!(msg.contains("changed since it was approved"), "{what}: {msg}");
+    assert!(
+        msg.contains("changed since it was approved"),
+        "{what}: {msg}"
+    );
 }
 
 fn tempdir() -> tempfile::TempDir {
@@ -76,7 +84,10 @@ fn file_replaced_after_approval_is_refused() {
     script(&d.join("tool"), &format!("touch {}/ran-old", d.display()));
     let swap = d.clone();
     let s = server_with(false, move || {
-        script(&swap.join("tool.new"), &format!("touch {}/ran-new", swap.display()));
+        script(
+            &swap.join("tool.new"),
+            &format!("touch {}/ran-new", swap.display()),
+        );
         std::fs::rename(swap.join("tool.new"), swap.join("tool")).unwrap();
     });
     let resp = s.send(&plan_req("pin-rename", &d, &["./tool"]));
@@ -88,8 +99,12 @@ fn file_replaced_after_approval_is_refused() {
 /// the symlink points at a shell by spawn time.
 #[test]
 fn symlink_retargeted_to_a_shell_is_refused() {
-    let Some(truth) = sudo_proxy::executor::resolve_command("true", "/") else { return };
-    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else { return };
+    let Some(truth) = sudo_proxy::executor::resolve_command("true", "/") else {
+        return;
+    };
+    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else {
+        return;
+    };
     let dir = tempdir();
     let d = dir.path().to_path_buf();
     symlink(&truth.path, d.join("x")).unwrap();
@@ -101,7 +116,11 @@ fn symlink_retargeted_to_a_shell_is_refused() {
     let marker = d.join("shell-ran");
     let cmd = format!("touch {}", marker.display());
     let resp = s.send(&plan_req("pin-symlink", &d, &["./x", "-c", &cmd]));
-    assert_eq!(s.prompter.call_count(), 1, "transparent at the check, so prompted");
+    assert_eq!(
+        s.prompter.call_count(),
+        1,
+        "transparent at the check, so prompted"
+    );
     assert_refused(&resp, "retargeted symlink");
     assert!(!marker.exists(), "the shell ran");
 }
@@ -117,11 +136,18 @@ fn wrapped_program_is_pinned_and_named_by_path() {
     let s = server_with(false, || {});
     let resp = s.send(&plan_req("pin-wrapped-ok", &d, &["env", "./x"]));
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
-    assert_eq!(stdout(&resp).trim_end(), d.join("./x").to_str().unwrap(), "absolute path");
+    assert_eq!(
+        stdout(&resp).trim_end(),
+        d.join("./x").to_str().unwrap(),
+        "absolute path"
+    );
 
     let swap = d.clone();
     let s = server_with(false, move || {
-        script(&swap.join("x.new"), &format!("touch {}/ran-new", swap.display()));
+        script(
+            &swap.join("x.new"),
+            &format!("touch {}/ran-new", swap.display()),
+        );
         std::fs::rename(swap.join("x.new"), swap.join("x")).unwrap();
     });
     let resp = s.send(&plan_req("pin-wrapped-swap", &d, &["env", "./x"]));
@@ -135,10 +161,17 @@ fn wrapped_program_is_pinned_and_named_by_path() {
 fn unresolved_wrapped_program_is_refused() {
     let dir = tempdir();
     let s = server_with(false, || {});
-    let resp = s.send(&plan_req("pin-wrapped-missing", dir.path(), &["env", "./absent"]));
+    let resp = s.send(&plan_req(
+        "pin-wrapped-missing",
+        dir.path(),
+        &["env", "./absent"],
+    ));
     assert_eq!(resp.status, Status::Error, "{resp:?}");
     let msg = resp.message.as_deref().unwrap_or("");
-    assert!(msg.contains("command not found: ./absent (run by env)"), "{msg}");
+    assert!(
+        msg.contains("command not found: ./absent (run by env)"),
+        "{msg}"
+    );
 }
 
 /// An unchanged program runs, and a binary executed through its pinned
@@ -147,7 +180,9 @@ fn unresolved_wrapped_program_is_refused() {
 /// of a copy as opposed to a symlink).
 #[test]
 fn unchanged_binary_runs_with_its_argv0() {
-    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else { return };
+    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else {
+        return;
+    };
     let real = std::fs::canonicalize(&sh.path).unwrap();
     let dir = tempdir();
     let d = dir.path().to_path_buf();
@@ -198,20 +233,39 @@ fn pipe_refuses_before_any_stage_starts() {
     let dir = tempdir();
     let d = dir.path().to_path_buf();
     let marker = d.join("first-ran");
-    let exec = |argv: &[&str]| Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() };
+    let exec = |argv: &[&str]| Plan::Exec {
+        argv: argv.iter().map(|s| s.to_string()).collect(),
+    };
     let plan = Plan::Chdir {
         dir: d.to_str().unwrap().to_string(),
         body: Box::new(Plan::Pipe {
-            stages: vec![exec(&["touch", marker.to_str().unwrap()]), exec(&["env", "./absent"])],
+            stages: vec![
+                exec(&["touch", marker.to_str().unwrap()]),
+                exec(&["env", "./absent"]),
+            ],
         }),
     };
-    let mut req = Request::new_plan(String::new(), "test".into(), plan, Default::default(), String::new(), false, false);
+    let mut req = Request::new_plan(
+        String::new(),
+        "test".into(),
+        plan,
+        Default::default(),
+        String::new(),
+        false,
+        false,
+    );
     req.id = "pin-pipe-preflight".into();
     req.time = iso_now();
     let s = server_with(false, || {});
     let resp = s.send(&req);
     assert_eq!(resp.status, Status::Error, "{resp:?}");
-    assert!(resp.message.as_deref().unwrap_or("").contains("command not found: ./absent"), "{resp:?}");
+    assert!(
+        resp.message
+            .as_deref()
+            .unwrap_or("")
+            .contains("command not found: ./absent"),
+        "{resp:?}"
+    );
     assert!(!marker.exists(), "the first stage started");
 }
 
@@ -249,17 +303,28 @@ fn queued_request_is_prepared_again_when_stale() {
 /// retargeted to a shell while queued is refused without a prompt.
 #[test]
 fn queued_request_retargeted_to_a_shell_is_refused_by_no_shell() {
-    let Some(truth) = sudo_proxy::executor::resolve_command("true", "/") else { return };
-    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else { return };
+    let Some(truth) = sudo_proxy::executor::resolve_command("true", "/") else {
+        return;
+    };
+    let Some(sh) = sudo_proxy::executor::resolve_command("sh", "/") else {
+        return;
+    };
     let dir = tempdir();
     let d = dir.path().to_path_buf();
     symlink(&truth.path, d.join("x")).unwrap();
     let s = server_with(true, || {});
-    let resp = send_while_queued(&s, plan_req("pin-queued-sh", &d, &["./x", "-c", "true"]), || {
-        std::fs::remove_file(d.join("x")).unwrap();
-        symlink(&sh.path, d.join("x")).unwrap();
-    });
+    let resp = send_while_queued(
+        &s,
+        plan_req("pin-queued-sh", &d, &["./x", "-c", "true"]),
+        || {
+            std::fs::remove_file(d.join("x")).unwrap();
+            symlink(&sh.path, d.join("x")).unwrap();
+        },
+    );
     assert_eq!(resp.status, Status::Error, "{resp:?}");
-    assert!(resp.message.as_deref().unwrap_or("").contains("no_shell"), "{resp:?}");
+    assert!(
+        resp.message.as_deref().unwrap_or("").contains("no_shell"),
+        "{resp:?}"
+    );
     assert_eq!(s.prompter.call_count(), 0, "refused before the prompt");
 }

@@ -46,8 +46,7 @@ fn privileged_plus_forward_agent_rejected() {
 fn ssh_auth_sock_in_request_env_rejected() {
     let s = server();
     let mut req = unpriv_req("fa-env-sock", vec![vec!["true"]]);
-    req.env
-        .insert("SSH_AUTH_SOCK".into(), "/tmp/x.sock".into());
+    req.env.insert("SSH_AUTH_SOCK".into(), "/tmp/x.sock".into());
     let resp = s.send(&req);
     assert_eq!(resp.status, Status::Error);
     let msg = resp.message.as_deref().unwrap_or("");

@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use sudo_proxy::executor::{apply_login_env_defaults, exec_timeout, prepare_and_exec_direct, MAX_OUTPUT_BYTES};
+use sudo_proxy::executor::{
+    apply_login_env_defaults, exec_timeout, prepare_and_exec_direct, MAX_OUTPUT_BYTES,
+};
 use sudo_proxy::protocol::{Request, Status, ValidatedRequest};
 
 // Pulled in for the shared `which_or_skip` / `b64_decode` helpers only;
@@ -47,11 +49,7 @@ fn stdout_is_capped_at_max_output_bytes() {
     }
 
     // 200 MB cap target; MAX_OUTPUT_BYTES = 16 MB so we should see truncation.
-    let req = make_req(vec![vec![
-        "sh",
-        "-c",
-        "yes 'x' | head -c 200000000",
-    ]]);
+    let req = make_req(vec![vec!["sh", "-c", "yes 'x' | head -c 200000000"]]);
 
     let start = Instant::now();
     let resp = prepare_and_exec_direct(&req, &HashMap::new());
@@ -96,10 +94,7 @@ fn long_running_child_killed_after_timeout() {
 
     assert_eq!(resp.status, Status::Error);
     assert!(
-        resp.message
-            .as_deref()
-            .unwrap_or("")
-            .contains("timed out"),
+        resp.message.as_deref().unwrap_or("").contains("timed out"),
         "expected timeout message, got {:?}",
         resp.message
     );
@@ -135,10 +130,7 @@ fn pipeline_timeout_kills_all_stages() {
 
     assert_eq!(resp.status, Status::Error);
     assert!(
-        resp.message
-            .as_deref()
-            .unwrap_or("")
-            .contains("timed out"),
+        resp.message.as_deref().unwrap_or("").contains("timed out"),
         "expected pipeline timeout, got {:?}",
         resp.message
     );
@@ -251,10 +243,13 @@ fn unprivileged_child_has_no_controlling_terminal() {
     apply_login_env_defaults(&mut env);
     let resp = prepare_and_exec_direct(&make_req(vec![vec!["cat", "/proc/self/stat"]]), &env);
     assert_eq!(resp.status, Status::Ok, "got {:?}", resp);
-    let out = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or(""))).to_string();
+    let out = String::from_utf8_lossy(&common::b64_decode(resp.stdout.as_deref().unwrap_or("")))
+        .to_string();
     let pid: &str = out.split_whitespace().next().unwrap();
     // comm (field 2) is parenthesized and may contain spaces; split after it.
-    let rest: Vec<&str> = out[out.rfind(')').unwrap() + 2..].split_whitespace().collect();
+    let rest: Vec<&str> = out[out.rfind(')').unwrap() + 2..]
+        .split_whitespace()
+        .collect();
     // rest[0]=state, [1]=ppid, [2]=pgrp, [3]=session, [4]=tty_nr
     assert_eq!(rest[3], pid, "child must lead its own session: {out}");
     assert_eq!(rest[4], "0", "child must have no controlling tty: {out}");

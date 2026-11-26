@@ -17,7 +17,7 @@ use sudo_proxy::executor::PreparedRequest;
 use sudo_proxy::mode::Mode;
 use sudo_proxy::protocol::{Request, Response, Status};
 use sudo_proxy::server;
-use sudo_proxy::tui::{Prompter, PromptResult, ResultSink};
+use sudo_proxy::tui::{PromptResult, Prompter, ResultSink};
 use tempfile::TempDir;
 
 pub type ResponseFn = dyn Fn(&Request) -> (Duration, PromptResult) + Send + Sync;
@@ -238,7 +238,11 @@ impl TestServer {
         self.prompter
             .set_response(|_| (Duration::ZERO, PromptResult::ApprovedAlways));
         let resp = self.send(&make_req("grant-warmup", vec![vec!["true"]]));
-        assert_eq!(resp.status, Status::Ok, "warmup grant request should succeed");
+        assert_eq!(
+            resp.status,
+            Status::Ok,
+            "warmup grant request should succeed"
+        );
         self.prompter
             .set_response(|_| (Duration::ZERO, PromptResult::Approved));
     }

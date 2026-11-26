@@ -29,7 +29,9 @@ fn main() {
         Ok(o) => o,
         Err(e) => {
             eprintln!("error: {e}");
-            eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
+            eprintln!(
+                "Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]"
+            );
             process::exit(1);
         }
     };
@@ -80,8 +82,9 @@ fn main() {
             process::exit(1);
         }
         Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock
-            || e.kind() == std::io::ErrorKind::TimedOut =>
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
         {
             eprintln!(
                 "error: no response from daemon after {}s — it may be wedged or waiting on a prompt",
@@ -218,7 +221,9 @@ fn parse_args() -> Result<Opts, String> {
         match args[i].as_str() {
             "--version" | "-V" => sudo_proxy::cli::print_version("sudo-request"),
             "--help" | "-h" => {
-                eprintln!("Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]");
+                eprintln!(
+                    "Usage: sudo-request [OPTIONS] COMMAND [ARGS...] ['|' COMMAND [ARGS...] ...]"
+                );
                 eprintln!();
                 eprintln!("Debug client for sudo-proxy. Supports pipelines via '|' separator.");
                 eprintln!();
@@ -228,19 +233,27 @@ fn parse_args() -> Result<Opts, String> {
                 eprintln!("  --session NAME   Session identifier (default: sudo-request-cli)");
                 eprintln!("  --requester WHO  Self-declared requester shown to the approver, e.g.");
                 eprintln!("                   human, automation, ai:<model> (default: human; not verified)");
-                eprintln!("  --print          Print all output to stdout (exit code, stdout, stderr)");
+                eprintln!(
+                    "  --print          Print all output to stdout (exit code, stdout, stderr)"
+                );
                 eprintln!("  --no-privilege   Run command without privilege escalation");
                 eprintln!("  --forward-agent  Forward the local SSH agent to the command (unprivileged only)");
-                eprintln!("  --plan JSON      Send a structured plan request (as the MCP does). The");
+                eprintln!(
+                    "  --plan JSON      Send a structured plan request (as the MCP does). The"
+                );
                 eprintln!("                   JSON is an op-tagged Plan, e.g.");
-                eprintln!(r#"                   '{{"op":"alt","steps":[{{"op":"exec","argv":["false"]}},{{"op":"exec","argv":["echo","fallback"]}}]}}'"#);
+                eprintln!(
+                    r#"                   '{{"op":"alt","steps":[{{"op":"exec","argv":["false"]}},{{"op":"exec","argv":["echo","fallback"]}}]}}'"#
+                );
                 eprintln!("  --plan-file PATH Read the plan JSON from a file ('-' for stdin)");
                 eprintln!();
                 eprintln!("Pipeline example:");
                 eprintln!("  sudo-request --no-privilege ls /tmp '|' wc -l");
                 eprintln!();
                 eprintln!("Plan example (drives the full structured surface like the MCP):");
-                eprintln!(r#"  sudo-request --no-privilege --plan '{{"op":"exec","argv":["id"]}}'"#);
+                eprintln!(
+                    r#"  sudo-request --no-privilege --plan '{{"op":"exec","argv":["id"]}}'"#
+                );
                 std::process::exit(0);
             }
             "--socket" => {
@@ -251,25 +264,15 @@ fn parse_args() -> Result<Opts, String> {
             }
             "--reason" => {
                 i += 1;
-                reason = Some(
-                    args.get(i)
-                        .ok_or("--reason requires a value")?
-                        .clone(),
-                );
+                reason = Some(args.get(i).ok_or("--reason requires a value")?.clone());
             }
             "--session" => {
                 i += 1;
-                session = args
-                    .get(i)
-                    .ok_or("--session requires a value")?
-                    .clone();
+                session = args.get(i).ok_or("--session requires a value")?.clone();
             }
             "--requester" => {
                 i += 1;
-                requester = args
-                    .get(i)
-                    .ok_or("--requester requires a value")?
-                    .clone();
+                requester = args.get(i).ok_or("--requester requires a value")?.clone();
             }
             "--print" => {
                 print = true;
@@ -314,7 +317,9 @@ fn parse_args() -> Result<Opts, String> {
 
     // Resolve the plan source: --plan (inline) or --plan-file (path, '-' = stdin).
     let plan = match (plan, plan_file) {
-        (Some(_), Some(_)) => return Err("--plan and --plan-file are mutually exclusive".to_string()),
+        (Some(_), Some(_)) => {
+            return Err("--plan and --plan-file are mutually exclusive".to_string())
+        }
         (Some(json), None) => Some(json),
         (None, Some(path)) => Some(read_plan_file(&path)?),
         (None, None) => None,
@@ -322,7 +327,8 @@ fn parse_args() -> Result<Opts, String> {
 
     if plan.is_some() && !pipeline.is_empty() {
         return Err(
-            "provide either a plan (--plan/--plan-file) or a command/pipeline, not both".to_string(),
+            "provide either a plan (--plan/--plan-file) or a command/pipeline, not both"
+                .to_string(),
         );
     }
 
@@ -408,7 +414,10 @@ mod tests {
         let json = r#"{"op":"alt","steps":[{"op":"exec","argv":["false"]},{"op":"exec","argv":["true"]}]}"#;
         let req = build_request(&opts_with_plan(Some(json))).expect("build");
         assert!(req.plan.is_some(), "request must carry a plan");
-        assert!(req.pipeline.is_empty(), "plan request must not carry a pipeline");
+        assert!(
+            req.pipeline.is_empty(),
+            "plan request must not carry a pipeline"
+        );
         ValidatedRequest::validate(req).expect("daemon-side validation should accept it");
     }
 
@@ -439,4 +448,3 @@ mod tests {
         assert_eq!(build_request(&opts).unwrap().requester, "automation");
     }
 }
-

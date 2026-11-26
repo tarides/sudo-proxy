@@ -56,7 +56,11 @@ fn setup() -> &'static Setup {
         let sudo_dir = root.join("sudo");
         mkdir755(&sudo_dir);
         let shim = sudo_dir.join("sudo");
-        std::fs::copy(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shims/sudo"), &shim).unwrap();
+        std::fs::copy(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/shims/sudo"),
+            &shim,
+        )
+        .unwrap();
         sudo_proxy::helper::set_sudo_override(&shim).unwrap();
 
         let path = format!("{}:/usr/bin:/bin", bin.display());
@@ -64,7 +68,12 @@ fn setup() -> &'static Setup {
         std::env::set_var("PATH", &path);
         std::env::set_var("REPO_ROOT", "/repo");
         std::env::set_var("TF_VAR_region", "eu");
-        Setup { _dir: dir, bin, sudo_dir, path }
+        Setup {
+            _dir: dir,
+            bin,
+            sudo_dir,
+            path,
+        }
     })
 }
 
@@ -81,15 +90,33 @@ fn inherited(patterns: &str) -> Arc<Inherited> {
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
     let uid = unsafe { libc::geteuid() };
-    Arc::new(Inherited::from_env(InheritMode::Env, parse_patterns(patterns).unwrap(), env, uid).unwrap())
+    Arc::new(
+        Inherited::from_env(
+            InheritMode::Env,
+            parse_patterns(patterns).unwrap(),
+            env,
+            uid,
+        )
+        .unwrap(),
+    )
 }
 
 fn exec(argv: &[&str]) -> Plan {
-    Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() }
+    Plan::Exec {
+        argv: argv.iter().map(|s| s.to_string()).collect(),
+    }
 }
 
 fn plan_req(plan: Plan, env: HashMap<String, String>) -> Request {
-    let mut r = Request::new_plan(String::new(), "test".into(), plan, env, String::new(), false, false);
+    let mut r = Request::new_plan(
+        String::new(),
+        "test".into(),
+        plan,
+        env,
+        String::new(),
+        false,
+        false,
+    );
     r.time = common::iso_now();
     r
 }
@@ -117,12 +144,21 @@ fn unprivileged_step_runs_with_the_inherited_path_and_variables() {
     assert_eq!(env.get("REPO_ROOT").map(String::as_str), Some("/repo"));
     assert_eq!(env.get("TF_VAR_region").map(String::as_str), Some("eu"));
     assert!(!env.contains_key("OTHER"), "not matched: {env:?}");
-    assert!(!env.contains_key("PYTHONPATH"), "never matched by a wildcard: {env:?}");
+    assert!(
+        !env.contains_key("PYTHONPATH"),
+        "never matched by a wildcard: {env:?}"
+    );
     // Login defaults fill the names the inherited layer leaves unset.
-    assert!(env.contains_key("HOME") && env.contains_key("USER"), "{env:?}");
+    assert!(
+        env.contains_key("HOME") && env.contains_key("USER"),
+        "{env:?}"
+    );
 
     // The request's own allowlisted variables still win.
-    let resp = server.send(&plan_req(exec(&["devtool"]), HashMap::from([("HOME".into(), "/req".into())])));
+    let resp = server.send(&plan_req(
+        exec(&["devtool"]),
+        HashMap::from([("HOME".into(), "/req".into())]),
+    ));
     let env = env_lines(&common::decode_stdout(&resp));
     assert_eq!(env.get("HOME").map(String::as_str), Some("/req"));
 }
@@ -132,7 +168,11 @@ fn without_the_flags_the_login_path_is_used() {
     setup();
     let server = common::start_test_server(common::TestServerOpts::default());
     let resp = server.send(&plan_req(exec(&["devtool"]), HashMap::new()));
-    assert_ne!(resp.status, Status::Ok, "devtool must not resolve without --inherit-path: {resp:?}");
+    assert_ne!(
+        resp.status,
+        Status::Ok,
+        "devtool must not resolve without --inherit-path: {resp:?}"
+    );
     let resp = server.send(&plan_req(exec(&["env"]), HashMap::new()));
     let env = env_lines(&common::decode_stdout(&resp));
     assert_eq!(env.get("PATH").map(String::as_str), Some(LOGIN_PATH));
@@ -152,16 +192,26 @@ fn escalated_request_gets_nothing_inherited() {
     let plan = Plan::Pipe {
         stages: vec![
             exec(&["env"]),
-            Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["cat"])) },
+            Plan::RunAs {
+                who: RunAs::Root,
+                body: Box::new(exec(&["cat"])),
+            },
         ],
     };
     let resp = server.send(&plan_req(plan, HashMap::new()));
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     let out = common::decode_stdout(&resp);
     let env = env_lines(&out);
-    assert_eq!(env.get("PATH").map(String::as_str), Some(LOGIN_PATH), "{out}");
+    assert_eq!(
+        env.get("PATH").map(String::as_str),
+        Some(LOGIN_PATH),
+        "{out}"
+    );
     for n in ["REPO_ROOT", "TF_VAR_region"] {
-        assert!(!env.contains_key(n), "{n} reached a step of an escalated request:\n{out}");
+        assert!(
+            !env.contains_key(n),
+            "{n} reached a step of an escalated request:\n{out}"
+        );
     }
     // The escalated step: sudo's argv and environment carry no inherited name.
     let argv = std::fs::read_to_string(s.sudo_dir.join("sudo.log")).unwrap();
@@ -177,7 +227,10 @@ fn prepare_refuses_to_inherit_into_an_escalated_request() {
     setup();
     let inh = inherited("REPO_ROOT");
     let req = ValidatedRequest::validate(plan_req(
-        Plan::RunAs { who: RunAs::Root, body: Box::new(exec(&["true"])) },
+        Plan::RunAs {
+            who: RunAs::Root,
+            body: Box::new(exec(&["true"])),
+        },
         HashMap::new(),
     ))
     .unwrap();
@@ -198,7 +251,14 @@ fn env_wrapper_overriding_an_inherited_name_is_marked() {
     assert_eq!(env_hop.overrides_inherited, ["TF_VAR_region"]);
     // The wrapped program resolved on the inherited PATH.
     let devtool = &p.views()[0].programs[1];
-    assert!(devtool.resolved.as_ref().is_some_and(|r| r.path.starts_with(&setup().bin)), "{:?}", devtool.resolved);
+    assert!(
+        devtool
+            .resolved
+            .as_ref()
+            .is_some_and(|r| r.path.starts_with(&setup().bin)),
+        "{:?}",
+        devtool.resolved
+    );
 }
 
 // --- Startup refusals ----------------------------------------------------
@@ -237,24 +297,51 @@ fn refused(vars: &[(&str, &str)], args: &[&str], needle: &str) {
     let mut err = String::new();
     std::io::Read::read_to_string(child.stderr.as_mut().unwrap(), &mut err).unwrap();
     assert!(!status.success(), "{args:?}: {err}");
-    assert!(err.contains(needle), "{args:?}: expected {needle:?} in: {err}");
+    assert!(
+        err.contains(needle),
+        "{args:?}: expected {needle:?} in: {err}"
+    );
     assert!(!sock.exists(), "{args:?}: socket bound");
 }
 
 #[test]
 fn startup_refusals() {
     let path = [("PATH", "/usr/bin:/bin")];
-    refused(&path, &["--host", "example", "--inherit-path"], "not forwarded with --host");
-    refused(&path, &["--host", "example", "--inherit-env=A"], "not forwarded with --host");
-    refused(&path, &["--inherit-env", "A", "--host", "example"], "not forwarded with --host");
-    refused(&path, &["--inherit-env", "A", "--inherit-env", "B"], "given twice");
+    refused(
+        &path,
+        &["--host", "example", "--inherit-path"],
+        "not forwarded with --host",
+    );
+    refused(
+        &path,
+        &["--host", "example", "--inherit-env=A"],
+        "not forwarded with --host",
+    );
+    refused(
+        &path,
+        &["--inherit-env", "A", "--host", "example"],
+        "not forwarded with --host",
+    );
+    refused(
+        &path,
+        &["--inherit-env", "A", "--inherit-env", "B"],
+        "given twice",
+    );
     refused(&path, &["--inherit-env"], "requires a value");
     refused(&path, &["--inherit-env="], "needs a value");
     refused(&path, &["--inherit-env=A,,B"], "empty element");
     refused(&path, &["--inherit-env=A*B"], "not a variable name");
     refused(&path, &["--inherit-env=SSH_AUTH_SOCK"], "SSH_AUTH_SOCK");
-    refused(&path, &["--inherit-path", "--unattended-eligible"], "excludes --unattended-eligible");
-    refused(&path, &["--inherit-env=A", "--unattended-eligible"], "excludes --unattended-eligible");
+    refused(
+        &path,
+        &["--inherit-path", "--unattended-eligible"],
+        "excludes --unattended-eligible",
+    );
+    refused(
+        &path,
+        &["--inherit-env=A", "--unattended-eligible"],
+        "excludes --unattended-eligible",
+    );
     // With no_shell on, a code-loading variable cannot be inherited.
     refused(
         &[("PATH", "/usr/bin:/bin"), ("PYTHONPATH", "/py")],
@@ -264,16 +351,28 @@ fn startup_refusals() {
     refused(&[], &["--inherit-path"], "PATH is unset");
     refused(&[("PATH", "")], &["--inherit-path"], "PATH is empty");
     refused(&[("PATH", ".:/usr/bin")], &["--inherit-path"], "relative");
-    refused(&[("PATH", "/usr/bin::/bin")], &["--inherit-path"], "empty entry");
+    refused(
+        &[("PATH", "/usr/bin::/bin")],
+        &["--inherit-path"],
+        "empty entry",
+    );
     let ww = tempfile::tempdir_in("/tmp").unwrap();
     std::fs::set_permissions(ww.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
     let ww_path = format!("{}:/usr/bin", ww.path().display());
     if unsafe { libc::geteuid() } != 0 {
-        refused(&[("PATH", &ww_path)], &["--inherit-path"], "group/world-writable");
+        refused(
+            &[("PATH", &ww_path)],
+            &["--inherit-path"],
+            "group/world-writable",
+        );
     }
     // A sticky world-writable directory is refused as an entry (anyone can
     // add a program there), though it is fine above one.
-    refused(&[("PATH", "/tmp:/usr/bin")], &["--inherit-path"], "lets others add programs");
+    refused(
+        &[("PATH", "/tmp:/usr/bin")],
+        &["--inherit-path"],
+        "lets others add programs",
+    );
 }
 
 /// Neither launcher can carry the flags: `sudo-proxy-mcp` builds a fixed
@@ -281,5 +380,8 @@ fn startup_refusals() {
 #[test]
 fn mcp_never_passes_the_flags() {
     let src = include_str!("../src/mcp.rs");
-    assert!(!src.contains("--inherit"), "sudo-proxy-mcp must never pass --inherit-*");
+    assert!(
+        !src.contains("--inherit"),
+        "sudo-proxy-mcp must never pass --inherit-*"
+    );
 }

@@ -1410,7 +1410,10 @@ mod tests {
             let set = format!("{var}=x");
             assert_eq!(
                 run(&["env", &set, "true"]).1,
-                Some(OpaqueReason::EnvRejected { hop: 0, name: var.into() }),
+                Some(OpaqueReason::EnvRejected {
+                    hop: 0,
+                    name: var.into()
+                }),
                 "{var}"
             );
             assert!(opaque(&["env", "-u", var, "true"]), "{var}");
@@ -1424,7 +1427,15 @@ mod tests {
         let (hops, reason) = run(&["env", "-u", "A", "B=1", "nice", "env", "C=2", "true"]);
         assert_eq!(reason, None);
         let touched: Vec<Vec<String>> = hops.iter().map(|h| h.touches.clone()).collect();
-        assert_eq!(touched, vec![vec!["A".to_string(), "B".into()], vec![], vec!["C".into()], vec![]]);
+        assert_eq!(
+            touched,
+            vec![
+                vec!["A".to_string(), "B".into()],
+                vec![],
+                vec!["C".into()],
+                vec![]
+            ]
+        );
     }
 
     #[test]

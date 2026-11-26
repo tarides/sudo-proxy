@@ -27,7 +27,9 @@ fn recv_response(rx: &Receiver<serde_json::Value>, want_id: i64) -> serde_json::
 }
 
 fn send(stdin: &mut ChildStdin, line: &str) {
-    stdin.write_all(line.as_bytes()).expect("write to mcp stdin");
+    stdin
+        .write_all(line.as_bytes())
+        .expect("write to mcp stdin");
     stdin.write_all(b"\n").expect("write newline to mcp stdin");
     stdin.flush().expect("flush mcp stdin");
 }
@@ -89,7 +91,13 @@ fn mcp_server_enumerates_its_tools() {
     names.sort_unstable();
     assert_eq!(
         names,
-        ["execute", "start_server", "status", "stop_server", "update_host"],
+        [
+            "execute",
+            "start_server",
+            "status",
+            "stop_server",
+            "update_host"
+        ],
         "unexpected MCP tool set — this is exactly what Glama enumerates to score the server",
     );
 

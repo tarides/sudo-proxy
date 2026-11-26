@@ -21,18 +21,31 @@ fn req(id: &str, argv: &[&str], reason: &str) -> Request {
 /// Split a shim argv `[-u USER] K=V... -- argv` into (`-u` target, argv).
 fn split_sudo(argv: &[String]) -> (Option<&str>, &[String]) {
     let user = (argv.first().map(String::as_str) == Some("-u")).then(|| argv[1].as_str());
-    let dd = argv.iter().position(|a| a == "--").expect("sudo argv has `--`");
+    let dd = argv
+        .iter()
+        .position(|a| a == "--")
+        .expect("sudo argv has `--`");
     (user, &argv[dd + 1..])
 }
 
 #[test]
 fn approve_unprivileged_runs_and_shows_result() {
     let mut d = PtyDaemon::spawn(PtyOpts::default());
-    let h = d.request_async(&req("pty-approve-1", &["echo", "pty-ok"], "pty harness approve"));
+    let h = d.request_async(&req(
+        "pty-approve-1",
+        &["echo", "pty-ok"],
+        "pty harness approve",
+    ));
 
     let prompt = d.answer(b'y');
-    assert!(prompt.contains("ID:      pty-approve-1"), "prompt: {prompt}");
-    assert!(prompt.contains("Reason:  pty harness approve"), "prompt: {prompt}");
+    assert!(
+        prompt.contains("ID:      pty-approve-1"),
+        "prompt: {prompt}"
+    );
+    assert!(
+        prompt.contains("Reason:  pty harness approve"),
+        "prompt: {prompt}"
+    );
     assert!(prompt.contains("Command: echo pty-ok"), "prompt: {prompt}");
 
     let resp = h.join().unwrap();
@@ -44,7 +57,10 @@ fn approve_unprivileged_runs_and_shows_result() {
     d.expect("→ Approved");
     d.expect("exit 0");
     assert!(d.is_cooked(), "termios not restored after the prompt");
-    assert!(d.shim_log().is_empty(), "unprivileged run must not go through sudo");
+    assert!(
+        d.shim_log().is_empty(),
+        "unprivileged run must not go through sudo"
+    );
 }
 
 /// The real binary writes its audit log by default (issue #65), under the
@@ -70,7 +86,11 @@ fn deny_with_n_and_with_enter() {
     for (id, key) in [("pty-deny-n", b'n'), ("pty-deny-enter", b'\r')] {
         // In the harness dir, so it is cleaned up even when the test fails.
         let marker = d.dir().join(format!("{id}.ran"));
-        let h = d.request_async(&req(id, &["touch", marker.to_str().unwrap()], "pty harness deny"));
+        let h = d.request_async(&req(
+            id,
+            &["touch", marker.to_str().unwrap()],
+            "pty harness deny",
+        ));
         let prompt = d.answer(key);
         assert!(prompt.contains(id), "prompt: {prompt}");
         let resp = h.join().unwrap();
@@ -88,7 +108,11 @@ fn privileged_goes_through_sudo_with_literal_argv() {
 
     // Whole-command privilege: run as root, so no `-u`. The empty argument
     // and the shell metacharacters must reach sudo untouched.
-    let mut root = req("pty-priv-root", &["echo", "as root", "", "$HOME;x"], "pty harness root");
+    let mut root = req(
+        "pty-priv-root",
+        &["echo", "as root", "", "$HOME;x"],
+        "pty harness root",
+    );
     root.privileged = true;
     let h = d.request_async(&root);
     let prompt = d.answer(b'y');
@@ -100,12 +124,19 @@ fn privileged_goes_through_sudo_with_literal_argv() {
     // A plan step run as a named user: `-u nobody`.
     let mut user = common::make_req("pty-priv-user", vec![]);
     user.plan = Some(Plan::RunAs {
-        who: RunAs::User { name: "nobody".into() },
-        body: Box::new(Plan::Exec { argv: vec!["echo".into(), "as-nobody".into()] }),
+        who: RunAs::User {
+            name: "nobody".into(),
+        },
+        body: Box::new(Plan::Exec {
+            argv: vec!["echo".into(), "as-nobody".into()],
+        }),
     });
     let h = d.request_async(&user);
     let prompt = d.answer(b'y');
-    assert!(prompt.contains("Execute with elevated privileges?"), "prompt: {prompt}");
+    assert!(
+        prompt.contains("Execute with elevated privileges?"),
+        "prompt: {prompt}"
+    );
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::decode_stdout(&resp), "as-nobody\n");
@@ -113,7 +144,9 @@ fn privileged_goes_through_sudo_with_literal_argv() {
     // Assert only on the `-u` target and the argv after `--`: the `K=V`
     // part carries the runner's HOME/USER. The command is the path the prompt
     // resolved, so sudo's `secure_path` never gets a second lookup (#62).
-    let echo = sudo_proxy::executor::resolve_command("echo", "/").expect("echo on default PATH").path;
+    let echo = sudo_proxy::executor::resolve_command("echo", "/")
+        .expect("echo on default PATH")
+        .path;
     let echo = echo.to_str().unwrap();
     let log = d.shim_log();
     assert_eq!(log.len(), 2, "one sudo spawn per privileged step: {log:?}");
@@ -141,14 +174,25 @@ fn resolves_line_names_the_binary_that_runs() {
         std::fs::set_permissions(&f, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     }
     let fake_bin = bin.to_str().unwrap();
-    let mut d = PtyDaemon::spawn(PtyOpts { extra_path: vec![bin.clone()], ..Default::default() });
+    let mut d = PtyDaemon::spawn(PtyOpts {
+        extra_path: vec![bin.clone()],
+        ..Default::default()
+    });
 
     // `id`: the prompt names the system binary, and that is what runs.
-    let real_id = sudo_proxy::executor::resolve_command("id", "/").expect("id on default PATH").path;
+    let real_id = sudo_proxy::executor::resolve_command("id", "/")
+        .expect("id on default PATH")
+        .path;
     let h = d.request_async(&req("pty-62-id", &["id"], "issue 62"));
     let prompt = d.answer(b'y');
-    assert!(prompt.contains(&format!("Resolves: {}", real_id.display())), "prompt: {prompt}");
-    assert!(!prompt.contains(fake_bin), "prompt shows the daemon's PATH: {prompt}");
+    assert!(
+        prompt.contains(&format!("Resolves: {}", real_id.display())),
+        "prompt: {prompt}"
+    );
+    assert!(
+        !prompt.contains(fake_bin),
+        "prompt shows the daemon's PATH: {prompt}"
+    );
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     let out = common::decode_stdout(&resp);
@@ -157,20 +201,31 @@ fn resolves_line_names_the_binary_that_runs() {
     // `only-here`: shown as not found, and refused without a second lookup.
     let h = d.request_async(&req("pty-62-only", &["only-here"], "issue 62"));
     let prompt = d.answer(b'y');
-    assert!(prompt.contains("Resolves: (not found in PATH)"), "prompt: {prompt}");
+    assert!(
+        prompt.contains("Resolves: (not found in PATH)"),
+        "prompt: {prompt}"
+    );
     let resp = h.join().unwrap();
     assert_ne!(resp.status, Status::Ok, "{resp:?}");
-    assert!(format!("{resp:?}").contains("command not found: only-here"), "{resp:?}");
+    assert!(
+        format!("{resp:?}").contains("command not found: only-here"),
+        "{resp:?}"
+    );
 
     // `./bin/only-here` under `chdir`: resolved in, and run from, that dir.
     let mut rel = common::make_req("pty-62-rel", vec![]);
     rel.plan = Some(Plan::Chdir {
         dir: fake.path().to_str().unwrap().into(),
-        body: Box::new(Plan::Exec { argv: vec!["./bin/only-here".into()] }),
+        body: Box::new(Plan::Exec {
+            argv: vec!["./bin/only-here".into()],
+        }),
     });
     let h = d.request_async(&rel);
     let prompt = d.answer(b'y');
-    assert!(prompt.contains(&format!("{}/./bin/only-here", fake.path().display())), "prompt: {prompt}");
+    assert!(
+        prompt.contains(&format!("{}/./bin/only-here", fake.path().display())),
+        "prompt: {prompt}"
+    );
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::decode_stdout(&resp), "hello\n");
@@ -190,10 +245,14 @@ fn pkexec_flag_multi_step_plan_gets_the_tui_prompt() {
         env: vec![("DISPLAY".into(), ":99".into())],
         ..Default::default()
     });
-    let step = |n: &str| Plan::Exec { argv: vec![NO_SUCH.into(), n.into()] };
+    let step = |n: &str| Plan::Exec {
+        argv: vec![NO_SUCH.into(), n.into()],
+    };
     let mut r = common::make_req("pty-pkexec-88", vec![]);
     r.privileged = true;
-    r.plan = Some(Plan::Run { steps: vec![step("step-one"), step("step-two")] });
+    r.plan = Some(Plan::Run {
+        steps: vec![step("step-one"), step("step-two")],
+    });
     let h = d.request_async(&r);
     let prompt = d.answer(b'n');
     assert!(prompt.contains("Execute as root?"), "prompt: {prompt}");
@@ -201,10 +260,17 @@ fn pkexec_flag_multi_step_plan_gets_the_tui_prompt() {
     assert!(prompt.contains("step-two"), "prompt: {prompt}");
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Denied, "{resp:?}");
-    assert!(d.shim_log().is_empty(), "sudo ran on denial: {:?}", d.shim_log());
+    assert!(
+        d.shim_log().is_empty(),
+        "sudo ran on denial: {:?}",
+        d.shim_log()
+    );
     // Not vacuous: the daemon really ran in local (pkexec-capable) mode.
     let log = d.daemon_log();
-    assert!(log.contains("mode: local (TUI + pkexec)"), "daemon log: {log}");
+    assert!(
+        log.contains("mode: local (TUI + pkexec)"),
+        "daemon log: {log}"
+    );
 }
 
 /// GHSA-gx9w-4f7x-2gcp, end to end: a `sudo` planted first on the daemon's
@@ -216,9 +282,16 @@ fn planted_sudo_on_daemon_path_never_runs() {
     let plant = tempfile::tempdir_in("/tmp").expect("tempdir");
     let marker = plant.path().join("PLANTED");
     let fake = plant.path().join("sudo");
-    std::fs::write(&fake, format!("#!/bin/sh\ntouch '{}'\nexit 97\n", marker.display())).unwrap();
+    std::fs::write(
+        &fake,
+        format!("#!/bin/sh\ntouch '{}'\nexit 97\n", marker.display()),
+    )
+    .unwrap();
     std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-    let mut d = PtyDaemon::spawn(PtyOpts { extra_path: vec![plant.path().to_path_buf()], ..Default::default() });
+    let mut d = PtyDaemon::spawn(PtyOpts {
+        extra_path: vec![plant.path().to_path_buf()],
+        ..Default::default()
+    });
 
     let mut r = req("pty-gx9w", &["echo", "real"], "GHSA-gx9w");
     r.privileged = true;
@@ -227,8 +300,14 @@ fn planted_sudo_on_daemon_path_never_runs() {
     let resp = h.join().unwrap();
     assert_eq!(resp.status, Status::Ok, "{resp:?}");
     assert_eq!(common::decode_stdout(&resp), "real\n");
-    assert!(!marker.exists(), "the sudo planted on the daemon's PATH ran");
+    assert!(
+        !marker.exists(),
+        "the sudo planted on the daemon's PATH ran"
+    );
     assert_eq!(d.shim_log().len(), 1, "the --sudo-path escalator ran once");
     let log = d.daemon_log();
-    assert!(log.contains("--sudo-path; not checked"), "daemon log: {log}");
+    assert!(
+        log.contains("--sudo-path; not checked"),
+        "daemon log: {log}"
+    );
 }

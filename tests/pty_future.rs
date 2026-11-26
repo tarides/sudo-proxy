@@ -8,7 +8,10 @@ use common::pty::{PtyDaemon, PtyOpts};
 use sudo_proxy::protocol::{Action, Status};
 
 fn iso_in(secs: i64) -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
     sudo_proxy::datetime::epoch_to_iso((now + secs) as u64)
 }
 
@@ -23,7 +26,10 @@ fn future_dated_requests() {
     let r = common::send_request(&d.socket, &ping);
     eprintln!("ping +1h  -> {:?}: {:?}", r.status, r.message);
     assert_eq!(r.status, Status::Error);
-    assert!(r.message.as_deref().unwrap_or("").contains("in the future"), "{r:?}");
+    assert!(
+        r.message.as_deref().unwrap_or("").contains("in the future"),
+        "{r:?}"
+    );
 
     // 2. A future-dated `stop` (no keypress needed): rejected, daemon lives.
     let mut stop = common::make_req("fut-stop", vec![]);
@@ -39,7 +45,10 @@ fn future_dated_requests() {
     let r = common::send_request(&d.socket, &ex);
     eprintln!("exec +1h  -> {:?}: {:?}", r.status, r.message);
     assert_eq!(r.status, Status::Error);
-    assert!(!d.capture().contains("fut-exec"), "future-dated exec reached the prompt");
+    assert!(
+        !d.capture().contains("fut-exec"),
+        "future-dated exec reached the prompt"
+    );
 
     // 4. Within the skew (+10 s): prompted as usual, and runs when approved.
     let mut ok = common::make_req("fut-skew-ok", vec![vec!["echo", "skew-ok"]]);
@@ -48,7 +57,11 @@ fn future_dated_requests() {
     let prompt = d.answer(b'y');
     assert!(prompt.contains("fut-skew-ok"), "{prompt}");
     let r = h.join().unwrap();
-    eprintln!("exec +10s -> {:?}: stdout {:?}", r.status, common::decode_stdout(&r));
+    eprintln!(
+        "exec +10s -> {:?}: stdout {:?}",
+        r.status,
+        common::decode_stdout(&r)
+    );
     assert_eq!(r.status, Status::Ok, "{r:?}");
 
     // 5. The daemon is still up: a fresh ping answers pong.
