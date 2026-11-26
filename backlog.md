@@ -20,6 +20,64 @@ Known gaps left from the #101 review (low; pick up if they matter): the
 user-owned symlink's target is not ownership-checked;
 `tests/inherit.rs::mcp_never_passes_the_flags` greps the source.
 
+## 1.3.1: Phase 1 of #89, and #91, #92, #95, #97, #98
+
+Order decided 2026-11-26 (option B: the security gap and small fixes first,
+then Phase 1 with the prompt issues placed where they fit). One PR per step;
+each moves its evidence status in `docs/assurance-case.md`; every
+prompt-touching PR gets the pty goldens plus a live manual run.
+
+1. **#91: flag the ssh family as opaque.** `ssh host 'cmd'`, `rsync -e` /
+   `--rsh` / `--rsync-path`, `scp`/`sftp -S` and `-o ProxyCommand=…`, `git -c
+   core.sshCommand=…`, `GIT_SSH_COMMAND`, `ext::` remotes run a command string
+   that `no_shell` misses today. Own reason text ("runs a command string
+   remotely / via a shell"). Plain `rsync src dst`, `scp src dst`, `git fetch`
+   stay structured. Behaviour change: refused under `no_shell`. Security gap,
+   so first.
+2. **#92: `flock` as a fixed-shape wrapper.** Move it from the runner list to
+   the wrapper table (skip options and the lock-file operand, classify the
+   wrapped program); `flock -c` / `--command` stays opaque. The wrapped
+   program is then pinned and rewritten like `timeout`'s (#105). Same table as
+   #91 (`src/wrappers.rs`): adjacent PR, or folded into it.
+3. **#95: zenity Pango markup.** `--no-markup`, or escape `&`, `<`, `>` and
+   quotes in every interpolated field; unit test on the text builder, manual
+   check with a real zenity.
+4. **Docs first for Phase 1:** G4.6 *"syntax is daemon-owned"* (no wire field
+   printed verbatim in the command slot); split Sn4.5 into a syntactic half
+   (render ⇒ shell tree) and a semantic half (shell tree ⇒ executor);
+   threat-model rows "caller supplies syntax" (blocked by design) and "unknown
+   plan key silently dropped"; roadmap gains the self-check and echo rungs.
+5. **Render `Steps:`/`Command:` from the compiled plan**, not a second walk of
+   `Plan` (`src/tui.rs` `request_layout` → `layout(&req.exec_plan())`). PR #108
+   already compiles once, and the prompt receives `PreparedRequest` and reads
+   `Resolves:` from it. The hard part: `Compiled` keeps only the sequencing
+   (`SeqNode`: `Leaf`/`Pipe`/`Run`/`Seq`/`Alt`), while `chdir`, `setenv`,
+   redirects and `run-as` are pushed down into each `LeafPlan`. The compiler
+   must keep those scopes (extra nodes the executor ignores, or a layout tree
+   beside `seq`) before the `lay_*` code can be ported. Goldens and audit
+   output byte-identical.
+6. **#97 with #98.2: prompt clip budgets.** Clip only the argv words; keep
+   operators, parentheses and redirections (with their targets) outside the
+   budget, each bounded separately. With it, #98.2: a total height budget that
+   keeps `Command:` and `[y/N]` on screen, and widths counted in terminal
+   columns (tabs expanded or rejected in displayed fields). Written once, in
+   the new renderer; before the echo so the `Command:` text is stable.
+7. **#98.1 and #98.3: the other prompt surfaces.** The GUI dialog
+   (`src/gui.rs` `format_prompt_text`) renders plans through the new renderer
+   and gets the TUI's clip; `display_banner` gets
+   `clip(…, MAX_DISPLAY_CMD_CHARS)`.
+8. **Echo:** optional `shown` + `shown_truncated` in `Response`, the exact
+   `Command:` text written to the TTY, for `ok`/`denied`/`timeout` and
+   post-validation errors (never pre-validation; omit `Resolves:`). Surfaced by
+   `format_response` and the MCP server, which tolerates its absence.
+   Property: `response.shown == audit.command == TTY text`.
+9. **Rung-1 lint** (Semgrep/grep): request-derived strings reach the TTY only
+   via `shquote` or the fixed label lines; review-checklist item for
+   rendering / plan-op / composition changes. Last, so it guards the single
+   render path.
+
+Then tag 1.3.1 (rc first if the prompt changes warrant one).
+
 ## Automate the manual end-to-end tests through a pty
 
 Issue [#68](https://github.com/tarides/sudo-proxy/issues/68). The checks in
@@ -157,35 +215,11 @@ layer and adds a parser of attacker text to the TCB) and bash-as-authoritative
 One PR per item; each moves its evidence status in `docs/assurance-case.md`;
 every prompt-touching PR gets the pty goldens plus a live manual run.
 
-**Phase 0 — close the current gaps** (independent; patch releases 1.2.x):
-~~#86 `has_dangerous_chars` gaps~~ (done, see changelog) · #85 bound
-each `Steps:` line like `Command:` · #88 `--pkexec` multi-leaf plans (item 6
-above) · #87 wrapper-aware `runs_shell` (item 5 above; done).
+**Phase 0** (#85–#88, #90): done, shipped in 1.3.0.
 
-Done: #88.
-Done: #85.
-Done: #90.
-
-**Phase 1 — state the invariant, make it literally true** (release 1.3.0):
-1. Docs first: G4.6 *"syntax is daemon-owned"* (no wire field printed verbatim
-   in the command slot); split Sn4.5 into a syntactic half (render ⇒ shell
-   tree) and a semantic half (shell tree ⇒ executor); threat-model rows
-   "caller supplies syntax" (blocked by design) and "unknown plan key silently
-   dropped"; roadmap gains the self-check and echo rungs.
-2. Render `Steps:`/`Command:` from `Compiled`, not a second walk of `Plan`
-   (`src/tui.rs` `layout(&req.exec_plan())`). Pure refactor: goldens and audit
-   output byte-identical.
-3. `deny_unknown_fields` on `Plan` only. `run-as` uses `#[serde(flatten)]`,
-   which serde cannot combine with it, so un-flatten via a custom impl that
-   keeps the wire form. `Request` stays lenient (documented forward-compat).
-4. Echo: optional `shown` + `shown_truncated` in `Response`, the exact
-   `Command:` text written to the TTY, for `ok`/`denied`/`timeout` and
-   post-validation errors (never pre-validation; omit `Resolves:`). Surfaced by
-   `format_response`; MCP tolerates its absence. Property:
-   `response.shown == audit.command == TTY text`.
-5. Rung-1 lint (Semgrep/grep): request-derived strings reach the TTY only via
-   `shquote` or the fixed label lines; review-checklist item for rendering /
-   plan-op / composition changes.
+**Phase 1 — state the invariant, make it literally true**: `deny_unknown_fields`
+on `Plan` shipped in 1.3.0 (PR #103). The rest is the 1.3.1 section above
+(steps 4–9), interleaved with #91, #92, #95, #97 and #98.
 
 **Phase 2 — runtime self-check** (release 1.4.0):
 1. `src/shellgram.rs`: in-crate parser for the shell subset the renderer
