@@ -37,6 +37,7 @@ const CASES: &[(&str, bool)] = &[
     ("escalation-d-named-user", false),
     ("long-argument", true),
     ("wrappers", true),
+    ("remote", true),
 ];
 
 const AMBIENT_ROOT: &str = "\x1b[38;5;210m";
@@ -284,6 +285,17 @@ fn ui_prompts_no_color() {
     let w = get(&blocks, "wrappers");
     assert!(w.contains("opaque — resolves only the shell (run by timeout; looked up at run time)"), "{w}");
     assert!(w.contains("(run by env; looked up at run time)"), "{w}");
+
+    // #91: plain rsync stays transparent; `rsync -e` is opaque.
+    let r = get(&blocks, "remote");
+    assert!(
+        r.contains(
+            "opaque — runs a command string remotely or through a shell (-e) \
+             (run by timeout; looked up at run time)"
+        ),
+        "{r}"
+    );
+    assert_eq!(r.matches("opaque — ").count(), 1, "{r}");
 
     check_goldens(&blocks, "plain");
 }

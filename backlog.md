@@ -13,18 +13,13 @@ then Phase 1 with the prompt issues placed where they fit). One PR per step;
 each moves its evidence status in `docs/assurance-case.md`; every
 prompt-touching PR gets the pty goldens plus a live manual run.
 
-1. **#91: flag the ssh family as opaque.** `ssh host 'cmd'`, `rsync -e` /
-   `--rsh` / `--rsync-path`, `scp`/`sftp -S` and `-o ProxyCommand=…`, `git -c
-   core.sshCommand=…`, `GIT_SSH_COMMAND`, `ext::` remotes run a command string
-   that `no_shell` misses today. Own reason text ("runs a command string
-   remotely / via a shell"). Plain `rsync src dst`, `scp src dst`, `git fetch`
-   stay structured. Behaviour change: refused under `no_shell`. Security gap,
-   so first.
+Done: step 1, #91 (PR #117, see changelog). Next is #92.
+
 2. **#92: `flock` as a fixed-shape wrapper.** Move it from the runner list to
    the wrapper table (skip options and the lock-file operand, classify the
    wrapped program); `flock -c` / `--command` stays opaque. The wrapped
-   program is then pinned and rewritten like `timeout`'s (#105). Same table as
-   #91 (`src/wrappers.rs`): adjacent PR, or folded into it.
+   program is then pinned and rewritten like `timeout`'s (#105). Same file as
+   #91 (`src/wrappers.rs`); branch off #117 or wait for it to merge.
 3. **#95: zenity Pango markup.** `--no-markup`, or escape `&`, `<`, `>` and
    quotes in every interpolated field; unit test on the text builder, manual
    check with a real zenity.
@@ -472,3 +467,11 @@ right after writing and `chmod`ing the fake `env` script
 the script's write fd before it is closed. Fix by retrying on `ETXTBSY` or
 writing the script before any test forks (as the other fake-binary tests do,
 if they do). Captured follow-up, not active work.
+
+## `sudo-request --print` exits 0 when the daemon returns an error
+
+Seen during the #91 live run: a request rejected under `no_shell` printed
+`error: …` but the client exited 0. A denied request does the same with
+`--print`. Scripts that drive `sudo-request` cannot tell either case from
+success. Check the intended exit codes (`docs/testing.md` says deny exits
+non-zero) and fix or document them. Captured follow-up, not active work.

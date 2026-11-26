@@ -88,6 +88,31 @@ fn opaque_rejected_only() -> Vec<Request> {
         plan_req("env-path", exec(&["env", "PATH=/tmp", "true"])),
         plan_req("env-ld-preload", exec(&["env", "LD_PRELOAD=/nonexistent.so", "true"])),
         plan_req("find-exec-found", exec(&["find", ".", "-maxdepth", "0", "-exec", "{}", ";"])),
+        // #91: a command string run remotely or through a shell.
+        plan_req("ssh-cmd", exec(&["ssh", "h", "true"])),
+        plan_req("ssh-bare", exec(&["ssh", "h"])),
+        plan_req("rsync-e", exec(&["rsync", "-e", "x", "a", "b"])),
+        plan_req("rsync-path", exec(&["timeout", "5", "rsync", "--rsync-path=x", "a", "h:b"])),
+        plan_req("scp-S", exec(&["scp", "-S", "x", "a", "h:b"])),
+        plan_req("scp-proxycommand", exec(&["scp", "-o", "ProxyCommand=x", "a", "h:b"])),
+        plan_req("git-c", exec(&["git", "-c", "core.sshCommand=x", "fetch"])),
+        plan_req("git-ext", exec(&["git", "clone", "ext::x", "d"])),
+        plan_req("git-rebase-exec", exec(&["git", "rebase", "--exec", "x", "main"])),
+        plan_req("git-submodule-foreach", exec(&["git", "submodule", "foreach", "x"])),
+        plan_req("env-rsync-rsh", exec(&["env", "RSYNC_RSH=x", "rsync", "a", "h:b"])),
+        // Review of PR #117.
+        plan_req("scp-o-blank", exec(&["scp", "-o", " ProxyCommand=x", "a", "h:b"])),
+        plan_req("scp-legacy", exec(&["scp", "-O", "a", "h:b"])),
+        plan_req("scp-pkcs11", exec(&["scp", "-o", "PKCS11Provider=/x.so", "a", "h:b"])),
+        plan_req("rsync-old-args", exec(&["rsync", "--old-args", "a", "h:b"])),
+        plan_req("rsync-daemon", exec(&["rsync", "--daemon", "--config=x"])),
+        plan_req("git-abbrev", exec(&["git", "fetch", "--upload=x", "o"])),
+        plan_req("git-grep-O", exec(&["git", "grep", "-Ox", "p"])),
+        plan_req("git-template", exec(&["git", "clone", "--template=t", "o", "d"])),
+        plan_req("git-unlisted", exec(&["git", "remote-ext", "x", "id"])),
+        plan_req("git-dashed", exec(&["git-rebase", "-x", "id", "main"])),
+        plan_req("env-git-external-diff", exec(&["env", "GIT_EXTERNAL_DIFF=x", "git", "diff"])),
+        plan_req("ssh-agent", exec(&["ssh-agent", "true"])),
     ]
 }
 
@@ -128,6 +153,25 @@ fn no_shell_still_runs_structured_requests() {
         assert_eq!(resp.status, Status::Ok, "wrapped-{i}: got {resp:?}");
     }
     assert_eq!(s.prompter.call_count(), 1 + n, "wrapped requests are prompted");
+
+    // git with no command-string option stays structured (#91).
+    if sudo_proxy::executor::resolve_command("git", "/").is_some() {
+        let resp = s.send(&plan_req("git-version", exec(&["git", "--version"])));
+        assert_eq!(resp.status, Status::Ok, "git-version: got {resp:?}");
+        assert_eq!(s.prompter.call_count(), 2 + n, "git --version is prompted");
+    }
+}
+
+/// #91: the rejection gives the command-string reason.
+#[test]
+fn no_shell_message_names_the_command_string() {
+    let s = server(true);
+    let resp = s.send(&plan_req("rsync", exec(&["rsync", "-e", "x", "a", "b"])));
+    let msg = resp.message.as_deref().unwrap_or("");
+    assert!(
+        msg.contains("opaque — runs a command string remotely or through a shell (-e)"),
+        "{msg}"
+    );
 }
 
 /// The rejection names the wrapped program and the wrapper, with the same

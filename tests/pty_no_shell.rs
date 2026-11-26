@@ -17,8 +17,13 @@ fn check(mut d: PtyDaemon) {
     let r = common::send_request(&d.socket, &opaque);
     assert_eq!(r.status, Status::Error, "{r:?}");
     assert!(r.message.as_deref().unwrap_or("").contains("no_shell"), "{r:?}");
-    // A shell behind a wrapper is rejected the same way (#87).
-    for (id, argv) in [("ns-env", &["env", "sh", "-c", "true"][..]), ("ns-timeout", &["timeout", "5", "sh", "-c", "true"])] {
+    // A shell behind a wrapper is rejected the same way (#87), and so is a
+    // command string run remotely or through a shell (#91).
+    for (id, argv) in [
+        ("ns-env", &["env", "sh", "-c", "true"][..]),
+        ("ns-timeout", &["timeout", "5", "sh", "-c", "true"]),
+        ("ns-rsync", &["rsync", "-e", "sh -c true", "a", "b"]),
+    ] {
         let mut req = common::make_req(id, vec![]);
         req.plan = Some(Plan::Exec { argv: argv.iter().map(|s| s.to_string()).collect() });
         let r = common::send_request(&d.socket, &req);
@@ -33,7 +38,7 @@ fn check(mut d: PtyDaemon) {
     assert_eq!(r.status, Status::Ok, "{r:?}");
     assert_eq!(common::decode_stdout(&r), "structured-ok\n");
     let tty = d.capture();
-    for id in ["ns-opaque", "ns-env", "ns-timeout"] {
+    for id in ["ns-opaque", "ns-env", "ns-timeout", "ns-rsync"] {
         assert!(!tty.contains(id), "the opaque request {id} reached the tty");
     }
 }
