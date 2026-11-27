@@ -39,7 +39,11 @@ Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
 7. **#98.1 and #98.3: the other prompt surfaces.** The GUI dialog
    (`src/gui.rs` `format_prompt_text`) renders plans through the new renderer
    and gets the TUI's clip; `display_banner` gets
-   `clip(…, MAX_DISPLAY_CMD_CHARS)`.
+   `clip(…, MAX_DISPLAY_CMD_CHARS)`. Since PR #121 the dialog's `Command:`
+   line is already the TUI's `command_summary` and both dialogs time out;
+   still missing are the Sn4.8 residuals: `Steps:`, the opaque marker,
+   `-> target`/`(user-writable)`, `Env:`, and bounds on the metadata lines
+   and the `Resolves:` block.
 8. **Echo:** optional `shown` + `shown_truncated` in `Response`, the exact
    `Command:` text written to the TTY, for `ok`/`denied`/`timeout` and
    post-validation errors (never pre-validation; omit `Resolves:`). Surfaced by
