@@ -1573,10 +1573,10 @@ fn spawn_err(msg: String) -> RunResult {
 /// either (issue #105). The caller checks the pins ([`check_pins`]) just
 /// before the spawn.
 fn build_command(leaf: &LeafPlan, mode: EscalationMode) -> Result<Command, String> {
-    let resolved = leaf
-        .resolved_bin
-        .as_ref()
-        .ok_or_else(|| format!("command not found: {}", leaf.argv[0]))?;
+    let resolved = leaf.resolved_bin.as_ref().ok_or_else(|| {
+        // Quoted like a `Command:` word (G4.6): this text reaches the TTY.
+        format!("command not found: {}", crate::tui::shquote(&leaf.argv[0]))
+    })?;
     let program = resolved.path.as_path();
     Ok(match &leaf.runas {
         LeafRunAs::Direct => {
@@ -1729,8 +1729,10 @@ fn spawn_argv(leaf: &LeafPlan) -> Result<Vec<String>, String> {
             None if leaf.opaque.is_some() => {}
             None => {
                 return Err(format!(
-                    "stage {}: command not found: {} (run by {via})",
-                    leaf.stage_id, prog.name
+                    "stage {}: command not found: {} (run by {})",
+                    leaf.stage_id,
+                    crate::tui::shquote(&prog.name),
+                    crate::tui::shquote(via)
                 ))
             }
         }

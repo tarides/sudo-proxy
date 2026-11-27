@@ -50,6 +50,17 @@ where that was cheap, and stated precisely where not.
     on the privileged path".
 - The stale `shell_escape` evidence in Sn3.1 and the roadmap is gone;
   the dated 0.11.2 audit has notes instead.
+- Live run against the branch daemon (`sudo-request --plan`, unprivileged):
+  - `FOO=bar true` (plan and `pipeline`) and `time ls` were refused before
+    prompting.
+  - A program path with a double space and one under a directory named
+    `a -> ` showed quoted in `Resolves:`.
+  - `ssh h 'x ) y'` showed `opaque — runs a command string remotely
+    ('x ) y')`.
+  - The run found one more unquoted request word: the result line
+    `error: command not found: …`, shown after an approved request whose
+    program is missing. It is now quoted too, as is the `(run by …)`
+    variant.
 
 ## 2026-11-26 — GUI dialogs show request text literally (#95, PR #121)
 
