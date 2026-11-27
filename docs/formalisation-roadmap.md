@@ -117,13 +117,15 @@ build failures rather than findings in the next audit.
 
 ### Rung 2 — Property-based testing as explicit specifications
 
-sudo-proxy already fuzzes `shell_escape` and `parse_age`. Reframe these as
+sudo-proxy already fuzzes `parse_age`. Reframe such tests as
 **named properties** (proptest / quickcheck) that read like clauses of the
 specification:
 
 - freshness is monotone (a stale timestamp never becomes fresh — regressions
   #11/#14);
-- `shell_escape` round-trips through `/bin/sh` byte-for-byte;
+- an escalated step is spawned as `sudo -- <literal argv>`, never through
+  `sh -c` (G3.1; this replaced the `shell_escape` round-trip property when
+  the structured-plan executor stopped assembling shell strings);
 - every field displayed at the approval prompt is dangerous-char-free;
 - `privileged:true` ⇒ an interactive keypress occurred before exec;
 - unattended unprivileged execution requires both `unattended_eligible` (config-

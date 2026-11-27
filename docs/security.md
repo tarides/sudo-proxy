@@ -24,8 +24,11 @@ rejected with a specific error; agent forwarding goes through the
 dedicated `forward_agent` field instead (see "SSH agent forwarding"
 in [usage.md](usage.md)).
 
-**No shell invocation:** commands are executed via `Command::new(argv[0]).args(…)`,
-never `sh -c`. This prevents `;`, `|`, `&&` injection.
+**No shell invocation:** each step is executed via `Command::new(argv[0]).args(…)`,
+and an escalated step as `sudo -- argv`, never `sudo sh -c`. The daemon never
+builds a shell command line, which prevents `;`, `|`, `&&` injection. A shell
+runs only where the request names one (a `shell` op, or `sh -c` as the
+argv); the prompt flags such a step opaque and the `no_shell` policy refuses it.
 
 **Input validation:** argv and env strings are rejected if they contain control,
 format, separator or default-ignorable characters (Unicode Cc, Cf, Zl, Zp and

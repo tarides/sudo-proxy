@@ -247,6 +247,9 @@ the cap stays covered by CI.
   inputs + targeted vectors (`$(...)`, backticks, `'; …`, embedded quotes), each
   round-tripped through `/bin/sh` byte-for-byte. No break. (`executor.rs:764`; harness
   in `executor::tests::fuzz_shell_escape_roundtrips_through_sh`)
+  *Later change:* the structured-plan executor assembles no shell string, so
+  `shell_escape` and this harness were removed; see G3.1 in
+  [assurance-case.md](assurance-case.md).
 - **Env sanitization.** Hard-reject allowlist (`LANG TZ HOME DEBIAN_FRONTEND TERM
   LC_*`); `LD_PRELOAD`/`LD_*`/`IFS`/`BASH_ENV`/`SSH_AUTH_SOCK` rejected, not stripped;
   login defaults (PATH/USER/LOGNAME) sourced from `getpwuid(geteuid())`, not the
