@@ -427,9 +427,10 @@ pub fn prepare_and_exec_direct(req: &ValidatedRequest, env: &HashMap<String, Str
 //   (`||`) stops at the first success, a `Leaf` runs one process. Every
 //   process shares one plan-wide deadline.
 //
-// No shell is ever assembled on the privileged path: each leaf fork/execs its
-// literal argv, and an escalated leaf is `sudo [-u user] -- argv` / `pkexec
-// [--user user] argv`, never `sudo sh -c`. The daemon never *adds* a shell;
+// No shell command line is ever built (G3.1): each leaf fork/execs its argv
+// word for word (program words replaced by their pinned paths, #105), and an
+// escalated leaf is `sudo [-u user] [K=V…] -- program args` / `pkexec
+// [--user user] env -C dir -- program args`. The daemon never *adds* a shell;
 // a leaf that runs one (an explicit `Shell` node, or an `Exec` of `sh`/`bash`/…,
 // directly or behind a wrapper such as `env`/`nice`/`timeout`), an inline-code
 // interpreter or a program runner is flagged opaque at the prompt and rejected
@@ -2539,7 +2540,8 @@ mod tests {
     // only surviving shell is an explicit `System` leaf, whose script is passed
     // verbatim as a single `-c` argument — nothing is quoted or re-assembled,
     // so there is no escaping grammar left to verify. The structural
-    // "no shell on the privileged path" invariant is verified directly below.
+    // invariant that the daemon adds no shell (G3.1) is checked by the two
+    // tests below.
 
     // === Structured-plan properties (Rung 2) ============================
     use crate::prop::Rng;
@@ -2718,11 +2720,100 @@ mod tests {
         }
     }
 
-    // Spec clause (Rung 2): the no-shell-on-privileged-path invariant, checked
-    // structurally on the built `Command`. An escalated, non-opaque leaf is
-    // spawned as `sudo [-u user] -- <literal argv>` / `pkexec [--user u] argv`
-    // — the real binary is argv[0], and no `sh -c` / `bash -c` wrapper is ever
-    // introduced. The only shell is an explicit `System` leaf.
+    // Spec clause (Rung 2, G3.1): over random leaves (run-as root or a named
+    // user, argv words full of shell metacharacters and option look-alikes
+    // such as `-c` and `--`, random env), the built command is exactly
+    // `sudo [-u user] K=V… -- <resolved program> argv[1..]`, or
+    // `pkexec [--user user] <env> -C <cwd> -- <resolved program> argv[1..]`,
+    // and a direct leaf passes argv[1..] unchanged: no word is added, split,
+    // joined or reordered, so no `sh -c` can appear that the request did not
+    // put there. Escalation helpers missing on this host are skipped, as in
+    // the example test below.
+    #[test]
+    fn prop_built_command_is_the_argv_word_for_word() {
+        const WORD: &[u8] = b"aZ09-_=./ '\"$`;&|<>(){}*?!#~";
+        let mut rng = Rng::new(0xB111_D0C5_u64);
+        for _ in 0..200 {
+            let mut argv = vec!["sysctl".to_string()];
+            for _ in 0..rng.below(6) {
+                argv.push(match rng.below(4) {
+                    0 => ["-c", "--", "-u", "sh -c id", ""][rng.below(5)].to_string(),
+                    _ => rng.string(WORD, 10),
+                });
+            }
+            let mut env = HashMap::new();
+            for _ in 0..rng.below(3) {
+                env.insert(format!("K{}", rng.below(100)), rng.string(WORD, 8));
+            }
+            let runas = match rng.below(3) {
+                0 => LeafRunAs::Root,
+                1 => LeafRunAs::User(format!("u{}", rng.below(10))),
+                _ => LeafRunAs::Direct,
+            };
+            let leaf = LeafPlan {
+                argv: argv.clone(),
+                env: env.clone(),
+                cwd: "/".into(),
+                runas: runas.clone(),
+                stdin: InSpec::Null,
+                stdout: OutSpec::Capture,
+                stderr: ErrSpec::Capture,
+                opaque: None,
+                programs: vec![],
+                resolved_bin: Some(Resolved::fake("/usr/sbin/sysctl")),
+                accepted: Vec::new(),
+                forward_agent: false,
+                inherit: None,
+                stage_id: 0,
+            };
+            let args_of = |c: &Command| -> Vec<String> {
+                c.get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect()
+            };
+            let tail: Vec<String> = std::iter::once("/usr/sbin/sysctl".to_string())
+                .chain(argv[1..].iter().cloned())
+                .collect();
+            match &runas {
+                LeafRunAs::Direct => {
+                    let c = build_command(&leaf, EscalationMode::Direct).unwrap();
+                    assert_eq!(args_of(&c), argv[1..].to_vec(), "direct {argv:?}");
+                }
+                escalated => {
+                    if crate::helper::sudo().is_ok() {
+                        let c = build_command(&leaf, EscalationMode::Sudo).unwrap();
+                        let mut want = Vec::new();
+                        if let LeafRunAs::User(n) = escalated {
+                            want.extend(["-u".to_string(), n.clone()]);
+                        }
+                        want.extend(leaf.env.iter().map(|(k, v)| format!("{k}={v}")));
+                        want.push("--".into());
+                        want.extend(tail.iter().cloned());
+                        assert_eq!(args_of(&c), want, "sudo {argv:?}");
+                    }
+                    if let (Ok(_), Ok(env_bin)) = (crate::helper::pkexec(), trusted_env()) {
+                        let c = build_command(&leaf, EscalationMode::Pkexec).unwrap();
+                        let mut want = Vec::new();
+                        if let LeafRunAs::User(n) = escalated {
+                            want.extend(["--user".to_string(), n.clone()]);
+                        }
+                        want.push(env_bin.to_string_lossy().into_owned());
+                        want.extend(["-C".to_string(), "/".into(), "--".into()]);
+                        want.extend(tail.iter().cloned());
+                        assert_eq!(args_of(&c), want, "pkexec {argv:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Spec clause (Rung 2): the daemon adds no shell (G3.1), checked
+    // structurally on the built `Command`, one example per escalation mode
+    // (the property above covers random leaves). An escalated leaf is spawned
+    // as `sudo [-u user] K=V… -- <resolved program> argv[1..]` or
+    // `pkexec [--user u] <env> -C <cwd> -- <resolved program> argv[1..]`, and
+    // no `sh -c` / `bash -c` wrapper is introduced. A shell runs only where
+    // the plan names one (a `shell` op, or a shell as the program).
     #[test]
     fn escalated_leaf_is_literal_argv_never_a_shell_wrapper() {
         let leaf = |runas: LeafRunAs| LeafPlan {

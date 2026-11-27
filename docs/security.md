@@ -24,11 +24,20 @@ rejected with a specific error; agent forwarding goes through the
 dedicated `forward_agent` field instead (see "SSH agent forwarding"
 in [usage.md](usage.md)).
 
-**No shell invocation:** each step is executed via `Command::new(argv[0]).args(…)`,
-and an escalated step as `sudo -- argv`, never `sudo sh -c`. The daemon never
-builds a shell command line, which prevents `;`, `|`, `&&` injection. A shell
-runs only where the request names one (a `shell` op, or `sh -c` as the
-argv); the prompt flags such a step opaque and the `no_shell` policy refuses it.
+**No shell command line:** each step is executed via
+`Command::new(<pinned path>).args(…)`, and an escalated step as
+`sudo [-u user] [K=V…] -- program args`. The daemon never builds a shell
+command line or wraps a step in `sh -c`, which prevents `;`, `|`, `&&`
+injection. It starts a shell only where the request names one (a `shell` op,
+or a shell as the program, directly or behind a wrapper); the prompt flags
+such a step opaque and the `no_shell` policy refuses it. Programs that start
+a shell themselves are not detected (see "Not detected" in
+[usage.md](usage.md)).
+
+**Program names that read as shell syntax:** a program word the approval
+prompt would show as shell syntax (`FOO=bar`, read as an assignment, or a
+reserved word such as `time`) is rejected; name such a program by path
+(`./FOO=bar`, `/usr/bin/time`).
 
 **Input validation:** argv and env strings are rejected if they contain control,
 format, separator or default-ignorable characters (Unicode Cc, Cf, Zl, Zp and

@@ -17,7 +17,9 @@ security model reduces to one invariant: **nothing privileged runs without a hum
 deliberately approving the exact command shown.**
 
 The core mechanics are sound: command construction never uses a shell on the
-privileged path; the multi-stage `shell_escape` survives heavy fuzzing; the
+privileged path; the multi-stage `shell_escape` survives heavy fuzzing (later
+removed with the structured-plan executor; see the note under "Verified
+controls"); the
 environment allowlist hard-rejects `LD_PRELOAD`/`IFS`/etc.; socket auth
 (`SO_PEERCRED` + 0600), replay protection, and timestamp-freshness all hold up; and
 dependencies carry no known advisories.

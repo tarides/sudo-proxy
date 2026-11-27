@@ -123,9 +123,12 @@ specification:
 
 - freshness is monotone (a stale timestamp never becomes fresh — regressions
   #11/#14);
-- an escalated step is spawned as `sudo -- <literal argv>`, never through
-  `sh -c` (G3.1; this replaced the `shell_escape` round-trip property when
-  the structured-plan executor stopped assembling shell strings);
+- a built command is the argv word for word: an escalated step is spawned
+  as `sudo [-u user] [K=V…] -- <program> <args>`, never through a daemon-built
+  `sh -c` (G3.1, `prop_built_command_is_the_argv_word_for_word`; the
+  `shell_escape` round-trip property was retired with `shell_escape`);
+- `shquote` output reads back, in `sh` and `bash`, as the one word it quotes
+  (G4.6, `prop_shquote_reads_back_as_one_word`);
 - every field displayed at the approval prompt is dangerous-char-free;
 - `privileged:true` ⇒ an interactive keypress occurred before exec;
 - unattended unprivileged execution requires both `unattended_eligible` (config-
@@ -317,24 +320,26 @@ invariant (assurance case **G4.5**):
 It has a syntactic half (the rendering parses to one tree, **Sn4.5a**) and a
 semantic half (that tree means what the executor runs, **Sn4.5b**). Both rest
 on a third claim, **G4.6**: the daemon owns the syntax. Callers send only the
-structured plan; every operator, parenthesis, redirection and quote in the
-command slot is written by the daemon, and a request string appears only as a
-word quoted by `shquote` (or, for a `setenv` key, restricted to a shell name)
-(issue #89). That keeps what the operator has to read
-in a small canonical subset of shell (one quoting style, no comments, every
-group bracketed), and keeps a parser of caller-chosen shell text out of the
-trusted base.
+structured plan (issue #89). Every operator, parenthesis, redirection and
+quote in the command slot is written by the daemon; a request string appears
+only quoted by `shquote`, a `setenv` key only as a shell name, and a program
+word that would read as syntax is rejected. That keeps what the operator has
+to read in a small canonical subset of shell (one quoting style, no comments
+but the daemon's own `# exit N accepted` notes, every group bracketed), and
+keeps a parser of caller-chosen shell text out of the trusted base.
 
 The grouping rules that make this hold are in
 [testing.md](testing.md#how-the-prompt-shows-grouping). Current evidence is
 at Rungs 1–2. What each rung would add:
 
-- **Rung 1.** A review checklist item: any change to `src/tui.rs` rendering, to
-  the plan ops, or to the executor's composition semantics must keep the
-  properties below green; a lint or Semgrep rule against rendering a `Plan`
-  anywhere but through the shared layout, and for G4.6, against a
-  request-derived string reaching the TTY other than through `shquote` or a
-  fixed label line (#89 Phase 1 step 9).
+- **Rung 1 (in place: the by-construction argument of Sn4.6).** To add: a
+  review checklist item: any change to `src/tui.rs` rendering, to the plan
+  ops, or to the executor's composition semantics must keep the properties
+  below green; a lint or Semgrep rule against rendering a `Plan` anywhere but
+  through the shared layout, and for G4.6, against a request-derived string
+  reaching the TTY other than quoted by `shquote` (command slot and
+  `Resolves:`) or, for metadata, sanitized on a fixed label line (#89 Phase 1
+  step 9).
 - **Rung 2 (in place: syntactic half [discharged], semantic half
   [partial]).** Golden layouts; a `bash` parse-tree
   comparison of the two texts over random plans; a differential run of the
@@ -343,9 +348,10 @@ at Rungs 1–2. What each rung would add:
   `with-accepted-exit-codes` is spelled `{ cmd || [ $? -eq N ]; }` (a `case`
   for several codes) and is in both properties; shapes that have no faithful
   shell spelling (a stream redirected twice, `with-stdin-from` on a later pipe
-  stage, relative paths) are rejected at validation instead. Gap to close at
+  stage, relative paths, env keys that are not shell names, program words
+  that read as syntax) are rejected at validation instead. Gap to close at
   this rung, in the semantic half: the differential run does not cover
-  `run-as` or files (a mock spawner comparing traces would, and would settle
+  `run-as` or files other than `/dev/null` (a mock spawner comparing traces would, and would settle
   the failed-`cd` divergence).
 - **Echo (Rung 2, #89 Phase 1 step 8).** The response carries the exact
   `Command:` text shown (`shown`, `shown_truncated`), for approved, denied and

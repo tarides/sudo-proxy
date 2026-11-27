@@ -13,14 +13,10 @@ then Phase 1 with the prompt issues placed where they fit). One PR per step;
 each moves its evidence status in `docs/assurance-case.md`; every
 prompt-touching PR gets the pty goldens plus a live manual run.
 
-Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
-(PR #121); see changelog. Next is step 4, the Phase 1 docs.
+Done: step 1, #91 (PR #117), step 2, #92 (PR #120), step 3, #95
+(PR #121) and step 4, the Phase 1 docs (PR #122); see changelog. Next is
+step 5.
 
-4. **Docs first for Phase 1:** G4.6 *"syntax is daemon-owned"* (no wire field
-   printed verbatim in the command slot); split Sn4.5 into a syntactic half
-   (render ⇒ shell tree) and a semantic half (shell tree ⇒ executor);
-   threat-model rows "caller supplies syntax" (blocked by design) and "unknown
-   plan key silently dropped"; roadmap gains the self-check and echo rungs.
 5. **Render `Steps:`/`Command:` from the compiled plan**, not a second walk of
    `Plan` (`src/tui.rs` `request_layout` → `layout(&req.exec_plan())`). PR #108
    already compiles once, and the prompt receives `PreparedRequest` and reads

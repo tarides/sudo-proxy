@@ -76,15 +76,21 @@ impl Trigger {
     /// The text shown after `opaque — ` at the prompt and in the `no_shell`
     /// rejection.
     pub fn describe(&self) -> String {
+        // The quoted word is a request word: quoted like a `Command:` word
+        // (G4.6), so it cannot pass for the prompt's own words.
+        let q = crate::tui::shquote;
         match self {
-            Trigger::RemoteCommand(w) => format!("runs a command string remotely ({w})"),
+            Trigger::RemoteCommand(w) => format!("runs a command string remotely ({})", q(w)),
             Trigger::RemoteShell => "runs a remote login shell".into(),
-            Trigger::Remote(w) => format!("may run a command string remotely ({w})"),
-            Trigger::Unparsed(w) => format!("not parsed; may run a command string ({w})"),
+            Trigger::Remote(w) => format!("may run a command string remotely ({})", q(w)),
+            Trigger::Unparsed(w) => format!("not parsed; may run a command string ({})", q(w)),
             Trigger::Option(t) => {
-                format!("runs a command string remotely or through a shell ({t})")
+                format!(
+                    "runs a command string remotely or through a shell ({})",
+                    q(t)
+                )
             }
-            Trigger::Shell(t) => format!("runs a command string through a shell ({t})"),
+            Trigger::Shell(t) => format!("runs a command string through a shell ({})", q(t)),
             Trigger::SftpCommands => {
                 "runs sftp commands from a batch file or stdin (! runs a local shell)".into()
             }

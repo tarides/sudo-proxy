@@ -538,9 +538,11 @@ fn shown(text: &str) -> String {
 /// name, stays visible (#101). The marker `…[N more chars hidden]…` sits
 /// between two kept parts, so `/usr/bin/…[N more chars hidden]…/x` cannot be
 /// read as `/usr/bin/x`. A `->` target and the `(user-writable)` marker are
-/// added outside the clipped text.
+/// added outside the clipped text. The escaped path is then quoted like a
+/// `Command:` word (G4.6), so a name holding blanks or ` -> ` cannot pass for
+/// two columns or for a symlink arrow; an ordinary path is left bare.
 fn shown_path(path: &str) -> String {
-    let text = escape_dangerous(path);
+    let text = shquote(&escape_dangerous(path));
     let n = text.chars().count();
     if n <= MAX_DISPLAY_LINE_CHARS {
         return text;
@@ -1245,10 +1247,14 @@ fn write_resolve_block<W: Write>(w: &mut W, views: &[LeafView], style: &Style) -
             // the dedup key and the width, so one long name cannot widen every
             // row. Filesystem-derived text (paths, and the canonical path an
             // `Ambiguous` reason quotes) also goes through `shown` (#86).
-            let name = clip(&prog.name, MAX_DISPLAY_LINE_CHARS);
+            // Quoted like a `Command:` word (G4.6): a name holding blanks
+            // cannot pass for a name followed by a path column.
+            let name = clip(&shquote(&prog.name), MAX_DISPLAY_LINE_CHARS);
             let no_path = prog.runtime_lookup || prog.applet;
             let suffix = match (
-                prog.via.as_deref().map(|v| clip(v, MAX_DISPLAY_LINE_CHARS)),
+                prog.via
+                    .as_deref()
+                    .map(|v| clip(&shquote(v), MAX_DISPLAY_LINE_CHARS)),
                 prog.applet,
                 prog.runtime_lookup,
             ) {
@@ -2994,6 +3000,99 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).into_owned()
     }
 
+    // Spec clause (Rung 2, G4.6): `shquote` is the only way a request string
+    // reaches the command slot, so its output must read back, in `sh` and in
+    // `bash`, as exactly one word equal to the input: no splitting, no
+    // expansion, no quote left open. Every character of the alphabet (the
+    // shell's metacharacters, quotes, blanks, tab included since
+    // `has_dangerous_chars` allows it, and non-ASCII text) is tried alone, at
+    // the start, in the middle and at the end of a word of unquoted-safe
+    // characters, since a word with one character outside the safe set must
+    // be quoted whole; then brace and glob words, then random words. The
+    // shells run in a directory holding files those globs would match.
+    #[test]
+    fn prop_shquote_reads_back_as_one_word() {
+        const ALPHABET: &[&str] = &[
+            "'",
+            "\"",
+            "\\",
+            "$",
+            "`",
+            "!",
+            "*",
+            "?",
+            "[",
+            "]",
+            "{",
+            "}",
+            "(",
+            ")",
+            "<",
+            ">",
+            "|",
+            "&",
+            ";",
+            "#",
+            "~",
+            "^",
+            " ",
+            "\t",
+            "\u{e9}",
+            "\u{65e5}",
+            "\u{a0}",
+            "\u{1f600}",
+        ];
+        let mut words = vec![String::new()];
+        for c in ALPHABET {
+            for t in ["{c}", "{c}x", "x{c}", "s{c}c", "x{c}x"] {
+                words.push(t.replace("{c}", c));
+            }
+        }
+        for w in [
+            "{x,xx}", "s{x,y}c", "[x]", "x[x]", "*", "?x", "~/x", "$((1+1))", "a=$(id)",
+        ] {
+            words.push(w.to_string());
+        }
+        let mut rng = crate::prop::Rng::new(0x005A_07E5_u64);
+        for _ in 0..200 {
+            let mut w = String::new();
+            for _ in 0..rng.below(12) {
+                w.push_str(if rng.below(2) == 0 {
+                    ALPHABET[rng.below(ALPHABET.len())]
+                } else {
+                    [
+                        "a", "Z", "0", "_", "-", "=", "+", ".", "/", ":", "@", "%", ",",
+                    ][rng.below(13)]
+                });
+            }
+            words.push(w);
+        }
+        let dir = std::env::temp_dir().join(format!("shquote-prop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for f in ["x", "xx", "sxc", "syc", "xxx"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        for w in &words {
+            let script = format!("set -- {}; printf '%s\\n%s' \"$#\" \"$1\"", shquote(w));
+            for shell in ["sh", "bash"] {
+                let out = std::process::Command::new(shell)
+                    .arg("-c")
+                    .arg(&script)
+                    .env_clear()
+                    .env("HOME", &dir)
+                    .current_dir(&dir)
+                    .output()
+                    .expect("run shell");
+                assert_eq!(
+                    String::from_utf8_lossy(&out.stdout),
+                    format!("1\n{w}"),
+                    "{shell}: {script}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // Spec clause (Rung 2): the displayed text means what runs. For random
     // side-effect-free plans, the executor's output equals `sh` running the
     // `Command:` line and `sh` running the `Steps:` text.
@@ -3173,6 +3272,37 @@ mod tests {
             assert!(line0.starts_with("sudo echo AAAA"), "{line0}");
             assert!(line0.contains("more chars hidden"), "{line0}");
         }
+    }
+
+    /// G4.6 on the `Resolves:` block: a request word holding blanks is quoted
+    /// in the name column, so `x  /usr/bin/ls` cannot pass for the name `x`
+    /// followed by a resolved path; a path holding ` -> ` is quoted, so it
+    /// cannot pass for a symlink arrow; ordinary names and paths stay bare.
+    #[test]
+    fn resolves_quotes_names_and_paths_that_could_pass_for_columns() {
+        let req = mk_req(
+            Plan::Run {
+                steps: vec![ex(&["x  /usr/bin/ls"]), ex(&["id"])],
+            },
+            false,
+        );
+        let out = plan_output(&req, &style_for(true));
+        let (_, resolves) = split_plan_output(&out);
+        assert!(
+            resolves
+                .iter()
+                .any(|l| l.starts_with("  'x  /usr/bin/ls'  ")),
+            "{resolves:?}"
+        );
+        assert!(
+            resolves.iter().any(|l| l.starts_with("  id ")),
+            "{resolves:?}"
+        );
+        assert_eq!(
+            shown_path("/tmp/a -> /usr/bin/ls"),
+            "'/tmp/a -> /usr/bin/ls'"
+        );
+        assert_eq!(shown_path("/usr/bin/ls"), "/usr/bin/ls");
     }
 
     #[test]

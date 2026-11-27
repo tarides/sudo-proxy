@@ -25,7 +25,11 @@ error rather than an "invalid JSON" misdirection.
 The wire shape is always a list of stages: a single command is
 `[["cmd", "arg"]]`, a pipeline is `[["a"], ["b"], ["c"]]` (equivalent
 to `a | b | c`). The MCP `execute` tool accepts a convenience `argv`
-field and wraps it for you.
+field and wraps it for you. A stage's first word (here, or `argv[0]` of a
+plan `exec`) must not read as shell syntax at the approval prompt: a word
+`NAME=…` or `NAME+=…` whose `NAME` is a shell variable name, or a bash
+reserved word (`if`, `time`, …), is rejected; name such a program by path
+(`./FOO=bar`, `/usr/bin/time`).
 
 Field defaults (every field is optional on the wire, but an `exec`
 request with an empty or missing `pipeline` is rejected at validation):

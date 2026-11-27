@@ -275,7 +275,7 @@ decorative.
 ## Decision 3 — Never build a shell command
 
 The command travels as a **structured list** — program, then arguments — and is
-run *directly*. There is **no shell** on the privileged path.
+run *directly*. There is **no shell command line** built on the privileged path.
 
 - A classic attack: smuggle `; rm -rf /` inside an argument. With a shell, that's
   a second command. Here, it's just a literal string passed to one program.

@@ -618,12 +618,16 @@ impl OpaqueReason {
             .and_then(|h| argv.get(h.argv_index))
             .map(|s| basename(s))
             .unwrap_or("");
+        // Every request word and path in the text is quoted like a `Command:`
+        // word (G4.6), so it cannot pass for the prompt's own words.
+        let q = crate::tui::shquote;
+        let name = q(name);
         match self {
             OpaqueReason::ShellOp | OpaqueReason::Shell { .. } => "resolves only the shell".into(),
             OpaqueReason::InlineCode { flag, .. } if flag == "stdin" => {
                 "reads its program from stdin".into()
             }
-            OpaqueReason::InlineCode { flag, .. } => format!("inline code ({flag})"),
+            OpaqueReason::InlineCode { flag, .. } => format!("inline code ({})", q(flag)),
             OpaqueReason::CommandString { trigger, .. } => trigger.describe(),
             OpaqueReason::Runner { .. } => "runs a program the prompt does not unwrap".into(),
             OpaqueReason::Unparsable { why, .. } => format!("cannot unwrap {name}: {why}"),
@@ -631,13 +635,13 @@ impl OpaqueReason {
                 format!("{name} changes PATH; the program it runs is not resolved")
             }
             OpaqueReason::EnvRejected { name: var, .. } => {
-                format!("{name} sets a name the policy rejects: {var}")
+                format!("{name} sets a name the policy rejects: {}", q(var))
             }
             OpaqueReason::FindPlaceholder { .. } => {
                 format!("{name} runs the files it finds ({{}})")
             }
             OpaqueReason::XargsReplace { replace, .. } => {
-                format!("{name} takes the program from its input ({replace})")
+                format!("{name} takes the program from its input ({})", q(replace))
             }
             OpaqueReason::FromInput {
                 placeholder: None, ..
@@ -645,9 +649,9 @@ impl OpaqueReason {
             OpaqueReason::FromInput {
                 placeholder: Some(p),
                 ..
-            } => format!("{name} takes arguments from run-time input ({p})"),
+            } => format!("{name} takes arguments from run-time input ({})", q(p)),
             OpaqueReason::Ambiguous { canonical, .. } => {
-                format!("ambiguous wrapper: {name} resolves to {canonical}")
+                format!("ambiguous wrapper: {name} resolves to {}", q(canonical))
             }
             OpaqueReason::TooDeep => format!("wrapper chain deeper than {MAX_DEPTH}"),
         }
@@ -738,7 +742,10 @@ pub fn unwrap(
             let why = if word == "--" || word == "-" {
                 format!("{word} where the program is expected")
             } else {
-                format!("option {word} where the program is expected")
+                format!(
+                    "option {} where the program is expected",
+                    crate::tui::shquote(word)
+                )
             };
             return (hops, Some(OpaqueReason::Unparsable { hop: via, why }));
         }
@@ -1045,7 +1052,10 @@ fn parse_wrapper(
     };
     match spec.kind {
         Kind::MultiCall => match argv.get(r.start + 1).filter(|_| r.start + 1 < r.end) {
-            Some(a) if a.starts_with('-') => Err(bad(format!("unsupported dispatcher option {a}"))),
+            Some(a) if a.starts_with('-') => Err(bad(format!(
+                "unsupported dispatcher option {}",
+                crate::tui::shquote(a)
+            ))),
             Some(_) => Ok(Parsed::runs(one(r.start + 1, r.chdir.clone()))),
             None => Ok(Parsed::runs(Vec::new())),
         },
@@ -1078,7 +1088,10 @@ fn parse_wrapper(
                 if spec.numeric_positionals
                     && (p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
                 {
-                    return Err(bad(format!("non-numeric priority {p}")));
+                    return Err(bad(format!(
+                        "non-numeric priority {}",
+                        crate::tui::shquote(p)
+                    )));
                 }
                 i += 1;
             }
@@ -1236,7 +1249,10 @@ fn getopt(
             };
             if spec.long_noarg.contains(&name) {
                 if val.is_some() {
-                    return Err(bad(format!("option --{name} takes no argument")));
+                    return Err(bad(format!(
+                        "option {} takes no argument",
+                        crate::tui::shquote(&format!("--{name}"))
+                    )));
                 }
                 if no_program(name) {
                     return Ok(None);
@@ -1252,13 +1268,21 @@ fn getopt(
                         i += 1;
                         argv[i].as_str()
                     }
-                    None => return Err(bad(format!("option --{name} needs an argument"))),
+                    None => {
+                        return Err(bad(format!(
+                            "option {} needs an argument",
+                            crate::tui::shquote(&format!("--{name}"))
+                        )))
+                    }
                 };
                 on(name, Some(arg))?;
             } else if spec.long_optarg.contains(&name) {
                 on(name, val)?;
             } else {
-                return Err(bad(format!("unsupported option --{name}")));
+                return Err(bad(format!(
+                    "unsupported option {}",
+                    crate::tui::shquote(&format!("--{name}"))
+                )));
             }
             i += 1;
             continue;
@@ -1290,7 +1314,10 @@ fn getopt(
                     consumed_next = true;
                     argv[i + 1].as_str()
                 } else {
-                    return Err(bad(format!("option -{c} needs an argument")));
+                    return Err(bad(format!(
+                        "option {} needs an argument",
+                        crate::tui::shquote(&format!("-{c}"))
+                    )));
                 };
                 on(name, Some(arg))?;
                 break;
@@ -1298,7 +1325,10 @@ fn getopt(
                 on(name, (!attached.is_empty()).then_some(attached))?;
                 break;
             } else {
-                return Err(bad(format!("unsupported option -{c}")));
+                return Err(bad(format!(
+                    "unsupported option {}",
+                    crate::tui::shquote(&format!("-{c}"))
+                )));
             }
         }
         i += if consumed_next { 2 } else { 1 };
@@ -2390,7 +2420,12 @@ mod tests {
         );
         assert_eq!(
             d(&["xargs", "-I{}", "{}"]),
-            "xargs takes the program from its input ({})"
+            "xargs takes the program from its input ('{}')"
+        );
+        // A request word is quoted like a `Command:` word (G4.6).
+        assert_eq!(
+            d(&["ssh", "h", "x ) y"]),
+            "runs a command string remotely ('x ) y')"
         );
         assert_eq!(
             d(&["timeout", "5", "--", "sh"]),

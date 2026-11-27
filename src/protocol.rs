@@ -102,7 +102,8 @@ pub enum ShellProc {
 
 /// A structured execution plan: a recursive tree the daemon executes
 /// **directly** (fork/exec per stage: pipes, redirections, env, run-as,
-/// sequencing) with **no shell on the privileged path**. The load-bearing
+/// sequencing): the daemon builds **no shell command line**, and a shell runs
+/// only where the plan names one (flagged opaque at the prompt). The load-bearing
 /// invariant: *the structure the human approves is literally the structure
 /// that runs.*
 ///
@@ -397,6 +398,7 @@ impl Plan {
                 for a in argv {
                     check(a, "argv element")?;
                 }
+                check_command_word(&argv[0])?;
             }
             Plan::Run { steps } | Plan::Seq { steps } | Plan::Alt { steps } => {
                 if steps.is_empty() {
@@ -622,6 +624,40 @@ pub(crate) fn is_valid_env_name(key: &str) -> bool {
     let mut bytes = key.bytes();
     matches!(bytes.next(), Some(b) if b.is_ascii_alphabetic() || b == b'_')
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// The bash reserved words a bare word can spell in command position. The
+/// others (`!`, `{`, `}`, `[[`, `]]`) hold characters `tui::shquote` always
+/// quotes, so they can never be printed bare.
+const RESERVED_WORDS: &[&str] = &[
+    "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in",
+    "select", "then", "time", "until", "while",
+];
+
+/// Refuse a program word (`argv[0]`) that the prompt would print as shell
+/// syntax rather than as a command name (G4.6). `shquote` leaves letters,
+/// digits, `_`, `=` and `+` unquoted, so `FOO=bar true` would read as an
+/// assignment followed by `true`, and `time ls` as bash's timing keyword,
+/// while the executor runs a program named `FOO=bar` or `time`. Such a name
+/// is still reachable by path (`./FOO=bar`, `/usr/bin/time`).
+fn check_command_word(word: &str) -> Result<(), String> {
+    let name = word
+        .split_once('=')
+        .map(|(n, _)| n.strip_suffix('+').unwrap_or(n));
+    if name.is_some_and(is_valid_env_name) {
+        return Err(
+            "the program name would read as a shell assignment (NAME=…) at the prompt; \
+             name the program by path instead"
+                .to_string(),
+        );
+    }
+    if RESERVED_WORDS.contains(&word) {
+        return Err(format!(
+            "the program name '{word}' is a shell reserved word; name the program by path \
+             instead (e.g. /usr/bin/{word})"
+        ));
+    }
+    Ok(())
 }
 
 /// Desugar a flat `pipeline` into an equivalent `Plan` tree. A single stage
@@ -963,6 +999,7 @@ impl ValidatedRequest {
                     ));
                 }
             }
+            check_command_word(&argv[0])?;
         }
         // Structured-plan path: recursively sanitize every string leaf and
         // enforce the depth / node bounds, using the same `has_dangerous_chars`
@@ -1679,6 +1716,55 @@ mod tests {
             .expect_err("plan unknown key")
             .to_string();
         assert!(err.contains("unknown field `x`"), "{err}");
+    }
+
+    /// G4.6: a program word the prompt would print as shell syntax (an
+    /// assignment, a reserved word) is refused, in a plan at any depth and in
+    /// the flat `pipeline`; the same program named by path, and the same word
+    /// as an argument (`env FOO=bar true`), are accepted.
+    #[test]
+    fn program_word_that_reads_as_shell_syntax_is_rejected() {
+        let validate_plan = |plan: Plan| {
+            ValidatedRequest::validate(Request::new_plan(
+                String::new(),
+                "s".into(),
+                plan,
+                HashMap::new(),
+                String::new(),
+                false,
+                false,
+            ))
+        };
+        let validate_pipeline = |argv: &[&str]| {
+            let mut req = exec_request();
+            req.pipeline = vec![argv.iter().map(|a| a.to_string()).collect()];
+            ValidatedRequest::validate(req)
+        };
+        for bad in [
+            "FOO=bar", "FOO+=bar", "_x=", "A1=b=c", "time", "if", "coproc",
+        ] {
+            let nested = Plan::Run {
+                steps: vec![exec(&["true"]), exec(&[bad, "x"])],
+            };
+            let err = validate_plan(nested).expect_err(bad);
+            assert!(err.contains("program name"), "{bad}: {err}");
+            let err = validate_pipeline(&[bad, "x"]).expect_err(bad);
+            assert!(err.contains("program name"), "{bad}: {err}");
+        }
+        for good in [
+            "./FOO=bar",
+            "/usr/bin/time",
+            "=x",
+            "1A=b",
+            "a-b=c",
+            "timeout",
+            "Time",
+        ] {
+            assert!(validate_plan(exec(&[good, "x"])).is_ok(), "{good}");
+            assert!(validate_pipeline(&[good, "x"]).is_ok(), "{good}");
+        }
+        assert!(validate_plan(exec(&["env", "FOO=bar", "true"])).is_ok());
+        assert!(validate_plan(exec(&["nice", "time"])).is_ok());
     }
 
     /// `effective_privileged` is true for a top-level privileged flag, and also

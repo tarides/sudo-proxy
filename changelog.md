@@ -3,6 +3,54 @@
 Most recent at top. See [docs/formalisation-roadmap.md](docs/formalisation-roadmap.md)
 for the assurance-ladder context behind the security-formalisation entries.
 
+## 2026-11-27 — Syntax is daemon-owned (G4.6); G3.1 restated (#89 step 4, PR #122)
+
+Step 4 of the 1.3.1 plan, which started as docs only. An independent review
+of the PR found claims the code did not meet; they were fixed in the code
+where that was cheap, and stated precisely where not.
+
+- Assurance case:
+  - **G4.6 "syntax is daemon-owned"**: every piece of syntax in `Command:` and
+    `Steps:` is written by the daemon; a request string appears only quoted
+    by `shquote`; a `setenv` key only as a shell name (which `shquote` would
+    leave bare anyway). Widened to `Resolves:`.
+  - Sn4.5 split into Sn4.5a (syntactic, [discharged]) and Sn4.5b (semantic,
+    [partial]).
+  - **G3.1** restated. It said "no shell is invoked on the privileged path",
+    which a privileged `shell` op contradicts (`sudo -- sh -c SCRIPT`). It now
+    says the daemon never builds a shell command line, and starts a shell
+    only where the request names one, flagged opaque and refused under
+    `no_shell`.
+  - Notation: `[discharged]` now allows residuals that name planned
+    strengthening, as Sn4.3 and Sn3.2 already did.
+- Threat model: a B1 row "caller supplies the syntax shown" and attack-tree
+  leaf 3.10; the unknown-plan-key row cites G4.6.
+- Roadmap: the two halves of G4.5 and G4.6, the echo and runtime self-check
+  entries, the step-9 lint at Rung 1.
+- Code, from the review:
+  - A program word that `shquote` leaves bare but a shell reads as syntax
+    is rejected at validation (`check_command_word`). This covers `NAME=…`,
+    `NAME+=…` and the bash reserved words, in a plan and in the flat
+    `pipeline`. Before, `argv: ["FOO=bar", "true"]` showed as
+    `FOO=bar true` ("set FOO, run true") while the daemon ran a program
+    named `FOO=bar`. Such a program is still reachable by path.
+  - `Resolves:` quotes request words and paths with `shquote`: program and
+    wrapper names, the words opaque reasons quote, and filesystem paths
+    (after escaping). A name holding blanks, or a path holding ` -> `, can
+    no longer pass for a second column or a symlink arrow. Ordinary names
+    and paths are unchanged, and no golden moved.
+  - Two properties replace the retired `shell_escape` one:
+    - `prop_shquote_reads_back_as_one_word` (`sh` and `bash`, every
+      metacharacter in fixed positions, brace and glob words where the
+      globs match; checked by mutating `shquote`'s safe set).
+    - `prop_built_command_is_the_argv_word_for_word` (random run-as, hostile
+      argv and env; the `sudo`/`pkexec` argv must equal the expected form
+      exactly).
+  - The MCP schema text and the `Plan` doc comment no longer claim "no shell
+    on the privileged path".
+- The stale `shell_escape` evidence in Sn3.1 and the roadmap is gone;
+  the dated 0.11.2 audit has notes instead.
+
 ## 2026-11-26 — GUI dialogs show request text literally (#95, PR #121)
 
 Step 3 of the 1.3.1 plan. Checked against the upstream sources and live,
