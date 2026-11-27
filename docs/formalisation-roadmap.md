@@ -312,15 +312,29 @@ invariant (assurance case **G4.5**):
 > The `Steps:` text and the `Command:` line parse, as shell, to the same tree,
 > and that tree has the semantics the executor gives the plan.
 
+It has a syntactic half (the rendering parses to one tree, **Sn4.5a**) and a
+semantic half (that tree means what the executor runs, **Sn4.5b**). Both rest
+on a third claim, **G4.6**: the daemon owns the syntax. Callers send only the
+structured plan; every operator, parenthesis, redirection and quote in the
+command slot is written by the daemon, and a request string appears only as a
+word quoted by `shquote` (or, for a `setenv` key, restricted to a shell name)
+(issue #89). That keeps what the operator has to read
+in a small canonical subset of shell (one quoting style, no comments, every
+group bracketed), and keeps a parser of caller-chosen shell text out of the
+trusted base.
+
 The grouping rules that make this hold are in
 [testing.md](testing.md#how-the-prompt-shows-grouping). Current evidence is
-Rung 2 only. What each rung would add:
+at Rungs 1–2. What each rung would add:
 
 - **Rung 1.** A review checklist item: any change to `src/tui.rs` rendering, to
   the plan ops, or to the executor's composition semantics must keep the
   properties below green; a lint or Semgrep rule against rendering a `Plan`
-  anywhere but through the shared layout.
-- **Rung 2 (in place, [partial]).** Golden layouts; a `bash` parse-tree
+  anywhere but through the shared layout, and for G4.6, against a
+  request-derived string reaching the TTY other than through `shquote` or a
+  fixed label line (#89 Phase 1 step 9).
+- **Rung 2 (in place: syntactic half [discharged], semantic half
+  [partial]).** Golden layouts; a `bash` parse-tree
   comparison of the two texts over random plans; a differential run of the
   executor against `sh` on each text over random privilege-free,
   side-effect-free plans; the same parse check over the manual corpus.
@@ -328,14 +342,30 @@ Rung 2 only. What each rung would add:
   for several codes) and is in both properties; shapes that have no faithful
   shell spelling (a stream redirected twice, `with-stdin-from` on a later pipe
   stage, relative paths) are rejected at validation instead. Gap to close at
-  this rung: the differential run does not cover `run-as` or files.
-- **Rung 3.** A Kani harness over bounded plans proving that the layout is
-  total and that rendering then re-parsing with an in-crate shell-grammar
-  parser (for the subset the renderer emits) returns the plan's structure.
-  This removes `bash` as the oracle for the syntactic half.
-- **Rung 5.** A deductive proof (Creusot / Verus) that the renderer refines a
-  shell-semantics model of the emitted subset, and that the executor refines
-  the same model: then display and execution agree by proof, not by sampling.
+  this rung, in the semantic half: the differential run does not cover
+  `run-as` or files (a mock spawner comparing traces would, and would settle
+  the failed-`cd` divergence).
+- **Echo (Rung 2, #89 Phase 1 step 8).** The response carries the exact
+  `Command:` text shown (`shown`, `shown_truncated`), for approved, denied and
+  timed-out requests and post-validation errors, and the MCP server surfaces
+  it. Property: `response.shown == audit.command ==` the text written to the
+  TTY. It lets an honest caller see a rendering it did not expect; it is not a
+  control against a malicious one, which already knows what it sent.
+- **Runtime self-check (Rung 2, then the base for Rung 3; #89 Phase 2).** An
+  in-crate parser for the shell subset the renderer emits, first in tests
+  (`parse(render(P))` equals the layout tree over random plans, cross-checked
+  against `bash` on that subset), then before every prompt: the daemon
+  re-parses the text it is about to show, compares it with the compiled plan,
+  and fails closed on a mismatch, with no bypass flag. The syntactic half then
+  holds per request, not only over sampled plans.
+- **Rung 3 (syntactic half).** A Kani harness over bounded plans proving that
+  the layout is total and that rendering then re-parsing with the in-crate
+  parser returns the plan's structure, and that `shquote` round-trips. This
+  removes `bash` as the oracle for the syntactic half.
+- **Rung 5 (both halves).** A deductive proof (Creusot / Verus) that the
+  renderer refines a shell-semantics model of the emitted subset, and that the
+  executor refines the same model: then display and execution agree by proof,
+  not by sampling.
 - **Rung 6.** The trust assumption stated: the operator's terminal and their
   reading of POSIX shell grouping are outside the proof; the rules keep that
   reading unambiguous (one operator per group, every group bracketed).
@@ -380,7 +410,7 @@ prefix-matching escapes documented in the
 |------|-----------|-------|-------------------|-------------|
 | 0 ✓ | Threat modelling | STRIDE, attack trees ([threat-model.md](threat-model.md)) | A1/A2/A3 per boundary B1–B6 | ST threats |
 | 1 | Review + static analysis | clippy, cargo-audit, cargo-deny, cargo-geiger, Semgrep/MIRAI | display sanitization, `unsafe` surface | EAL1–3 |
-| 2 | Property-based testing | proptest, quickcheck | `shell_escape`, `parse_age`, display fields, policy flag, prompt grouping ≡ execution (G4.5) | EAL3–4 |
+| 2 | Property-based testing | proptest, quickcheck | `parse_age`, display fields, policy flag, prompt grouping ≡ execution (G4.5), daemon-owned syntax (G4.6) | EAL3–4 |
 | 3 | Automated formal | Kani, Flux | parsers (no panic/overflow), validation boundary | EAL4–5 |
 | 4 ✓ | Protocol verification | TLA+/PlusCal (TLC), ProVerif ([`proofs/`](../proofs/)) | approval state machine, replay, SSH path | EAL5–6 |
 | 5 | Deductive verification | Creusot, Verus, Prusti | `validate_request`, dispatch, env allowlist | EAL6–7 |

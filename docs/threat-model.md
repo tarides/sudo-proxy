@@ -52,7 +52,8 @@ invariant at a given boundary are omitted.
 |--------|--------|---------|-----|
 | Spoofing | Caller identity is unauthenticated. | By design any caller is treated as adversarial; safety does not depend on caller identity — the human gate does. | G5, G6.1 |
 | Tampering | Crafted `argv`/`env`/`description` misrepresents intent. | argv/env validation; `description`→`reason` sanitized at the daemon. | G3.3, G4.1 / F1 |
-| Tampering | An unknown or misspelled plan key (`stdin_from` for `with-stdin-from`, `pth` for `path`) is silently dropped, so the plan shown and run is not the one the caller meant, and the rest of it still runs. | `deny_unknown_fields` on every plan node and redirect target (`protocol::wire`), at any depth: the request fails before prompting. `run-as` with `as: root` and a `name` is rejected. `Request` itself stays lenient, for forward compatibility. | #89 (1.3.0) |
+| Tampering | An unknown or misspelled plan key (`stdin_from` for `with-stdin-from`, `pth` for `path`) is silently dropped, so the plan shown and run is not the one the caller meant, and the rest of it still runs. | `deny_unknown_fields` on every plan node and redirect target (`protocol::wire`), at any depth: the request fails before prompting. `run-as` with `as: root` and a `name` is rejected. `Request` itself stays lenient, for forward compatibility. | G4.6 / #89 (1.3.0) |
+| Tampering | Caller supplies the syntax shown: shell text, or a field the prompt would print as syntax, so the `Command:` / `Steps:` text is one the caller wrote (quoting tricks, comments, `$'…'`, another shell's dialect, whitespace or combining look-alikes next to an operator). | Blocked by design: the protocol has no shell-text field. The daemon writes every operator, parenthesis, redirection, `sudo` and `cd`/`export` from the plan and quotes every request string with `shquote`; a `setenv` key is restricted to a shell name. A `shell` op's script is one quoted argument, flagged opaque and refused under `no_shell`. | G4.6 / #89 |
 | Repudiation | No per-request record of what was approved, or of rejected probes (replays, malformed / stale requests). | Audit log, on by default: one record per connection outcome (approved, denied, timeout, unattended, every rejection reason) with an RFC 3339 timestamp, peer UID, id, session, host and, for validated requests, the command — to stderr, an append-only 0600 JSONL file, and syslog (`LOG_AUTHPRIV`). Env values and `reason` are never recorded. | #65 (residual below) |
 | DoS | Oversized / flooding requests block the gate. | 1 MiB request cap, 64 in-flight cap. | G6.4 |
 | Elevation | Obtain root without approval. | Unconditional human gate on `privileged:true`. | G5, G6.1 |
@@ -163,10 +164,14 @@ A  A root command runs that the human did NOT approve
 │   │        [wrapped programs pinned by absolute path; execvp access rule;
 │   │         (user-writable) marker → G4.2 / #101 · mitigated; residual:
 │   │         shebang interpreters and programs looked up later]
-│   └─ 3.9 Markup or a `\n` escape in a field restyles the GUI dialog
-│            (Pango span hides text, kdialog rich text, forged line)
-│            [zenity --no-markup; kdialog text escaped in a <qt> wrapper
-│             → G4.8 / #95 · blocked]
+│   ├─ 3.9 Markup or a `\n` escape in a field restyles the GUI dialog
+│   │        (Pango span hides text, kdialog rich text, forged line)
+│   │        [zenity --no-markup; kdialog text escaped in a <qt> wrapper
+│   │         → G4.8 / #95 · blocked]
+│   └─ 3.10 Write the shell syntax the prompt shows (send shell text, or a
+│            field printed as an operator, a redirection or a quote)
+│            [no shell-text wire field; daemon-written syntax, every request
+│             string quoted → G4.6 / #89 · blocked by design]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host
