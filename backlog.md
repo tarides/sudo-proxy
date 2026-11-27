@@ -56,6 +56,39 @@ Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
 
 Then tag 1.3.1 (rc first if the prompt changes warrant one).
 
+## Assurance case: provenance, answer authenticity, scope (#123)
+
+Issue [#123](https://github.com/tarides/sudo-proxy/issues/123), from a review
+of the advisories and PRs since #89. S1 argues only along the request path,
+but three of the four advisories came from a same-UID process and not through
+a request: the config file (GHSA-xx2m), the human's answer (GHSA-cpmp) and
+helper lookup (GHSA-gx9w). Nine items, worked in the issue's order:
+
+1. S1 gains a provenance branch and a human-channel branch; C2 lists A2's
+   capabilities; G1 states its precondition against A2.
+2. New G8 "the trusted base is the one installed": helpers, config, launcher,
+   daemon process. Code: `sudo-proxy-mcp` finds the terminal (and falls back
+   for `sudo-proxy`) by `PATH` search; resolve it like the helpers, or state
+   the gap as an assumption. The process sub-goal starts with a private check
+   (security flow, not this file or the issue).
+3. G5.5 "the answer is the human's" (`ttyguard` evidence); A1 keeps the
+   display half.
+4. G5.6 "what runs is what was approved" (pinning evidence moved from Sn4.2;
+   residual: files a privileged step reads). Decision: mark user-writable
+   operands of privileged steps?
+5. C1 lists every binary and approval surface; G5.3 gets a `pkexec-cache`
+   exception (decision: qualify, or declare it out of scope).
+6. G4.7 / `no_shell`: decision between a positive allowlist under `no_shell`
+   (recommended) and documenting it as best effort.
+7. Accountability goal for the audit log (#65), or an explicit non-goal.
+8. G2.2 states the `[now − MAX_REQUEST_AGE, now + MAX_FUTURE_SKEW]` window
+   (GHSA-h6r4); Sn2.2 cites Kani, ReplayWindow and `tests/pty_future.rs`; G2
+   names control actions (#63).
+9. Confidentiality: a Context non-goal for output returned to the requester,
+   and a G3 sub-goal for what is guaranteed.
+
+Decisions 4, 5 and 6 go to the user before the docs are written.
+
 ## Automate the manual end-to-end tests through a pty
 
 Issue [#68](https://github.com/tarides/sudo-proxy/issues/68). The checks in
