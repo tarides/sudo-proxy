@@ -2173,12 +2173,15 @@ impl Drop for ForegroundGuard<'_> {
 }
 
 #[derive(Debug)]
-enum WaitError {
+pub(crate) enum WaitError {
     Timeout,
     Io(std::io::Error),
 }
 
-fn wait_with_deadline(child: &mut Child, deadline: Instant) -> Result<ExitStatus, WaitError> {
+pub(crate) fn wait_with_deadline(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<ExitStatus, WaitError> {
     loop {
         match child.try_wait() {
             Ok(Some(s)) => return Ok(s),

@@ -13,12 +13,9 @@ then Phase 1 with the prompt issues placed where they fit). One PR per step;
 each moves its evidence status in `docs/assurance-case.md`; every
 prompt-touching PR gets the pty goldens plus a live manual run.
 
-Done: step 1, #91 (PR #117) and step 2, #92 (PR #120); see changelog.
-Next is #95.
+Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
+(PR #121); see changelog. Next is step 4, the Phase 1 docs.
 
-3. **#95: zenity Pango markup.** `--no-markup`, or escape `&`, `<`, `>` and
-   quotes in every interpolated field; unit test on the text builder, manual
-   check with a real zenity.
 4. **Docs first for Phase 1:** G4.6 *"syntax is daemon-owned"* (no wire field
    printed verbatim in the command slot); split Sn4.5 into a syntactic half
    (render ⇒ shell tree) and a semantic half (shell tree ⇒ executor);
