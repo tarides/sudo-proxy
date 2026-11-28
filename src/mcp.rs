@@ -330,11 +330,7 @@ impl McpProxy {
         };
         let effective_privileged = req.effective_privileged();
 
-        // Delegate-to-Bash (G7): an unprivileged command on the local machine
-        // is refused — the agent's own Bash tool already applies the same
-        // controls, so sudo-proxy running it would only be a second, weaker
-        // gate. sudo-proxy is for privilege escalation and for remote hosts.
-        if target.is_none() && !effective_privileged {
+        if refuses_local_unprivileged(target.as_deref(), effective_privileged) {
             return Ok(error_result(
                 "Refusing to run an unprivileged command on the local machine. \
                  Use your Bash tool instead — it applies the same controls without a \
@@ -1223,6 +1219,15 @@ fn normalize_host(host: Option<&str>) -> Option<String> {
     }
 }
 
+/// Delegate-to-Bash (G7): an unprivileged command on the local machine is
+/// refused — the agent's own Bash tool already applies the same controls, so
+/// sudo-proxy running it would only be a second, weaker gate. sudo-proxy is
+/// for privilege escalation and for remote hosts. `target` is the
+/// [`normalize_host`]d host: `None` for the local machine.
+fn refuses_local_unprivileged(target: Option<&str>, effective_privileged: bool) -> bool {
+    target.is_none() && !effective_privileged
+}
+
 fn socket_for_host(host: Option<&str>) -> PathBuf {
     // Defence-in-depth: even if a caller reaches this with an un-normalized
     // self-alias, resolve it to the local socket rather than a tunnel path.
@@ -1345,6 +1350,38 @@ mod tests {
         assert_eq!(mcp_requester(Some("ai:claude")), "ai:claude");
         assert_eq!(mcp_requester(Some("human")), "ai:human");
         assert_eq!(mcp_requester(Some("aix")), "ai:aix");
+    }
+
+    /// An agent on another machine drives a daemon reached through its own
+    /// tunnel (#101: `host: "workstation"`, `privileged: false`). Only the
+    /// local machine is delegated to the agent's Bash tool.
+    #[test]
+    fn remote_unprivileged_request_is_not_refused() {
+        let refused = |host: Option<&str>, privileged| {
+            refuses_local_unprivileged(normalize_host(host).as_deref(), privileged)
+        };
+        assert!(!refused(Some("workstation"), false));
+        assert!(!refused(Some("workstation"), true));
+        for local in [
+            None,
+            Some("localhost"),
+            Some("user@localhost"),
+            Some("127.0.0.1"),
+        ] {
+            assert!(refused(local, false), "{local:?}");
+            assert!(!refused(local, true), "{local:?}");
+        }
+    }
+
+    /// `execute(host=NAME)` dials this path: users end their own `ssh -R` or
+    /// `ssh -L` tunnel there (docs/usage.md), so renaming it breaks them.
+    #[test]
+    fn remote_host_socket_is_the_tunnel_endpoint() {
+        assert_eq!(
+            socket_for_host(Some("workstation")),
+            default_socket_path().with_file_name("sudo-proxy-workstation.sock")
+        );
+        assert_eq!(socket_for_host(Some("localhost")), default_socket_path());
     }
 
     #[test]

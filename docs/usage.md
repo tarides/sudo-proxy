@@ -323,7 +323,9 @@ changing `.envrc`, restart the daemon.
   marks a program you could have replaced `(user-writable)`.
 - **Not available:** the `a` answer (`--unattended-eligible` is refused), and
   `--host`: a daemon started over ssh has no dev shell. Reach a hand-started
-  daemon through your own tunnel (`ssh -R`) instead. `sudo-proxy-mcp`'s
+  daemon through your own tunnel (`ssh -R`) instead, ending it at the path
+  `sudo-proxy-mcp` dials for `host: NAME` on the agent's machine (see
+  [Remote hosts over SSH](#remote-hosts-over-ssh)). `sudo-proxy-mcp`'s
   `start_server` never passes these flags.
 
 Steps then run with your dev shell's code and credentials: treat a request
@@ -342,12 +344,14 @@ The equivalent without `--host` (useful if only the remote has sudo-proxy
 installed, or for understanding what happens under the hood):
 
 ```bash
-ssh -t -L /tmp/sudo-proxy-HOST.sock:/run/user/$(ssh HOST id -u)/sudo-proxy.sock HOST sudo-proxy
+ssh -t -L "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/sudo-proxy-HOST.sock:/run/user/$(ssh HOST id -u)/sudo-proxy.sock" HOST sudo-proxy
 ```
 
 This allocates a PTY (`-t`), forwards the local socket to the remote
 `sudo-proxy.sock`, and runs `sudo-proxy` on the remote end. Clients then
-connect to `/tmp/sudo-proxy-HOST.sock` locally.
+connect to `$XDG_RUNTIME_DIR/sudo-proxy-HOST.sock` locally: it is the socket
+`sudo-proxy-mcp`'s `execute(host=HOST)` connects to, so a tunnel you set up
+yourself must end there.
 
 ## SSH agent forwarding for `git clone` of private repos
 

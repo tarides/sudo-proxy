@@ -52,6 +52,7 @@ fn setup() -> &'static Setup {
         mkdir755(&bin);
         // A dev-shell tool, found only on the inherited PATH.
         script(&bin.join("devtool"), "exec env");
+        script(&bin.join("whereami"), "echo \"pwd=$(pwd) root=$REPO_ROOT\"");
 
         let sudo_dir = root.join("sudo");
         mkdir755(&sudo_dir);
@@ -78,6 +79,11 @@ fn setup() -> &'static Setup {
 }
 
 fn inherited(patterns: &str) -> Arc<Inherited> {
+    inherited_with(patterns, &[])
+}
+
+/// [`inherited`], with `extra` added to the daemon's environment.
+fn inherited_with(patterns: &str, extra: &[(&str, &str)]) -> Arc<Inherited> {
     let s = setup();
     let env: Vec<(OsString, OsString)> = [
         ("PATH", s.path.as_str()),
@@ -87,6 +93,7 @@ fn inherited(patterns: &str) -> Arc<Inherited> {
         ("PYTHONPATH", "/py"),
     ]
     .iter()
+    .chain(extra)
     .map(|(k, v)| (k.into(), v.into()))
     .collect();
     let uid = unsafe { libc::geteuid() };
@@ -161,6 +168,64 @@ fn unprivileged_step_runs_with_the_inherited_path_and_variables() {
     ));
     let env = env_lines(&common::decode_stdout(&resp));
     assert_eq!(env.get("HOME").map(String::as_str), Some("/req"));
+}
+
+/// The request shape a dev-shell user sends (#101): `chdir` into the
+/// checkout, then a tool found only on the inherited PATH.
+#[test]
+fn chdir_plan_runs_a_dev_shell_tool_with_the_inherited_env() {
+    setup();
+    let server = common::start_test_server(common::TestServerOpts {
+        inherit: Some(inherited("REPO_ROOT,TF_VAR_*")),
+        ..Default::default()
+    });
+    let checkout = tempfile::tempdir_in("/tmp").unwrap();
+    let dir = checkout.path().canonicalize().unwrap();
+    let plan = Plan::Chdir {
+        dir: dir.display().to_string(),
+        body: Box::new(exec(&["whereami"])),
+    };
+    let resp = server.send(&plan_req(plan, HashMap::new()));
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(
+        common::decode_stdout(&resp),
+        format!("pwd={} root=/repo\n", dir.display())
+    );
+}
+
+/// `forward_agent` still hands an inheriting step the agent socket, and
+/// inheritance never supplies one, even with `*` (#101: `git fetch` over
+/// SSH from the dev shell). One test, because `SSH_AUTH_SOCK` is
+/// process-wide: the daemon reads its own value when forwarding.
+#[test]
+fn forward_agent_reaches_an_inheriting_step() {
+    let s = setup();
+    let sentinel = "/tmp/sudo-proxy-test-inherit-agent.sock";
+    std::env::set_var("SSH_AUTH_SOCK", sentinel);
+
+    let server = common::start_test_server(common::TestServerOpts {
+        inherit: Some(inherited("REPO_ROOT,TF_VAR_*")),
+        ..Default::default()
+    });
+    let mut req = plan_req(exec(&["devtool"]), HashMap::new());
+    req.forward_agent = true;
+    let resp = server.send(&req);
+    let env = env_lines(&common::decode_stdout(&resp));
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(env.get("SSH_AUTH_SOCK").map(String::as_str), Some(sentinel));
+    assert_eq!(env.get("REPO_ROOT").map(String::as_str), Some("/repo"));
+    assert_eq!(env.get("PATH").map(String::as_str), Some(s.path.as_str()));
+
+    let server = common::start_test_server(common::TestServerOpts {
+        inherit: Some(inherited_with("*", &[("SSH_AUTH_SOCK", "/elsewhere")])),
+        ..Default::default()
+    });
+    let resp = server.send(&plan_req(exec(&["devtool"]), HashMap::new()));
+    std::env::remove_var("SSH_AUTH_SOCK");
+    let env = env_lines(&common::decode_stdout(&resp));
+    assert_eq!(resp.status, Status::Ok, "{resp:?}");
+    assert_eq!(env.get("OTHER").map(String::as_str), Some("x"), "{env:?}");
+    assert!(!env.contains_key("SSH_AUTH_SOCK"), "{env:?}");
 }
 
 #[test]
