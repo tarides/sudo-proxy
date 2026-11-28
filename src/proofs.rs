@@ -187,7 +187,11 @@ fn has_dangerous_chars_matches_spec_per_char() {
 /// character over the whole `char` domain (no bound since #86: tag characters
 /// sit at U+E0000), so the single-leaf result generalises — `validate_tree` is
 /// a fold applying that same per-char predicate to every string leaf.
-/// `unwind(8)` bounds the single ≤4-byte char decode, the one-element argv
+/// The symbolic character is an argument behind a fixed program word: the gate
+/// is the same for every argv element, while the program-word check (G4.6,
+/// `check_command_word`: string search and reserved-word comparisons) does
+/// not finish on a symbolic word and is covered by unit tests instead.
+/// `unwind(8)` bounds the single ≤4-byte char decode, the two-element argv
 /// loop and the ≤6-step binary search of `is_dangerous_char`.
 #[kani::proof]
 #[kani::unwind(8)]
@@ -198,7 +202,7 @@ fn plan_run_leaf_matches_dangerous_char_spec() {
     let s: &str = c.encode_utf8(&mut buf);
 
     let plan = crate::protocol::Plan::Exec {
-        argv: vec![s.to_string()],
+        argv: vec!["x".to_string(), s.to_string()],
     };
     let mut nodes = 0usize;
     let accepted = plan.validate_tree(0, &mut nodes).is_ok();

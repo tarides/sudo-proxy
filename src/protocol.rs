@@ -626,13 +626,32 @@ pub(crate) fn is_valid_env_name(key: &str) -> bool {
         && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
-/// The bash reserved words a bare word can spell in command position. The
-/// others (`!`, `{`, `}`, `[[`, `]]`) hold characters `tui::shquote` always
-/// quotes, so they can never be printed bare.
-const RESERVED_WORDS: &[&str] = &[
-    "case", "coproc", "do", "done", "elif", "else", "esac", "fi", "for", "function", "if", "in",
-    "select", "then", "time", "until", "while",
-];
+/// Whether `word` is a bash reserved word a bare word can spell in command
+/// position. The others (`!`, `{`, `}`, `[[`, `]]`) hold characters
+/// `tui::shquote` always quotes, so they can never be printed bare. A `match`,
+/// not a slice search: it has no loop for the Kani harnesses to unwind.
+fn is_reserved_word(word: &str) -> bool {
+    matches!(
+        word,
+        "case"
+            | "coproc"
+            | "do"
+            | "done"
+            | "elif"
+            | "else"
+            | "esac"
+            | "fi"
+            | "for"
+            | "function"
+            | "if"
+            | "in"
+            | "select"
+            | "then"
+            | "time"
+            | "until"
+            | "while"
+    )
+}
 
 /// Refuse a program word (`argv[0]`) that the prompt would print as shell
 /// syntax rather than as a command name (G4.6). `shquote` leaves letters,
@@ -651,7 +670,7 @@ fn check_command_word(word: &str) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if RESERVED_WORDS.contains(&word) {
+    if is_reserved_word(word) {
         return Err(format!(
             "the program name '{word}' is a shell reserved word; name the program by path \
              instead (e.g. /usr/bin/{word})"
