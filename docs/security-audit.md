@@ -17,7 +17,9 @@ security model reduces to one invariant: **nothing privileged runs without a hum
 deliberately approving the exact command shown.**
 
 The core mechanics are sound: command construction never uses a shell on the
-privileged path; the multi-stage `shell_escape` survives heavy fuzzing; the
+privileged path; the multi-stage `shell_escape` survives heavy fuzzing (later
+removed with the structured-plan executor; see the note under "Verified
+controls"); the
 environment allowlist hard-rejects `LD_PRELOAD`/`IFS`/etc.; socket auth
 (`SO_PEERCRED` + 0600), replay protection, and timestamp-freshness all hold up; and
 dependencies carry no known advisories.
@@ -247,6 +249,9 @@ the cap stays covered by CI.
   inputs + targeted vectors (`$(...)`, backticks, `'; …`, embedded quotes), each
   round-tripped through `/bin/sh` byte-for-byte. No break. (`executor.rs:764`; harness
   in `executor::tests::fuzz_shell_escape_roundtrips_through_sh`)
+  *Later change:* the structured-plan executor assembles no shell string, so
+  `shell_escape` and this harness were removed; see G3.1 in
+  [assurance-case.md](assurance-case.md).
 - **Env sanitization.** Hard-reject allowlist (`LANG TZ HOME DEBIAN_FRONTEND TERM
   LC_*`); `LD_PRELOAD`/`LD_*`/`IFS`/`BASH_ENV`/`SSH_AUTH_SOCK` rejected, not stripped;
   login defaults (PATH/USER/LOGNAME) sourced from `getpwuid(geteuid())`, not the

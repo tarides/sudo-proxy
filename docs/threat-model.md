@@ -52,7 +52,8 @@ invariant at a given boundary are omitted.
 |--------|--------|---------|-----|
 | Spoofing | Caller identity is unauthenticated. | By design any caller is treated as adversarial; safety does not depend on caller identity — the human gate does. | G5, G6.1 |
 | Tampering | Crafted `argv`/`env`/`description` misrepresents intent. | argv/env validation; `description`→`reason` sanitized at the daemon. | G3.3, G4.1 / F1 |
-| Tampering | An unknown or misspelled plan key (`stdin_from` for `with-stdin-from`, `pth` for `path`) is silently dropped, so the plan shown and run is not the one the caller meant, and the rest of it still runs. | `deny_unknown_fields` on every plan node and redirect target (`protocol::wire`), at any depth: the request fails before prompting. `run-as` with `as: root` and a `name` is rejected. `Request` itself stays lenient, for forward compatibility. | #89 (1.3.0) |
+| Tampering | An unknown or misspelled plan key (`stdin_from` for `with-stdin-from`, `pth` for `path`) is silently dropped, so the plan shown and run is not the one the caller meant, and the rest of it still runs. | `deny_unknown_fields` on every plan node and redirect target (`protocol::wire`), at any depth: the request fails before prompting. `run-as` with `as: root` and a `name` is rejected. `Request` itself stays lenient, for forward compatibility. | G4.6 / #89 (1.3.0) |
+| Tampering | Caller supplies the syntax shown: shell text, or a field the prompt would print as syntax, so the `Command:` / `Steps:` text is one the caller wrote (quoting tricks, comments, `$'…'`, another shell's dialect, whitespace or combining look-alikes next to an operator). | Blocked by design: no wire field is printed as syntax. The daemon writes every operator, parenthesis, redirection, `sudo` and `cd`/`export` from the plan and quotes every request string with `shquote`, in the command slot and in `Resolves:`; a `setenv` key is restricted to a shell name, and a program word a shell would read as an assignment or a reserved word is rejected. A `shell` op's script is one quoted argument, flagged opaque and refused under `no_shell`. | G4.6 / #89 |
 | Repudiation | No per-request record of what was approved, or of rejected probes (replays, malformed / stale requests). | Audit log, on by default: one record per connection outcome (approved, denied, timeout, unattended, every rejection reason) with an RFC 3339 timestamp, peer UID, id, session, host and, for validated requests, the command — to stderr, an append-only 0600 JSONL file, and syslog (`LOG_AUTHPRIV`). Env values and `reason` are never recorded. | #65 (residual below) |
 | DoS | Oversized / flooding requests block the gate. | 1 MiB request cap, 64 in-flight cap. | G6.4 |
 | Elevation | Obtain root without approval. | Unconditional human gate on `privileged:true`. | G5, G6.1 |
@@ -83,7 +84,7 @@ invariant at a given boundary are omitted.
 
 | STRIDE | Threat | Control | Ref |
 |--------|--------|---------|-----|
-| Tampering | Executed command differs from the validated/shown argv (shell injection). | No shell on the privileged path; `Command::new(argv[0]).args(…)`. | G3.1 |
+| Tampering | Executed command differs from the validated/shown argv (shell injection). | No shell command line is ever built: each step execs its argv word for word (`Command::new`/`args`, program words replaced by their pinned paths), an escalated one as `sudo [-u user] [K=V…] -- program args`; the daemon never wraps a step in `sh -c`. A shell the request names itself is opaque and refused under `no_shell`. | G3.1 |
 | Tampering | The file that runs differs from the one checked and shown: renamed over, a symlink retargeted, or the same name added to an earlier `PATH` directory between the prompt and the spawn (up to 60 s, plus time queued behind another prompt). | Each program is resolved once per request and pinned: path, `(dev, ino)` and canonical target, all from one `O_PATH` descriptor. The `no_shell` check, the prompt and the spawn read that pin. The spawn is refused if the path now names another inode; a direct binary is executed through its descriptor (`/proc/self/fd/N`); a program run by a wrapper is passed to it by its pinned absolute path, so the wrapper never searches `PATH`. **Residual:** see 3.7 below. | G4.2 / #105 |
 | Elevation | Environment-based escalation (`LD_PRELOAD`, `IFS`, `BASH_ENV`); agent-socket abuse. | Hard-reject env allowlist for the request's `env` and `setenv`; `privileged + forward_agent` rejected; request `SSH_AUTH_SOCK` rejected. The daemon's own environment reaches a step only by operator opt-in (`--inherit-path` / `--inherit-env`, command line only, #101), and only for a request with no escalated step, in the executor's `Direct` arm; the `sudo` process gets a cleared environment (`TERM`, `LANG`, `LC_*`), so nothing from it reaches a root step. | G3.2 |
 | Tampering | With `--inherit-path`, an inherited variable or a user-writable `PATH` directory (`.venv/bin`, `~/.cargo/bin`) substitutes the code an approved unprivileged step runs. | Startup check of every `PATH` entry (absolute, owned by root or the daemon's user, not writable by group or others except a root-owned sticky directory above the entry or the user's private group); each program pinned (#105) and wrapped programs passed by absolute path; a candidate must be executable by the daemon's user (`execvp`'s rule); `Resolves:` marks `(user-writable)` files; escalated requests resolve on the login `PATH`, and helpers never on any `PATH` (B4 row above). **Residual:** see "Inherited environment" below. | G4.2 / #101 |
@@ -130,7 +131,8 @@ A  A root command runs that the human did NOT approve
 │
 ├─ 2  Make the executed command differ from what was validated  (defeat G3)
 │   ├─ 2.1 Shell-metacharacter injection (;, |, &&, $(...))
-│   │        [no shell; structured argv → G3.1 · blocked]
+│   │        [no shell command line built; argv passed word for word
+│   │         → G3.1 · blocked]
 │   ├─ 2.2 Environment escalation (LD_PRELOAD / IFS / BASH_ENV)
 │   │        [hard-reject env allowlist → G3.2 · blocked]
 │   ├─ 2.3 Control / zero-width / bidi characters in argv
@@ -163,10 +165,15 @@ A  A root command runs that the human did NOT approve
 │   │        [wrapped programs pinned by absolute path; execvp access rule;
 │   │         (user-writable) marker → G4.2 / #101 · mitigated; residual:
 │   │         shebang interpreters and programs looked up later]
-│   └─ 3.9 Markup or a `\n` escape in a field restyles the GUI dialog
-│            (Pango span hides text, kdialog rich text, forged line)
-│            [zenity --no-markup; kdialog text escaped in a <qt> wrapper
-│             → G4.8 / #95 · blocked]
+│   ├─ 3.9 Markup or a `\n` escape in a field restyles the GUI dialog
+│   │        (Pango span hides text, kdialog rich text, forged line)
+│   │        [zenity --no-markup; kdialog text escaped in a <qt> wrapper
+│   │         → G4.8 / #95 · blocked]
+│   └─ 3.10 Write the shell syntax the prompt shows (send shell text, or a
+│            field printed as an operator, a redirection or a quote)
+│            [no wire field printed as syntax; daemon-written syntax, every
+│             request word quoted, program words that read as syntax
+│             rejected → G4.6 / #89 · blocked by design]
 │
 └─ 4  Execute around the gate entirely                      (defeat G5 / G6)
     ├─ 4.1 Direct same-UID socket client bypassing MCP validate_host

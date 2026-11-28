@@ -163,8 +163,8 @@ pub struct ExecuteParams {
     pub pipeline: Option<Vec<Vec<String>>>,
 
     /// Structured execution plan (advanced; mutually exclusive with `argv`/`pipeline`).
-    /// A JSON object the daemon executes *directly* — no shell on the privileged
-    /// path — and renders stage by stage at the approval prompt, so every real
+    /// A JSON object the daemon executes *directly* — it builds no shell command
+    /// line, and a shell runs only where the plan names one — and renders stage by stage at the approval prompt, so every real
     /// binary and per-stage privilege is visible. Prefer this over wrapping
     /// commands in `bash -lc`. Nodes are `op`-tagged, e.g.
     /// {"op":"exec","argv":["sysctl","-w","vm.mmap_rnd_bits=28"]} (one command);
@@ -184,7 +184,9 @@ pub struct ExecuteParams {
     /// Rules: paths in chdir / redirect / with-stdin-from must be absolute; a
     /// stream may be redirected at most once along any path; with-stdin-from is
     /// allowed only on the first stage of a pipe; env keys must be shell
-    /// variable names; run-as names a user, never a `#uid`. Unknown keys are
+    /// variable names; a program word must not read as shell syntax (`FOO=bar`,
+    /// or a reserved word such as `time`: name it by path); run-as names a
+    /// user, never a `#uid`. Unknown keys are
     /// rejected at any depth (`unknown field …`), never silently ignored.
     /// Semantics to plan around: a `run` (`&&`) runs its steps in order and STOPS
     /// at the first failing step — the earlier steps have already run and their

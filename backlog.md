@@ -13,14 +13,10 @@ then Phase 1 with the prompt issues placed where they fit). One PR per step;
 each moves its evidence status in `docs/assurance-case.md`; every
 prompt-touching PR gets the pty goldens plus a live manual run.
 
-Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
-(PR #121); see changelog. Next is step 4, the Phase 1 docs.
+Done: step 1, #91 (PR #117), step 2, #92 (PR #120), step 3, #95
+(PR #121) and step 4, the Phase 1 docs (PR #122); see changelog. Next is
+step 5.
 
-4. **Docs first for Phase 1:** G4.6 *"syntax is daemon-owned"* (no wire field
-   printed verbatim in the command slot); split Sn4.5 into a syntactic half
-   (render ⇒ shell tree) and a semantic half (shell tree ⇒ executor);
-   threat-model rows "caller supplies syntax" (blocked by design) and "unknown
-   plan key silently dropped"; roadmap gains the self-check and echo rungs.
 5. **Render `Steps:`/`Command:` from the compiled plan**, not a second walk of
    `Plan` (`src/tui.rs` `request_layout` → `layout(&req.exec_plan())`). PR #108
    already compiles once, and the prompt receives `PreparedRequest` and reads
@@ -39,7 +35,11 @@ Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
 7. **#98.1 and #98.3: the other prompt surfaces.** The GUI dialog
    (`src/gui.rs` `format_prompt_text`) renders plans through the new renderer
    and gets the TUI's clip; `display_banner` gets
-   `clip(…, MAX_DISPLAY_CMD_CHARS)`.
+   `clip(…, MAX_DISPLAY_CMD_CHARS)`. Since PR #121 the dialog's `Command:`
+   line is already the TUI's `command_summary` and both dialogs time out;
+   still missing are the Sn4.8 residuals: `Steps:`, the opaque marker,
+   `-> target`/`(user-writable)`, `Env:`, and bounds on the metadata lines
+   and the `Resolves:` block.
 8. **Echo:** optional `shown` + `shown_truncated` in `Response`, the exact
    `Command:` text written to the TTY, for `ok`/`denied`/`timeout` and
    post-validation errors (never pre-validation; omit `Resolves:`). Surfaced by
@@ -51,6 +51,39 @@ Done: step 1, #91 (PR #117), step 2, #92 (PR #120) and step 3, #95
    render path.
 
 Then tag 1.3.1 (rc first if the prompt changes warrant one).
+
+## Assurance case: provenance, answer authenticity, scope (#123)
+
+Issue [#123](https://github.com/tarides/sudo-proxy/issues/123), from a review
+of the advisories and PRs since #89. S1 argues only along the request path,
+but three of the four advisories came from a same-UID process and not through
+a request: the config file (GHSA-xx2m), the human's answer (GHSA-cpmp) and
+helper lookup (GHSA-gx9w). Nine items, worked in the issue's order:
+
+1. S1 gains a provenance branch and a human-channel branch; C2 lists A2's
+   capabilities; G1 states its precondition against A2.
+2. New G8 "the trusted base is the one installed": helpers, config, launcher,
+   daemon process. Code: `sudo-proxy-mcp` finds the terminal (and falls back
+   for `sudo-proxy`) by `PATH` search; resolve it like the helpers, or state
+   the gap as an assumption. The process sub-goal starts with a private check
+   (security flow, not this file or the issue).
+3. G5.5 "the answer is the human's" (`ttyguard` evidence); A1 keeps the
+   display half.
+4. G5.6 "what runs is what was approved" (pinning evidence moved from Sn4.2;
+   residual: files a privileged step reads). Decision: mark user-writable
+   operands of privileged steps?
+5. C1 lists every binary and approval surface; G5.3 gets a `pkexec-cache`
+   exception (decision: qualify, or declare it out of scope).
+6. G4.7 / `no_shell`: decision between a positive allowlist under `no_shell`
+   (recommended) and documenting it as best effort.
+7. Accountability goal for the audit log (#65), or an explicit non-goal.
+8. G2.2 states the `[now − MAX_REQUEST_AGE, now + MAX_FUTURE_SKEW]` window
+   (GHSA-h6r4); Sn2.2 cites Kani, ReplayWindow and `tests/pty_future.rs`; G2
+   names control actions (#63).
+9. Confidentiality: a Context non-goal for output returned to the requester,
+   and a G3 sub-goal for what is guaranteed.
+
+Decisions 4, 5 and 6 go to the user before the docs are written.
 
 ## Automate the manual end-to-end tests through a pty
 
